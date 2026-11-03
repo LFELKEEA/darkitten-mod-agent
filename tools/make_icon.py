@@ -6,66 +6,57 @@ from PIL import Image, ImageDraw
 
 ROOT = Path(__file__).resolve().parent.parent
 ASSETS = ROOT / "assets"
+BASE_ICON = ROOT / "tools" / "dkl_base.ico"
+
+
+def load_base(size: int = 512) -> Image.Image:
+    if not BASE_ICON.is_file():
+        raise SystemExit(f"missing base icon: {BASE_ICON}")
+    image = Image.open(BASE_ICON).convert("RGBA")
+    if image.size != (size, size):
+        image = image.resize((size, size), Image.Resampling.NEAREST)
+    return image
+
+
+def draw_pixel_hammer(image: Image.Image, origin: tuple[int, int]) -> None:
+    """在启动器图标的右下角叠一把纯黑像素锤子。"""
+    scale = max(1, round(image.width * 7 / 512))
+    sprite = Image.new("RGBA", (24 * scale, 24 * scale), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(sprite)
+
+    def block(x: int, y: int, width: int = 1, height: int = 1) -> None:
+        draw.rectangle(
+            [x * scale, y * scale, (x + width) * scale - 1, (y + height) * scale - 1],
+            fill=(0, 0, 0, 255),
+        )
+
+    # 锤头：阶梯边缘，左侧留出羊角锤的凹口。
+    block(7, 3, 12, 1)
+    block(5, 4, 14, 1)
+    block(4, 5, 16, 3)
+    block(3, 8, 17, 2)
+    block(4, 10, 15, 1)
+    block(6, 11, 12, 1)
+    for y, x1, x2 in ((8, 4, 8), (9, 5, 9), (10, 6, 10), (11, 7, 11)):
+        draw.rectangle(
+            [x1 * scale, y * scale, (x2 + 1) * scale - 1, (y + 1) * scale - 1],
+            fill=(0, 0, 0, 0),
+        )
+
+    # 锤柄和底部收口。
+    block(10, 10, 4, 1)
+    block(10, 11, 4, 10)
+    block(9, 21, 6, 1)
+    block(10, 22, 4, 1)
+
+    image.alpha_composite(sprite, origin)
 
 
 def build(size: int = 512) -> Image.Image:
-    image = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(image)
-    s = size / 512.0
-    draw.rounded_rectangle(
-        [8 * s, 8 * s, 504 * s, 504 * s], radius=112 * s, fill=(20, 23, 34, 255)
-    )
-    draw.rounded_rectangle(
-        [20 * s, 20 * s, 492 * s, 492 * s],
-        radius=104 * s,
-        outline=(139, 124, 255, 160),
-        width=max(2, int(5 * s)),
-    )
-    # ears
-    draw.polygon(
-        [(132 * s, 196 * s), (156 * s, 82 * s), (238 * s, 158 * s)],
-        fill=(139, 124, 255, 255),
-    )
-    draw.polygon(
-        [(380 * s, 196 * s), (356 * s, 82 * s), (274 * s, 158 * s)],
-        fill=(139, 124, 255, 255),
-    )
-    draw.polygon(
-        [(158 * s, 178 * s), (172 * s, 122 * s), (214 * s, 164 * s)],
-        fill=(60, 52, 120, 255),
-    )
-    draw.polygon(
-        [(354 * s, 178 * s), (340 * s, 122 * s), (298 * s, 164 * s)],
-        fill=(60, 52, 120, 255),
-    )
-    # head
-    draw.ellipse([112 * s, 146 * s, 400 * s, 402 * s], fill=(232, 234, 242, 255))
-    # eyes
-    draw.ellipse([182 * s, 232 * s, 234 * s, 292 * s], fill=(139, 124, 255, 255))
-    draw.ellipse([278 * s, 232 * s, 330 * s, 292 * s], fill=(139, 124, 255, 255))
-    draw.ellipse([199 * s, 248 * s, 221 * s, 276 * s], fill=(20, 23, 34, 255))
-    draw.ellipse([295 * s, 248 * s, 317 * s, 276 * s], fill=(20, 23, 34, 255))
-    # nose + mouth
-    draw.polygon(
-        [(246 * s, 306 * s), (266 * s, 306 * s), (256 * s, 318 * s)],
-        fill=(239, 107, 122, 255),
-    )
-    draw.arc([226 * s, 312 * s, 256 * s, 344 * s], 0, 90, fill=(90, 96, 114, 255), width=int(5 * s))
-    draw.arc([256 * s, 312 * s, 286 * s, 344 * s], 90, 180, fill=(90, 96, 114, 255), width=int(5 * s))
-    # code brackets
-    draw.line(
-        [(148 * s, 350 * s), (116 * s, 376 * s), (148 * s, 402 * s)],
-        fill=(78, 201, 164, 255),
-        width=int(10 * s),
-        joint="curve",
-    )
-    draw.line(
-        [(364 * s, 350 * s), (396 * s, 376 * s), (364 * s, 402 * s)],
-        fill=(78, 201, 164, 255),
-        width=int(10 * s),
-        joint="curve",
-    )
-    draw.line([(286 * s, 344 * s), (226 * s, 408 * s)], fill=(78, 201, 164, 200), width=int(8 * s))
+    image = load_base(size)
+    scale = size / 512.0
+    origin = (int(280 * scale), int(300 * scale))
+    draw_pixel_hammer(image, origin)
     return image
 
 
