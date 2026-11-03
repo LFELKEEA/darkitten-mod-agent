@@ -94,7 +94,7 @@ class ChatView(QScrollArea):
 
         header = QHBoxLayout()
         header.setSpacing(8)
-        who = QLabel("我" if role == "user" else "暗猫")
+        who = QLabel("我" if role == "user" else "恶魔小猫")
         who.setStyleSheet(
             f"color: {theme.COLORS['accent'] if role != 'user' else theme.COLORS['ok']};"
             "font-weight: 600;"
