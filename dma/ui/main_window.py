@@ -97,7 +97,7 @@ class MainWindow(QMainWindow):
         side.setContentsMargins(14, 18, 14, 14)
         side.setSpacing(8)
 
-        logo = QLabel("暗猫")
+        logo = QLabel("恶魔小猫")
         logo.setObjectName("H1")
         logo.setStyleSheet(f"color: {theme.COLORS['accent']};")
         side.addWidget(logo)
@@ -185,7 +185,7 @@ class MainWindow(QMainWindow):
         answer = QMessageBox.question(
             self,
             "创建桌面快捷方式",
-            "第一次打开暗猫模组工坊。要在桌面创建一个快捷方式吗？\n\n"
+            "第一次打开恶魔小猫工坊。要在桌面创建一个快捷方式吗？\n\n"
             "以后也可以在“设置”里重新创建。",
         )
         if answer != QMessageBox.Yes:
@@ -217,7 +217,7 @@ class MainWindow(QMainWindow):
         answer = QMessageBox.question(
             self,
             "发现新版本",
-            f"暗猫模组工坊 {info.version} 已发布（当前 {APP_VERSION}）。\n\n现在查看更新内容？",
+            f"恶魔小猫工坊 {info.version} 已发布（当前 {APP_VERSION}）。\n\n现在查看更新内容？",
         )
         if answer == QMessageBox.Yes:
             self._open_update()
