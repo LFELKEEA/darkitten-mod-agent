@@ -24,6 +24,7 @@ from ..memory import MemoryStore
 from ..skills import SkillStore
 from ..version import APP_NAME_CN, APP_VERSION
 from . import theme
+from .build_page import BuildPage
 from .chat_page import ChatPage
 from .connectors_page import ConnectorsPage
 from .environment_page import EnvironmentPage
@@ -78,6 +79,7 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(1080, 720)
         self._build()
         self.active_project = self.chat_page.project
+        self.build_page.sync_project(self.active_project)
         self.project_changed.connect(self._track_project)
         QTimer.singleShot(800, self._offer_shortcut)
         QTimer.singleShot(2200, self._check_update_startup)
@@ -107,6 +109,7 @@ class MainWindow(QMainWindow):
 
         self.stack = QStackedWidget()
         self.chat_page = ChatPage(self)
+        self.build_page = BuildPage(self)
         self.skills_page = SkillsPage(self)
         self.connectors_page = ConnectorsPage(self)
         self.environment_page = EnvironmentPage(self)
@@ -114,6 +117,7 @@ class MainWindow(QMainWindow):
         self.settings_page = SettingsPage(self)
         pages = [
             ("对话", self.chat_page),
+            ("编译运行", self.build_page),
             ("技能", self.skills_page),
             ("连接器", self.connectors_page),
             ("环境", self.environment_page),
@@ -247,6 +251,10 @@ class MainWindow(QMainWindow):
         self.config.window_width = max(980, self.width())
         self.config.window_height = max(680, self.height())
         self.save_config()
+        try:
+            self.build_page.shutdown()
+        except Exception:
+            pass
         try:
             self.memory.close()
         except Exception:

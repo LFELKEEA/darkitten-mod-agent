@@ -21,10 +21,10 @@ BUILD = ROOT / "build"
 APP_DIST = DIST / "DarkittenModAgent"
 ZIP_NAME = f"DarkittenModAgent-{APP_VERSION}.zip"
 NOTES = [
-    "新增「环境」页：检查 Java、JAVA_HOME、Gradle、Git、工程/数据目录写入、资料源连通性和模型通道，并给出修复建议。",
-    "工具轮数上限默认提高到 32，可调到 999；填 0 表示不限制，适合大型模组工程。",
-    "环境页支持复制检测报告；首次打开自动检测，安装 JDK 或修改环境变量后可重新检测。",
-    "保留 0.1.2 的默认工程目录迁移逻辑：新工程放在程序目录下的 data/projects。",
+    "新增「编译运行」页：一键执行 gradlew build / runClient / runServer / runDatagen，日志实时显示。",
+    "支持停止任务、复制日志、打开 build/libs 和工程目录；关闭工坊会结束正在运行的 Gradle 任务。",
+    "自动识别工程 Wrapper 或系统 Gradle；缺少时提示先在工程目录执行 gradle wrapper。",
+    "页面会提示 Java 版本风险：Java 22 及以上可能不被 Gradle / Loom 支持。",
 ]
 
 
