@@ -1,0 +1,14 @@
+from __future__ import annotations
+
+APP_NAME = "Darkitten Mod Agent"
+APP_NAME_CN = "暗猫模组工坊"
+APP_VERSION = "0.1.0"
+APP_ID = "DarkittenModAgent"
+APP_EXE = "DarkittenModAgent.exe"
+APP_AUTHOR = "LFELKEEA"
+APP_TAGLINE = "只写 Minecraft Java 模组"
+UPDATE_MANIFEST_URL = (
+    "https://lfelkeea.github.io/darkitten-launcher/mod_agent_release.json"
+)
+SITE_URL = "https://lfelkeea.github.io/darkitten-launcher/"
+GITHUB_URL = "https://github.com/LFELKEEA/darkitten-mod-agent"
