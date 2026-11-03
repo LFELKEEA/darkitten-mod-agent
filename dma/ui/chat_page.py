@@ -198,7 +198,7 @@ class ChatPage(QWidget):
         self.chat.clear_messages()
         self.chat.add_message(
             "assistant",
-            "我是暗猫模组工坊，只写 Minecraft Java 模组。\n\n"
+            "我是恶魔小猫工坊，只写 Minecraft Java 模组。\n\n"
             "开始前请先新建一个工程，确认 **MC 版本、加载器、Mod ID** 三项信息。"
             "之后我会按工程结构生成完整文件，所有写入都会先进入右侧待确认列表。",
         )
