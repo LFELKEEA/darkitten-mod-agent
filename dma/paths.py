@@ -67,14 +67,23 @@ def updates_dir() -> Path:
 
 
 def default_project_root() -> Path:
-    documents = Path.home() / "Documents"
-    root = documents / "DarkittenModProjects"
+    # 默认工程放在程序目录的 data/projects 下：
+    # 1. 不占用 C 盘用户目录；2. data 目录在启动器更新时会被保留。
+    root = data_dir() / "projects"
     try:
         root.mkdir(parents=True, exist_ok=True)
     except OSError:
         root = Path.home() / "DarkittenModProjects"
         root.mkdir(parents=True, exist_ok=True)
     return root
+
+
+def legacy_project_roots() -> tuple[Path, ...]:
+    """旧版本默认工程目录，仅用于配置迁移。"""
+    return (
+        Path.home() / "Documents" / "DarkittenModProjects",
+        Path.home() / "DarkittenModProjects",
+    )
 
 
 def desktop_dir() -> Path:
