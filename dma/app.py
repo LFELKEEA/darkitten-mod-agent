@@ -54,7 +54,7 @@ def run() -> int:
         QMessageBox.information(
             None,
             APP_NAME_CN,
-            "暗猫模组工坊已经在运行了，请切换到已打开的窗口。",
+            "恶魔小猫工坊已经在运行了，请切换到已打开的窗口。",
         )
         return 0
 
