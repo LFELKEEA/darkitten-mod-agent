@@ -82,11 +82,15 @@ def make_zip() -> Path:
 
 def write_manifest(archive: Path) -> Path:
     size = archive.stat().st_size
+    tag = f"mod-agent-v{APP_VERSION}"
     manifest = {
         "name": APP_NAME,
         "version": APP_VERSION,
         "released": date.today().isoformat(),
-        "download_url": f"downloads/{archive.name}",
+        "download_url": (
+            f"https://github.com/LFELKEEA/darkitten-mod-agent/releases/download/"
+            f"{tag}/{archive.name}"
+        ),
         "page_url": "https://lfelkeea.github.io/darkitten-launcher/",
         "sha256": sha256(archive),
         "size": size,
