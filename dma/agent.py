@@ -254,18 +254,27 @@ class AgentWorker(QObject):
             self.skill_store,
             memory_context(memory_items),
             self.connector_store.catalog_text(),
+            max_steps=self.config.max_steps,
         )
         messages: list[dict[str, Any]] = [{"role": "system", "content": system}]
         messages.extend(self.history[-self.config.context_turns * 2:])
         messages.append({"role": "user", "content": self.user_text})
         final_text = ""
         run = AgentRun()
+        limit = max(0, int(self.config.max_steps or 0))
+        step = 0
 
-        for step in range(1, self.config.max_steps + 1):
+        while True:
+            if limit > 0 and step >= limit:
+                break
             if self.cancelled:
                 raise AgentError("已取消")
+            step += 1
             run.steps = step
-            self.status.emit(f"正在请求模型（第 {step}/{self.config.max_steps} 轮）…")
+            if limit <= 0:
+                self.status.emit(f"正在请求模型（第 {step} 轮，不限制）…")
+            else:
+                self.status.emit(f"正在请求模型（第 {step}/{limit} 轮）…")
             reply = ai.request_chat(self.config.ai, messages)
             calls = parse_tool_calls(reply)
 

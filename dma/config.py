@@ -16,6 +16,18 @@ PROVIDERS = {
     "ollama": "本地 Ollama",
 }
 
+DEFAULT_MAX_STEPS = 32
+MAX_MAX_STEPS = 999
+
+
+def normalize_max_steps(value: Any) -> int:
+    """0 表示不限制轮数；其余限制在 1..999。"""
+    try:
+        steps = int(value)
+    except (TypeError, ValueError):
+        steps = DEFAULT_MAX_STEPS
+    return max(0, min(MAX_MAX_STEPS, steps))
+
 
 @dataclass
 class AIConfig:
@@ -53,7 +65,7 @@ class Config:
     project_root: str = ""
     last_project: str = ""
     auto_apply: bool = False
-    max_steps: int = 8
+    max_steps: int = DEFAULT_MAX_STEPS
     context_turns: int = 12
     shortcut_offered: bool = False
     update_url: str = UPDATE_MANIFEST_URL
@@ -81,7 +93,7 @@ class Config:
             project_root=root,
             last_project=self.last_project.strip(),
             auto_apply=bool(self.auto_apply),
-            max_steps=max(1, min(20, int(self.max_steps or 8))),
+            max_steps=normalize_max_steps(self.max_steps),
             context_turns=max(2, min(40, int(self.context_turns or 12))),
             shortcut_offered=bool(self.shortcut_offered),
             update_url=(self.update_url or UPDATE_MANIFEST_URL).strip(),

@@ -155,6 +155,22 @@ class AgentLoopTests(TempDataCase):
             run = worker._loop()
         self.assertIn("轮数上限", run.text)
 
+    def test_unlimited_steps_can_exceed_old_cap(self) -> None:
+        project = make_project(self)
+        worker = self.worker(project)
+        worker.config.max_steps = 0
+        tool = '```tool\n{"tool":"list_files","path":"."}\n```'
+        calls: list[int] = []
+
+        def fake(ai, messages):
+            calls.append(1)
+            return tool if len(calls) <= 25 else "大工程完成。"
+
+        with mock.patch("dma.agent.ai.request_chat", side_effect=fake):
+            run = worker._loop()
+        self.assertEqual(run.steps, 26)
+        self.assertEqual(run.text, "大工程完成。")
+
     def test_memory_tool(self) -> None:
         project = make_project(self)
         worker = self.worker(project)

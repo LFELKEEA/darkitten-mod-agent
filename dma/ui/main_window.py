@@ -26,6 +26,7 @@ from ..version import APP_NAME_CN, APP_VERSION
 from . import theme
 from .chat_page import ChatPage
 from .connectors_page import ConnectorsPage
+from .environment_page import EnvironmentPage
 from .memory_page import MemoryPage
 from .settings_page import SettingsPage
 from .skills_page import SkillsPage
@@ -108,12 +109,14 @@ class MainWindow(QMainWindow):
         self.chat_page = ChatPage(self)
         self.skills_page = SkillsPage(self)
         self.connectors_page = ConnectorsPage(self)
+        self.environment_page = EnvironmentPage(self)
         self.memory_page = MemoryPage(self)
         self.settings_page = SettingsPage(self)
         pages = [
             ("对话", self.chat_page),
             ("技能", self.skills_page),
             ("连接器", self.connectors_page),
+            ("环境", self.environment_page),
             ("记忆库", self.memory_page),
             ("设置", self.settings_page),
         ]

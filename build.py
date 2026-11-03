@@ -21,9 +21,10 @@ BUILD = ROOT / "build"
 APP_DIST = DIST / "DarkittenModAgent"
 ZIP_NAME = f"DarkittenModAgent-{APP_VERSION}.zip"
 NOTES = [
-    "默认工程目录改到程序目录下的 data/projects，不再占用 C 盘用户目录。",
-    "旧版本默认的 Documents\\DarkittenModProjects 会自动迁移到新目录；已有工程文件不自动搬动。",
-    "工程数据继续放在 data 下，启动器更新模组工坊时会完整保留。",
+    "新增「环境」页：检查 Java、JAVA_HOME、Gradle、Git、工程/数据目录写入、资料源连通性和模型通道，并给出修复建议。",
+    "工具轮数上限默认提高到 32，可调到 999；填 0 表示不限制，适合大型模组工程。",
+    "环境页支持复制检测报告；首次打开自动检测，安装 JDK 或修改环境变量后可重新检测。",
+    "保留 0.1.2 的默认工程目录迁移逻辑：新工程放在程序目录下的 data/projects。",
 ]
 
 

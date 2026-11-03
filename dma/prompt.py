@@ -58,7 +58,7 @@ TOOL_PROTOCOL = """【工程工具协议】
 {"tool":"read_file","path":"src/main/java/com/example/ExampleMod.java"}
 ```
 
-宿主会执行工具，把结果作为下一条消息发给你，然后你继续。最多 8 轮。
+宿主会执行工具，把结果作为下一条消息发给你，然后你继续。工具轮数上限由宿主设置决定，尽量一次把任务做完，不要为了凑轮数重复读取同一文件或反复试探。
 可用工具：
 - list_files: {"tool":"list_files","path":".","depth":2}
 - read_file: {"tool":"read_file","path":"相对路径"}
@@ -99,8 +99,15 @@ def build_system_prompt(
     skill_store: SkillStore,
     memory_text: str = "",
     connector_text: str = "",
+    max_steps: int = 0,
 ) -> str:
-    parts = [BASE_RULES, TOOL_PROTOCOL, project_block(project)]
+    limit = "不限制" if max_steps <= 0 else f"最多 {max_steps} 轮"
+    parts = [
+        BASE_RULES,
+        TOOL_PROTOCOL,
+        f"【工具轮数】本次任务{limit}工具调用。大工程可以分多轮完成，但不要重复调用相同工具做同样的检查。",
+        project_block(project),
+    ]
     parts.append("【技能目录】\n" + skill_store.catalog_text())
     relevant: list[str] = ["delivery-checklist", "client-server-split"]
     if project is not None:

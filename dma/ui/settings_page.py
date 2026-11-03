@@ -172,7 +172,9 @@ class SettingsPage(QWidget):
         root_layout.addWidget(pick)
         self.auto_apply = QCheckBox("生成后不询问，直接写入工程文件（仍会备份）")
         self.max_steps = QSpinBox()
-        self.max_steps.setRange(1, 20)
+        self.max_steps.setRange(0, 999)
+        self.max_steps.setSpecialValueText("不限制")
+        self.max_steps.setToolTip("0 表示不限制工具调用轮数；大工程建议 32 以上。")
         self.context_turns = QSpinBox()
         self.context_turns.setRange(2, 40)
         self.font_size = QSpinBox()
@@ -185,6 +187,9 @@ class SettingsPage(QWidget):
         behavior_layout.addWidget(self.auto_apply)
         behavior_layout.addWidget(
             tiny("默认关闭自动写入。关闭时，助手生成的文件先进入右侧待确认列表。")
+        )
+        behavior_layout.addWidget(
+            tiny("工具轮数上限填 0 表示不限制。大工程建议 32～64；不限制时请留意模型费用和输出时间。")
         )
         root.addWidget(behavior)
 

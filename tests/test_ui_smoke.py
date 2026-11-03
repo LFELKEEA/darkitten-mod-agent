@@ -13,6 +13,7 @@ from .base import TempDataCase
 class UiSmokeTests(TempDataCase):
     @classmethod
     def setUpClass(cls) -> None:
+        os.environ.setdefault("DMA_ENV_AUTORUN", "0")
         cls.app = QApplication.instance() or QApplication([])
 
     def test_main_window_builds(self) -> None:
@@ -23,8 +24,9 @@ class UiSmokeTests(TempDataCase):
         window = MainWindow()
         window.show()
         self.app.processEvents()
-        self.assertEqual(window.stack.count(), 5)
+        self.assertEqual(window.stack.count(), 6)
         self.assertIsNotNone(window.chat_page)
+        self.assertIsNotNone(window.environment_page)
         for index in range(window.stack.count()):
             window.stack.setCurrentIndex(index)
             self.app.processEvents()
