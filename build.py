@@ -21,9 +21,9 @@ BUILD = ROOT / "build"
 APP_DIST = DIST / "DarkittenModAgent"
 ZIP_NAME = f"DarkittenModAgent-{APP_VERSION}.zip"
 NOTES = [
-    "中文名称改为「恶魔小猫工坊」，更贴近启动器的恶魔小猫形象。",
-    "图标换成启动器同款恶魔小猫，并在右下角加入黑色像素锤子。",
-    "功能与数据目录保持不变：技能、连接器、记忆库和已有工程记录都会继续保留。",
+    "默认工程目录改到程序目录下的 data/projects，不再占用 C 盘用户目录。",
+    "旧版本默认的 Documents\\DarkittenModProjects 会自动迁移到新目录；已有工程文件不自动搬动。",
+    "工程数据继续放在 data 下，启动器更新模组工坊时会完整保留。",
 ]
 
 
