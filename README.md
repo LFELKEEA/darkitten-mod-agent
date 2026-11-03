@@ -2,7 +2,7 @@
 
 只写 Minecraft Java 模组的独立桌面 Agent。基于 PySide6，自带对话工作台、技能、连接器和记忆库，可从下载站、GitHub 与 Darkitten 启动器获取，并支持自动更新。
 
-当前版本：`0.1.1`
+当前版本：`0.1.2`
 
 ## 功能
 
@@ -53,6 +53,7 @@ data/
   memory.db          记忆库
   connectors.json    连接器与请求头
   skills/            技能 Markdown
+  projects/          默认工程目录（新建工程放在这里）
   projects.json      最近工程
   sessions/          每个工程的对话记录
   backups/           覆盖文件前的自动备份
