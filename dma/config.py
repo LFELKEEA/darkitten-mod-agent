@@ -65,6 +65,17 @@ class Config:
         root = self.project_root.strip()
         if not root:
             root = str(paths.default_project_root())
+        else:
+            try:
+                candidate = Path(root).expanduser().resolve(strict=False)
+                legacy = {
+                    item.expanduser().resolve(strict=False)
+                    for item in paths.legacy_project_roots()
+                }
+                if candidate in legacy:
+                    root = str(paths.default_project_root())
+            except OSError:
+                pass
         return Config(
             ai=self.ai.normalized(),
             project_root=root,
