@@ -1,8 +1,8 @@
-# 暗猫模组工坊（Darkitten Mod Agent）
+# 恶魔小猫工坊（Darkitten Mod Agent）
 
 只写 Minecraft Java 模组的独立桌面 Agent。基于 PySide6，自带对话工作台、技能、连接器和记忆库，可从下载站、GitHub 与 Darkitten 启动器获取，并支持自动更新。
 
-当前版本：`0.1.0`
+当前版本：`0.1.1`
 
 ## 功能
 
@@ -91,7 +91,7 @@ python build.py
 产物：
 
 - `dist/DarkittenModAgent/`：PyInstaller onedir 目录，包含 `DarkittenModAgent.exe` 和 `_internal/`。
-- `dist/DarkittenModAgent-0.1.0.zip`：上传到下载站/GitHub Release 的更新包。
+- `dist/DarkittenModAgent-<版本>.zip`：上传到下载站/GitHub Release 的更新包。
 - `dist/mod_agent_release.json`：更新清单，包含版本、大小、SHA-256 与更新说明。
 
 发布时把 ZIP 上传到 GitHub Release（标签 `mod-agent-v<版本>`），把清单放到站点根目录；清单里的 `download_url` 指向 Release 资源，启动器读取同一份清单即可下载和自动更新。
