@@ -94,7 +94,7 @@ python build.py
 - `dist/DarkittenModAgent-0.1.0.zip`：上传到下载站/GitHub Release 的更新包。
 - `dist/mod_agent_release.json`：更新清单，包含版本、大小、SHA-256 与更新说明。
 
-发布时把 ZIP 放到站点 `downloads/`，把清单放到站点根目录，并确保 `version.py` 中的更新地址指向该清单。
+发布时把 ZIP 上传到 GitHub Release（标签 `mod-agent-v<版本>`），把清单放到站点根目录；清单里的 `download_url` 指向 Release 资源，启动器读取同一份清单即可下载和自动更新。
 
 ## 边界
 
