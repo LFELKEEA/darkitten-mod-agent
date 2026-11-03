@@ -21,10 +21,9 @@ BUILD = ROOT / "build"
 APP_DIST = DIST / "DarkittenModAgent"
 ZIP_NAME = f"DarkittenModAgent-{APP_VERSION}.zip"
 NOTES = [
-    "首个公开版本：独立运行的 Minecraft Java 模组开发 Agent。",
-    "内置 Fabric / NeoForge / Architectury 工程工作流，强制确认 MC 版本、加载器和 Mod ID。",
-    "支持技能、连接器、记忆库；生成文件默认先进入待写入列表，覆盖前自动备份。",
-    "首次启动可创建桌面快捷方式，支持从下载站清单检查并自动更新。",
+    "中文名称改为「恶魔小猫工坊」，更贴近启动器的恶魔小猫形象。",
+    "图标换成启动器同款恶魔小猫，并在右下角加入黑色像素锤子。",
+    "功能与数据目录保持不变：技能、连接器、记忆库和已有工程记录都会继续保留。",
 ]
 
 
