@@ -5,6 +5,7 @@ import os
 import re
 import shutil
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -19,8 +20,12 @@ from . import deps, envcheck, gradle, paths, wrapper
 USER_AGENT = "DarkittenModAgent/0.1 (+https://lfelkeea.github.io/darkitten-launcher/)"
 DOWNLOAD_TIMEOUT = 30
 CHUNK = 1024 * 1024
+RANGE_CONNECTIONS = 6
+RANGE_MIN_SIZE = 8 * 1024 * 1024
+RANGE_MIN_CHUNK = 1024 * 1024
 
 GRADLE_MIRROR = "https://repo.huaweicloud.com/gradle/{name}"
+GRADLE_MIRROR_ALT = "https://mirrors.cloud.tencent.com/gradle/{name}"
 TEMURIN_INDEX = (
     "https://mirrors.ustc.edu.cn/adoptium/releases/temurin{major}-binaries/LatestRelease/"
 )
@@ -32,9 +37,14 @@ ADOPTIUM_API = (
 
 JAVA_SEARCH_FILE = "java.exe" if os.name == "nt" else "java"
 Log = Callable[[str], None]
+Progress = Callable[[int, int], None]
 
 
 class ToolchainError(Exception):
+    pass
+
+
+class DownloadCancelled(ToolchainError):
     pass
 
 
@@ -110,53 +120,244 @@ def _fetch_text(url: str, timeout: int = 20, limit: int = 2_000_000) -> str:
     return raw[:limit].decode("utf-8", "replace")
 
 
-def _download_one(url: str, dest: Path, log: Log | None) -> None:
+def _probe_ranges(url: str, timeout: int = 10) -> int | None:
+    """探测服务器是否支持 Range，返回文件总大小。"""
+    request = urllib.request.Request(
+        url, headers={"User-Agent": USER_AGENT, "Range": "bytes=0-0"}
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            if int(getattr(response, "status", 200)) != 206:
+                return None
+            response.read(1)
+            content_range = response.headers.get("Content-Range") or ""
+            match = re.search(r"/(\d+)\s*$", content_range)
+            return int(match.group(1)) if match else None
+    except Exception:  # noqa: BLE001 - 探测失败就退回单连接
+        return None
+
+
+def _download_ranges(
+    url: str,
+    part: Path,
+    total: int,
+    log: Log | None,
+    progress: Progress | None = None,
+    cancel: threading.Event | None = None,
+) -> None:
+    """把文件切成多段并发下载，合并到 part。"""
+    connections = max(1, min(RANGE_CONNECTIONS, total // (2 * RANGE_MIN_CHUNK)))
+    chunk = (total + connections - 1) // connections
+    pieces = [part.with_name(f"{part.name}.{index}") for index in range(connections)]
+    for piece in pieces:
+        piece.unlink(missing_ok=True)
+    part.unlink(missing_ok=True)
+    state = {"done": 0, "error": None, "cancelled": False}
+    guard = threading.Lock()
+
+    def worker(index: int, start: int, end: int) -> None:
+        length = end - start + 1
+        piece = pieces[index]
+        for attempt in range(3):
+            try:
+                if cancel is not None and cancel.is_set():
+                    raise DownloadCancelled("已取消")
+                request = urllib.request.Request(
+                    url,
+                    headers={
+                        "User-Agent": USER_AGENT,
+                        "Range": f"bytes={start}-{end}",
+                    },
+                )
+                with urllib.request.urlopen(request, timeout=DOWNLOAD_TIMEOUT) as response:
+                    if int(getattr(response, "status", 200)) != 206:
+                        raise ToolchainError("服务器不支持分段下载")
+                    received = 0
+                    with piece.open("wb") as handle:
+                        while received < length:
+                            if cancel is not None and cancel.is_set():
+                                raise DownloadCancelled("已取消")
+                            data = response.read(min(CHUNK, length - received))
+                            if not data:
+                                break
+                            handle.write(data)
+                            received += len(data)
+                            with guard:
+                                state["done"] += len(data)
+                if received == length:
+                    return
+                raise ToolchainError(f"分段 {index} 不完整（{received} / {length}）")
+            except DownloadCancelled:
+                with guard:
+                    state["cancelled"] = True
+                    state["error"] = "已取消"
+                return
+            except Exception:  # noqa: BLE001 - 换一个连接重试
+                if attempt < 2:
+                    time.sleep(0.5 * (attempt + 1))
+                    with guard:
+                        state["done"] -= min(length, piece.stat().st_size if piece.is_file() else 0)
+        with guard:
+            state["error"] = f"分段 {index} 下载失败"
+        raise ToolchainError(f"分段 {index} 下载失败")
+
+    threads = []
+    for index, piece in enumerate(pieces):
+        start = index * chunk
+        if start >= total:
+            break
+        end = min(total - 1, start + chunk - 1)
+        thread = threading.Thread(target=worker, args=(index, start, end), daemon=True)
+        thread.start()
+        threads.append(thread)
+
+    started = time.monotonic()
+    last_report = 0.0
+    while any(thread.is_alive() for thread in threads):
+        for thread in threads:
+            thread.join(timeout=0.2)
+        if cancel is not None and cancel.is_set() and not state["cancelled"]:
+            with guard:
+                state["cancelled"] = True
+                state["error"] = "已取消"
+        now = time.monotonic()
+        if now - last_report < 2.0:
+            continue
+        last_report = now
+        with guard:
+            done = state["done"]
+        if progress is not None:
+            progress(done, total)
+        speed = done / max(now - started, 0.05) / 1024 / 1024
+        percent = done * 100 // total if total else 0
+        _log(
+            log,
+            f"[准备] 下载 {percent}% · {_human(done)} / {_human(total)} · {speed:.1f} MB/s",
+        )
+    for thread in threads:
+        thread.join()
+    if state["error"]:
+        for piece in pieces:
+            piece.unlink(missing_ok=True)
+        part.unlink(missing_ok=True)
+        if state["cancelled"]:
+            raise DownloadCancelled("已取消")
+        raise ToolchainError(state["error"])
+
+    part.parent.mkdir(parents=True, exist_ok=True)
+    with part.open("wb") as target:
+        for index, piece in enumerate(pieces):
+            start = index * chunk
+            if start >= total:
+                break
+            with piece.open("rb") as handle:
+                shutil.copyfileobj(handle, target, CHUNK)
+            piece.unlink(missing_ok=True)
+    if part.stat().st_size != total:
+        part.unlink(missing_ok=True)
+        raise ToolchainError("分段合并后大小不一致")
+    if progress is not None:
+        progress(total, total)
+
+
+def _download_one(
+    url: str,
+    dest: Path,
+    log: Log | None,
+    progress: Progress | None = None,
+    cancel: threading.Event | None = None,
+) -> None:
+    if cancel is not None and cancel.is_set():
+        raise DownloadCancelled("已取消")
     dest.parent.mkdir(parents=True, exist_ok=True)
     part = dest.with_name(dest.name + ".part")
-    resume = part.stat().st_size if part.is_file() else 0
-    headers = {"User-Agent": USER_AGENT}
-    if resume:
-        headers["Range"] = f"bytes={resume}-"
-    request = urllib.request.Request(url, headers=headers)
-    try:
-        response = urllib.request.urlopen(request, timeout=DOWNLOAD_TIMEOUT)
-    except urllib.error.HTTPError as exc:
-        if exc.code == 416 and resume:
+
+    total = _probe_ranges(url)
+    if total is not None and total >= RANGE_MIN_SIZE:
+        _log(log, f"[准备] 启用多连接下载（{_human(total)}，{RANGE_CONNECTIONS} 条连接）")
+        try:
+            _download_ranges(url, part, total, log, progress=progress, cancel=cancel)
+        except DownloadCancelled:
+            raise
+        except Exception as exc:  # noqa: BLE001 - 分段失败就退回单连接
+            _log(log, f"[准备] 多连接下载失败，改用单连接：{exc}")
+        else:
             part.replace(dest)
             return
-        raise
 
-    with response:
-        status = getattr(response, "status", 200)
-        length = response.headers.get("Content-Length")
-        if resume and status != 206:
-            resume = 0
-        total = int(length) + resume if length else 0
-        mode = "ab" if resume else "wb"
-        done = resume
-        started = time.monotonic()
-        last_report = 0.0
-        with part.open(mode) as handle:
-            while True:
-                chunk = response.read(CHUNK)
-                if not chunk:
-                    break
-                handle.write(chunk)
-                done += len(chunk)
-                now = time.monotonic()
-                if now - last_report >= 2.0:
-                    last_report = now
-                    elapsed = max(0.001, now - started)
-                    speed = (done - resume) / elapsed / 1024 / 1024
-                    percent = f"{done * 100 // total}% · " if total else ""
-                    total_text = f" / {_human(total)}" if total else ""
-                    _log(
-                        log,
-                        f"[准备] 下载 {percent}{_human(done)}{total_text} · {speed:.1f} MB/s",
-                    )
+    last: Exception | None = None
+    for attempt in range(3):
+        if cancel is not None and cancel.is_set():
+            raise DownloadCancelled("已取消")
+        resume = part.stat().st_size if part.is_file() else 0
+        headers = {"User-Agent": USER_AGENT}
+        if resume:
+            headers["Range"] = f"bytes={resume}-"
+        request = urllib.request.Request(url, headers=headers)
+        try:
+            response = urllib.request.urlopen(request, timeout=DOWNLOAD_TIMEOUT)
+        except urllib.error.HTTPError as exc:
+            if exc.code == 416 and resume:
+                part.replace(dest)
+                return
+            if exc.code in (403, 404, 410):
+                raise ToolchainError(f"HTTP {exc.code}") from exc
+            last = exc
+            time.sleep(0.5 * (attempt + 1))
+            continue
+        except Exception as exc:  # noqa: BLE001
+            last = exc
+            time.sleep(0.5 * (attempt + 1))
+            continue
+
+        with response:
+            status = getattr(response, "status", 200)
+            length = response.headers.get("Content-Length")
+            if resume and status != 206:
+                resume = 0
+            total = int(length) + resume if length else 0
+            mode = "ab" if resume else "wb"
+            done = resume
+            started = time.monotonic()
+            last_report = 0.0
+            try:
+                with part.open(mode) as handle:
+                    while True:
+                        if cancel is not None and cancel.is_set():
+                            raise DownloadCancelled("已取消")
+                        chunk = response.read(CHUNK)
+                        if not chunk:
+                            break
+                        handle.write(chunk)
+                        done += len(chunk)
+                        now = time.monotonic()
+                        if now - last_report >= 2.0:
+                            last_report = now
+                            if progress is not None:
+                                progress(done, total)
+                            elapsed = max(0.001, now - started)
+                            speed = (done - resume) / elapsed / 1024 / 1024
+                            percent = f"{done * 100 // total}% · " if total else ""
+                            total_text = f" / {_human(total)}" if total else ""
+                            _log(
+                                log,
+                                f"[准备] 下载 {percent}{_human(done)}{total_text} · {speed:.1f} MB/s",
+                            )
+            except DownloadCancelled:
+                raise
+            except Exception as exc:  # noqa: BLE001 - 断点续传
+                last = exc
+                time.sleep(0.5 * (attempt + 1))
+                continue
         if total and done < total:
-            raise ToolchainError(f"下载不完整（{_human(done)} / {_human(total)}）")
-    part.replace(dest)
+            last = ToolchainError(f"下载不完整（{_human(done)} / {_human(total)}）")
+            time.sleep(0.5 * (attempt + 1))
+            continue
+        if progress is not None:
+            progress(done, total or done)
+        part.replace(dest)
+        return
+    raise ToolchainError(f"下载失败：{last}")
 
 
 def download(
@@ -166,16 +367,22 @@ def download(
     log: Log | None = None,
     sha256: str = "",
     mirrors: tuple[str, ...] | list[str] = (),
+    progress: Progress | None = None,
+    cancel: threading.Event | None = None,
 ) -> Path:
-    """依次尝试镜像和官方地址；支持断点续传和 SHA-256 校验。"""
+    """依次尝试镜像和官方地址；支持断点续传、多连接和 SHA-256 校验。"""
     dest = Path(dest)
     if dest.is_file() and (not sha256 or sha256_file(dest) == sha256):
         return dest
     candidates = [*mirrors, url]
     last: Exception | None = None
     for candidate in candidates:
+        if cancel is not None and cancel.is_set():
+            raise DownloadCancelled("已取消")
         try:
-            _download_one(candidate, dest, log)
+            _download_one(candidate, dest, log, progress=progress, cancel=cancel)
+        except DownloadCancelled:
+            raise
         except Exception as exc:  # noqa: BLE001 - 逐个源降级
             last = exc
             _log(log, f"[准备] 来源不可用：{urllib.parse.urlparse(candidate).hostname} · {exc}")
@@ -521,6 +728,7 @@ def ensure_distribution(
     mirrors: list[str] = []
     if host in ("services.gradle.org", "downloads.gradle.org"):
         mirrors.append(GRADLE_MIRROR.format(name=archive.name))
+        mirrors.append(GRADLE_MIRROR_ALT.format(name=archive.name))
     _log(log, f"[准备] 开始下载 Gradle {dist.version}…")
     try:
         download(url, archive, log=log, sha256=expect, mirrors=mirrors)

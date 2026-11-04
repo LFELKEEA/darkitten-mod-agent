@@ -2,7 +2,7 @@
 
 只写 Minecraft Java 模组的独立桌面 Agent。基于 PySide6，自带对话工作台、技能、连接器和知识库，可从下载站、GitHub 与 Darkitten 启动器获取，并支持自动更新。
 
-当前版本：`0.3.8`
+当前版本：`0.3.9`
 
 ## 功能
 
@@ -12,7 +12,7 @@
 - **待写入确认**：生成的文件先进入右侧列表，确认后才落盘；覆盖前自动备份。
 - **技能**：内置 10 个模组开发工作流，可停用、改写、恢复默认或新建自定义技能。
 - **连接器**：Modrinth、Fabric Meta、GitHub API 开箱可用，支持自定义 HTTP 接口与 `${ENV}` 密钥引用。
-- **一键准备**：自动挑 JDK（优先 21，缺了就下载 Temurin 21）、补齐 Wrapper、从中科大 / 华为云镜像装好 Gradle 发行包，不用手动配环境变量。
+- **一键准备**：自动挑 JDK（优先 21，缺了就下载 Temurin 21）、补齐 Wrapper、从中科大 / 华为云镜像装好 Gradle 发行包，不用手动配环境变量；大文件走多连接分段下载，断线可续传。
 - **本地依赖自动整理**：`build.gradle` 里写 `files('libs/xxx.jar')` 后，点「编译」或「一键准备」会自动从下载目录、桌面、其它盘符的「下载」文件夹和知识库来源目录找出同名 jar（带中文前缀也认），复制进工程并创建 `libs/`；找不到时才会提示缺哪个文件。
 - **Gradle 版本自适应**：识别到 ModDevGradle / NeoGradle 时自动把 Wrapper 切到 Gradle 8.10.2，其它工程默认 9.8.2；`gradle-wrapper.properties` 损坏会自动重写，编译报 `requires at least Gradle X` 时也会自动升级重试。
 - **NeoForge 依赖自动兜底**：`maven.neoforged.net` 返回 502、连接被拒、被 DNS 污染或证书校验失败时，自动启动本机 Maven 代理并重试；代理按需从国内镜像取文件并缓存，缺的 `neoform-runtime` 和 `minecraft-dependencies` 会在本机合成，不需要手动改 hosts 或配镜像源。
@@ -24,7 +24,7 @@
 - **模组 JAR 分析**：直接导入现成模组，提取 `fabric.mod.json` / `mods.toml`、语言与资源 JSON、类结构，并用内置 Vineflower 反编译出 Java 源码；开头生成「模组速览 + 类索引」，中文问题也能对上英文类名，做兼容、移植或复刻功能时可直接参考实现。
 - **反编译到工程**：知识库页选中 JAR 点「反编译到工程」，把主 JAR 和 `META-INF/jars` 里的自有内嵌模块一起展开成 `.java`，写到 `reference/decompiled/<JAR 名>/`；按原包路径保存，生成 `INDEX.md`，不参与编译，方便让助手逐个文件迁移。对话里也可以直接让助手调用 `decompile_jar`。
 - **桌面快捷方式**：首次启动询问是否创建。
-- **自动更新**：读取 `mod_agent_release.json`，下载 ZIP、校验 SHA-256，退出后由后台脚本替换程序文件并重启。
+- **自动更新**：读取 `mod_agent_release.json`，从 GitHub Release 下载 ZIP（自动走加速源）、校验 SHA-256，退出后由后台脚本替换程序文件并重启。
 
 ## 直接运行（源码）
 
@@ -90,9 +90,11 @@ API Key 只保存在本机 `data/config.json`，不会上传到本项目服务�
 
 环境页右上角的「一键准备」会把缺的东西直接装好：
 
-- **JDK**：扫描 JAVA_HOME、PATH、注册表和常见目录（`C:\Program Files\Java`、`D:\developer\Java`、`~/.jdks`、`~/.gradle/jdks` 等），优先选 Java 21；本机一个 17–25 的 JDK 都没有时，从中科大 Adoptium 镜像下载 Temurin 21，校验 SHA-256 后解压到 `data/tools/jdk-*`，不写系统环境变量。
+- **JDK**：扫描 JAVA_HOME、PATH、注册表和常见目录（`C:\Program Files\Java`、`D:\developer\Java`、`~/.jdks`、`~/.gradle/jdks` 等），优先选 Java 21；本机一个 17–25 的 JDK 都没有时，从中科大 Adoptium 镜像下载 Temurin 21，镜像不可用时退回华为云 OpenJDK 和 Adoptium 官方，校验 SHA-256 后解压到 `data/tools/jdk-*`，不写系统环境变量。
 - **Wrapper**：只补缺失的 `gradlew` / `gradlew.bat` / `gradle-wrapper.jar` / `gradle-wrapper.properties`，不覆盖工程里已有的 Gradle 版本。
-- **Gradle**：读取工程 Wrapper 里配置的版本，先看 `~/.gradle/wrapper/dists` 是否已安装；缺了就从华为云镜像或 Gradle 官方下载，校验 SHA-256 后直接解压进 Wrapper 缓存。这样第一次编译不用再等 Wrapper 自己慢慢下 150 MB。
+- **Gradle**：读取工程 Wrapper 里配置的版本，先看 `~/.gradle/wrapper/dists` 是否已安装；缺了就从华为云镜像、腾讯云镜像或 Gradle 官方下载，校验 SHA-256 后直接解压进 Wrapper 缓存。这样第一次编译不用再等 Wrapper 自己慢慢下 150 MB。
+
+JDK 和 Gradle 发行包这类大文件（≥ 8 MB）默认开 6 条连接分段下载，断线后从已下载的部分继续，合并后再校验一遍大小和 SHA-256。
 
 下载和安装进度会显示在「一键准备」下面的日志框里。执行 Gradle 和启动游戏仍在「编译运行」页。
 
@@ -140,13 +142,21 @@ NeoForge 的 ModDevGradle 会从 `maven.neoforged.net` 拉 `neoform-runtime` 和
 工坊的处理方式：
 
 - 启动编译前先探测 `maven.neoforged.net`；连不上时不打扰你，直接在本机 `127.0.0.1` 起一个 Maven 代理，用 Gradle init script 把 `maven.neoforged.net` 的仓库地址换到代理。
-- 代理依次尝试 bmclapi、南邮、Gradle 插件门户、Stellar、明坤等镜像，边下边转给 Gradle，文件缓存在 `data/mirrors/repo/`，下次编译直接命中。
+- 代理并发尝试 bmclapi、南邮、Gradle 插件门户、Stellar、明坤等镜像，谁先返回可用数据就用谁，不用再逐个等超时；文件缓存在 `data/mirrors/repo/`，下次编译直接命中。
 - `net.neoforged:minecraft-dependencies` 在镜像上不存在，按 Mojang 的版本清单现场生成；`neoform-runtime` 的 `-all.jar` 用内置的 282KB 主 jar 合并依赖得到，不需要下载完整的合并包。
 - `neoform-runtime` 运行时依赖 `fabric-loom-native`，这个工件在所有公开镜像上都取不到。程序内置一个只实现 `LoomNativePlatform` 三个静态方法的空壳 jar，合并进 `-all.jar`；它只在 NeoFormRuntime 排查文件锁时被调用，不加载本地库。
-- 慢速源会限流并自动重试；临时超时返回 503 让 Gradle 重试，只有确认 404 才会记成“不存在”。
+- 源的速度会按实测结果动态排序，连续失败的源短暂降权，恢复后自动放回；同一个文件换源时保留已下载的部分继续传。
+- 临时超时返回 503 让 Gradle 重试，只有确认 404 才会记成“不存在”。
 - 编译失败且日志里出现 `502 Bad Gateway`、`Connection refused`、`PKIX path building failed` 等关键字时，会自动启用代理并重试一次。
 
 代理只监听本机回环地址，不对外提供访问；缓存的都是公开的 Maven 构件。
+
+### 下载与更新加速
+
+- **大文件分段**：JDK、Gradle 发行包和更新包不小于 8 MB 时，自动拆成多段用 6 条连接并行下载；断线按 `.part` 续传，合并后校验大小和 SHA-256。
+- **自动更新**：GitHub Release 的 ZIP 先走 `gh-proxy.com` 加速，失败再回退直连；下载完仍然逐字节校验 SHA-256，校验失败会删掉重来。
+- **Mojang 元数据**：版本清单、版本 JSON 和 `libraries.minecraft.net` 依赖都会在 piston-meta / Mojang 直连失败时改走 BMCLAPI，构建不会卡在元数据阶段。
+- **JDK / Gradle 镜像**：JDK 依次尝试中科大 Adoptium、华为云 OpenJDK、Adoptium 官方；Gradle 使用华为云和腾讯云镜像，都失败才回官方地址。
 
 ## 工具轮数
 

@@ -21,12 +21,12 @@ BUILD = ROOT / "build"
 APP_DIST = DIST / "DarkittenModAgent"
 ZIP_NAME = f"DarkittenModAgent-{APP_VERSION}.zip"
 NOTES = [
-    "编译前先探测 maven.neoforged.net：返回 502、连接被拒、DNS 污染或证书失败时自动在本机起 Maven 代理，用 Gradle init script 换掉仓库地址并重试，不用手动改 hosts 或配镜像源。",
-    "代理依次尝试 bmclapi、南邮、Gradle 插件门户、Stellar、明坤等源，边下边转给 Gradle，文件缓存在 data/mirrors/repo/；慢速源会限流并自动重试，临时超时返回 503 而不是 404。",
-    "net.neoforged:minecraft-dependencies 在镜像上不存在，按 Mojang 版本清单现场合成；neoform-runtime 的 -all.jar 用内置的 282KB 主 jar 在运行时合并依赖，不用下载完整的合并包。",
-    "neoform-runtime 依赖的 fabric-loom-native 在所有公开镜像上都取不到，内置一个空壳 jar 合并进 -all.jar，避免首次构建卡在 NoClassDefFoundError。",
-    "Gradle 用 HEAD 探测 POM 时不再一律当成不存在；只有所有源都明确 404 才记为缺失。",
-    "编译失败后如果日志里出现 502 / Connection refused / PKIX 等关键字，会自动启用代理并重试一次。",
+    "镜像代理不再逐个源排队等超时：所有可用源同时发起请求，谁先返回有效数据就用谁，慢源和死源不再拖住整个下载。源的速度按实测结果动态排序，连续失败的源会短暂降权，恢复后再放回来。",
+    "JDK、Gradle 发行包和更新包这类大文件支持多连接分段下载：文件不小于 8 MB 时自动开 6 条 Range 连接并行拉取，断线后按已下载的 .part 续传，合并后校验大小与 SHA-256。",
+    "自动更新走 gh-proxy 加速下载 GitHub Release 资源，实测从 65–92 KB/s 提升到 1 MB/s 以上，仍然逐字节校验 SHA-256，校验不过直接删除重下。",
+    "Gradle 发行包增加腾讯云镜像兜底，JDK 增加华为云 OpenJDK 兜底；镜像不可用时自动退回 Gradle 官方和 Adoptium 官方地址。",
+    "Mojang 版本清单、版本 JSON 和 libraries.minecraft.net 依赖增加 BMCLAPI 兜底，piston-meta 连不上时构建不再卡在元数据阶段。",
+    "同一个文件从 A 源下到一半失败时保留 .part，换 B 源继续下，不再从头再来；只有确认 404 才会记成缺失。",
 ]
 
 

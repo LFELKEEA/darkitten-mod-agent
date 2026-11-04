@@ -102,6 +102,44 @@ class _QuietHandler(http.server.SimpleHTTPRequestHandler):
         pass
 
 
+class _RangeHandler(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, *args) -> None:  # noqa: D102
+        pass
+
+    def do_GET(self) -> None:  # noqa: N802
+        data = self.server.payload  # type: ignore[attr-defined]
+        start = 0
+        end = len(data) - 1
+        raw = self.headers.get("Range") or ""
+        if raw.startswith("bytes="):
+            self.server.ranges.append(raw)  # type: ignore[attr-defined]
+            first, _, last = raw[6:].partition("-")
+            start = int(first)
+            if last:
+                end = min(int(last), len(data) - 1)
+            self.send_response(206)
+            self.send_header("Content-Range", f"bytes {start}-{end}/{len(data)}")
+        else:
+            self.server.ranges.append("")  # type: ignore[attr-defined]
+            self.send_response(200)
+        body = data[start : end + 1]
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        try:
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
+
+class _RangeServer(http.server.ThreadingHTTPServer):
+    daemon_threads = True
+
+    def handle_error(self, request, client_address) -> None:
+        return
+
+
 class DownloadTests(TempDataCase):
     def test_download_and_verify_hash(self) -> None:
         data = os.urandom(1024 * 1024 + 123)
@@ -137,6 +175,42 @@ class DownloadTests(TempDataCase):
             url = f"http://127.0.0.1:{server.server_port}/{source.name}"
             with self.assertRaises(toolchain.ToolchainError):
                 toolchain.download(url, self.tmp / "out" / "payload.bin", sha256="00" * 32)
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_large_download_splits_into_ranges(self) -> None:
+        data = b"0123456789abcdef" * ((toolchain.RANGE_MIN_SIZE + 4096) // 16)
+        server = _RangeServer(("127.0.0.1", 0), _RangeHandler)
+        server.payload = data
+        server.ranges = []
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            url = f"http://127.0.0.1:{server.server_port}/payload.bin"
+            dest = self.tmp / "out" / "payload.bin"
+            toolchain.download(url, dest, sha256=hashlib.sha256(data).hexdigest())
+            self.assertEqual(dest.read_bytes(), data)
+            ranged = [item for item in server.ranges if item and item != "bytes=0-0"]
+            self.assertGreaterEqual(len(ranged), 3)
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_large_download_falls_back_without_ranges(self) -> None:
+        data = b"x" * (toolchain.RANGE_MIN_SIZE + 1024)
+        source = self.tmp / "payload.bin"
+        source.write_bytes(data)
+        server = http.server.ThreadingHTTPServer(
+            ("127.0.0.1", 0), lambda *a, **k: _QuietHandler(*a, directory=str(self.tmp), **k)
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            url = f"http://127.0.0.1:{server.server_port}/{source.name}"
+            dest = self.tmp / "out" / "payload.bin"
+            toolchain.download(url, dest)
+            self.assertEqual(dest.read_bytes(), data)
         finally:
             server.shutdown()
             server.server_close()

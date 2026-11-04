@@ -174,6 +174,7 @@ class MirrorHelperTests(TempDataCase):
 class MirrorDownloadTests(TempDataCase):
     def setUp(self) -> None:
         super().setUp()
+        mirrors._health.forget()
         self.payload = bytes(range(256)) * 64
         self.server, self.base = _serve(_RepoHandler, files={"m/a.jar": self.payload})
 
@@ -221,6 +222,80 @@ class MirrorDownloadTests(TempDataCase):
         response, slot, transient = mirrors._open_source("good", self.base, "none", timeout=5, attempts=2)
         self.assertIsNone(response)
         self.assertFalse(transient)
+
+    def test_fetch_races_slow_and_fast_sources(self) -> None:
+        slow_server, slow = _serve(_SlowHandler)
+        old_sources, old_central = mirrors.SOURCES, mirrors.CENTRAL
+        mirrors.SOURCES = (("slowrace", slow), ("fastrace", self.base))
+        mirrors.CENTRAL = self.base
+        try:
+            started = time.monotonic()
+            data = mirrors.fetch("m/a.jar")
+            elapsed = time.monotonic() - started
+            self.assertEqual(data, self.payload)
+            self.assertLess(elapsed, 0.9)
+        finally:
+            mirrors.SOURCES, mirrors.CENTRAL = old_sources, old_central
+            slow_server.shutdown()
+            slow_server.server_close()
+
+
+class SourceHealthTests(unittest.TestCase):
+    def test_orders_by_speed_and_skips_penalized(self) -> None:
+        health = mirrors._SourceHealth()
+        sources = (("a", "http://a"), ("b", "http://b"), ("c", "http://c"))
+        health.ok("b", 0.1, 1024 * 1024)
+        health.ok("a", 5.0, 1024)
+        health.fail("c")
+        self.assertEqual([name for name, _ in health.order(sources)], ["b", "a"])
+
+    def test_all_penalized_falls_back_to_config_order(self) -> None:
+        health = mirrors._SourceHealth()
+        sources = (("a", "http://a"), ("b", "http://b"))
+        health.fail("a")
+        health.fail("b")
+        self.assertEqual([name for name, _ in health.order(sources)], ["a", "b"])
+
+    def test_missing_path_is_skipped_then_reset(self) -> None:
+        health = mirrors._SourceHealth()
+        sources = (("a", "http://a"), ("b", "http://b"))
+        health.miss("a", "m/x.jar")
+        self.assertEqual([name for name, _ in health.order(sources, "m/x.jar")], ["b"])
+        health.ok("a", 0.1, 1024)
+        self.assertEqual([name for name, _ in health.order(sources, "m/x.jar")], ["a", "b"])
+
+
+class RaceTests(TempDataCase):
+    def test_race_returns_fast_source(self) -> None:
+        slow_server, slow = _serve(_SlowHandler)
+        fast_server, fast = _serve(_RepoHandler, files={"m/a.jar": b"fast"})
+        try:
+            started = time.monotonic()
+            winner, _misses, _failures = mirrors._race(
+                [("slowrace2", slow), ("fastrace2", fast)], "m/a.jar", mode="bytes"
+            )
+            elapsed = time.monotonic() - started
+            self.assertIsNotNone(winner)
+            self.assertEqual(winner[0], "fastrace2")
+            self.assertEqual(winner[1], b"fast")
+            self.assertLess(elapsed, 0.9)
+        finally:
+            for server in (slow_server, fast_server):
+                server.shutdown()
+                server.server_close()
+
+    def test_race_reports_missing_when_all_404(self) -> None:
+        server, base = _serve(_RepoHandler, files={})
+        try:
+            winner, misses, failures = mirrors._race(
+                [("missrace", base)], "m/none.jar", mode="bytes"
+            )
+            self.assertIsNone(winner)
+            self.assertEqual(misses, 1)
+            self.assertEqual(failures, 0)
+        finally:
+            server.shutdown()
+            server.server_close()
 
 
 class MirrorServiceTests(TempDataCase):

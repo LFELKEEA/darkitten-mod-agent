@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import queue
 import re
 import shutil
 import tempfile
@@ -73,6 +74,15 @@ def _normalize(path: str) -> str:
     return path
 
 
+def _human(size: float) -> str:
+    value = float(size)
+    for unit in ("B", "KB", "MB", "GB"):
+        if value < 1024 or unit == "GB":
+            return f"{value:.0f} {unit}" if unit == "B" else f"{value:.1f} {unit}"
+        value /= 1024
+    return f"{value:.1f} GB"
+
+
 def _open(url: str, timeout: float):
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     return urllib.request.urlopen(request, timeout=timeout)
@@ -98,8 +108,8 @@ def _open_source(
     name: str,
     base: str,
     maven_path: str,
-    timeout: float = 90.0,
-    attempts: int = 3,
+    timeout: float = 20.0,
+    attempts: int = 2,
     headers: dict[str, str] | None = None,
 ) -> tuple[object | None, threading.Semaphore | None, bool]:
     """打开上游文件。
@@ -113,7 +123,7 @@ def _open_source(
     transient = False
     for attempt in range(attempts):
         if attempt:
-            time.sleep(min(1.5 * attempt, 5.0))
+            time.sleep(min(0.8 * attempt, 3.0))
         slot.acquire()
         try:
             request = urllib.request.Request(
@@ -136,38 +146,258 @@ def _open_source(
     return None, None, transient
 
 
-def fetch(maven_path: str, timeout: float = 45.0, attempts: int = 3) -> bytes | None:
-    """按顺序从各镜像取一个 Maven 路径，全部失败返回 None。"""
-    maven_path = _normalize(maven_path)
-    for name, base in SOURCES:
-        response, slot, _bad = _open_source(name, base, maven_path, timeout, attempts)
-        if response is None:
-            continue
+class _SourceHealth:
+    """记录每个源的速度和故障，决定先试哪个。
+
+    maven.neoforged.net 的几个备用源质量差别很大：nyist 通常几百 KB/s，
+    minguncle 可能 30 秒才回响应，Stellar 会直接握手超时。以前按固定顺序
+    逐个试，一个 404 也要等十秒，一轮构建几十个请求就拖成二十分钟。
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._speed: dict[str, float] = {}
+        self._penalty: dict[str, float] = {}
+        self._streak: dict[str, int] = {}
+        self._absent: dict[tuple[str, str], float] = {}
+
+    def order(self, sources, path: str = "") -> list[tuple[str, str]]:
+        now = time.time()
+        with self._lock:
+            ready: list[tuple[float, int, str, str]] = []
+            for index, (name, base) in enumerate(sources):
+                if self._absent.get((name, path), 0.0) > now:
+                    continue
+                if self._penalty.get(name, 0.0) > now:
+                    continue
+                ready.append((self._speed.get(name, 0.0), index, name, base))
+        ready.sort(key=lambda item: (-item[0], item[1]))
+        ordered = [(name, base) for _speed, _index, name, base in ready]
+        return ordered or list(sources)
+
+    def ok(self, name: str, seconds: float, size: int) -> None:
+        speed = size / max(seconds, 0.05) / 1024.0
+        with self._lock:
+            previous = self._speed.get(name)
+            self._speed[name] = speed if previous is None else previous * 0.6 + speed * 0.4
+            self._streak[name] = 0
+            self._penalty.pop(name, None)
+            for key in [key for key in self._absent if key[0] == name]:
+                self._absent.pop(key, None)
+
+    def seen(self, name: str, seconds: float) -> None:
+        """只知道响应时间、没有文件大小时，用一个固定权重估算速度。"""
+        self.ok(name, seconds, 64 * 1024)
+
+    def miss(self, name: str, path: str) -> None:
+        with self._lock:
+            self._absent[(name, path)] = time.time() + 600.0
+
+    def fail(self, name: str, transient: bool = True) -> None:
+        if not transient:
+            return
+        with self._lock:
+            streak = self._streak.get(name, 0) + 1
+            self._streak[name] = streak
+            wait = min(20.0 * (2 ** (streak - 1)), 600.0)
+            self._penalty[name] = time.time() + wait
+            self._speed[name] = 0.0
+
+    def forget(self) -> None:
+        with self._lock:
+            self._speed.clear()
+            self._penalty.clear()
+            self._streak.clear()
+            self._absent.clear()
+
+
+_health = _SourceHealth()
+
+
+class _Abandoned(Exception):
+    pass
+
+
+def _close_quietly(response) -> None:
+    try:
+        response.close()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+_RACE_TIMEOUT = 12.0
+_RACE_OVERALL = 22.0
+_RACE_STAGGER = 0.3
+
+
+def _race(
+    sources: list[tuple[str, str]],
+    maven_path: str,
+    *,
+    mode: str = "stream",
+    need: int = 1 << 16,
+    timeout: float = _RACE_TIMEOUT,
+    overall: float = _RACE_OVERALL,
+    headers: dict[str, str] | None = None,
+    stagger: float = _RACE_STAGGER,
+):
+    """并发打开多个源，返回最先拿到数据的那个。
+
+    mode:
+      stream - 读够 need 字节就停，response 留给调用方继续读；
+      bytes  - 直接读完整个文件并关闭 response；
+      head   - 只取内容长度，顺便确认文件存在。
+    返回 ((name, payload, response, slot), misses, failures)。response 为 None
+    表示调用方不需要继续读。
+    """
+    results: queue.Queue = queue.Queue()
+    stop = threading.Event()
+    deadline = time.monotonic() + overall
+    slot_value = need if mode != "bytes" else 0
+
+    def worker(name: str, base: str) -> None:
+        response = None
+        slot = None
+        started = time.monotonic()
         try:
-            data = response.read()
-        except Exception:  # noqa: BLE001
-            data = b""
-        finally:
-            try:
-                response.close()
-            except Exception:  # noqa: BLE001
-                pass
+            response, held, bad = _open_source(
+                name, base, maven_path, timeout=timeout, attempts=1, headers=headers
+            )
+            if response is None:
+                results.put(("fail" if bad else "miss", name, None, None, None))
+                return
+            slot = held
+            if stop.is_set():
+                raise _Abandoned()
+            if mode == "bytes":
+                payload = response.read()
+                _close_quietly(response)
+                response = None
+                if not payload:
+                    raise _Abandoned()
+                slot.release()
+                slot = None
+                _health.ok(name, time.monotonic() - started, len(payload))
+            elif mode == "head":
+                response.read(1)
+                length = response.headers.get("Content-Length")
+                content_range = response.headers.get("Content-Range") or ""
+                if "/" in content_range:
+                    total = content_range.rsplit("/", 1)[-1]
+                    if total.isdigit():
+                        length = total
+                _close_quietly(response)
+                response = None
+                slot.release()
+                slot = None
+                if length is None:
+                    raise _Abandoned()
+                payload = length
+                _health.seen(name, time.monotonic() - started)
+            else:
+                payload = response.read(slot_value)
+                if not payload:
+                    raise _Abandoned()
+            if stop.is_set() and response is not None:
+                raise _Abandoned()
+        except _Abandoned:
+            if response is not None:
+                _close_quietly(response)
             if slot is not None:
                 slot.release()
-        if data:
-            return data
-    try:
-        with _open(f"{CENTRAL}/{maven_path}", timeout) as response:
-            return response.read()
-    except Exception:  # noqa: BLE001
+            results.put(("late", name, None, None, None))
+            return
+        except urllib.error.HTTPError as exc:
+            _close_quietly(exc)
+            if slot is not None:
+                slot.release()
+            results.put(("fail", name, None, None, None))
+            return
+        except Exception:  # noqa: BLE001 - 单个源失败不影响其它源
+            if response is not None:
+                _close_quietly(response)
+            if slot is not None:
+                slot.release()
+            results.put(("fail", name, None, None, None))
+            return
+        results.put(("ok", name, payload, response, slot))
+
+    launched = 0
+    pending = 0
+    winner = None
+    misses = 0
+    failures = 0
+    while winner is None:
+        now = time.monotonic()
+        if launched < len(sources) and now < deadline:
+            name, base = sources[launched]
+            threading.Thread(target=worker, args=(name, base), daemon=True).start()
+            launched += 1
+            pending += 1
+            wait = stagger if launched < len(sources) else max(0.0, deadline - now)
+        else:
+            if pending == 0 or now >= deadline:
+                break
+            wait = max(0.0, deadline - now)
+        try:
+            item = results.get(timeout=min(wait, max(0.0, deadline - time.monotonic())))
+        except queue.Empty:
+            continue
+        pending -= 1
+        status, name, payload, response, slot = item
+        if status == "ok":
+            stop.set()
+            winner = (name, payload, response, slot)
+        elif status == "miss":
+            misses += 1
+            _health.miss(name, maven_path)
+        elif status == "fail":
+            failures += 1
+            _health.fail(name)
+    stop.set()
+    # 胜出后其它线程可能刚好也拿到数据，短时间清掉，避免连接和名额泄漏。
+    end = time.monotonic() + 0.3
+    while True:
+        try:
+            item = results.get(timeout=max(0.001, end - time.monotonic()))
+        except queue.Empty:
+            break
+        if item[0] == "ok":
+            if item[3] is not None:
+                _close_quietly(item[3])
+            if item[4] is not None:
+                item[4].release()
+    return winner, misses, failures
+
+
+def fetch(maven_path: str, timeout: float = 20.0, attempts: int = 2) -> bytes | None:
+    """并发从各镜像取一个 Maven 路径，全部失败返回 None。"""
+    maven_path = _normalize(maven_path)
+    ordered = _health.order(SOURCES + (("central", CENTRAL),), maven_path)
+    winner, _misses, _failures = _race(
+        ordered,
+        maven_path,
+        mode="bytes",
+        timeout=min(timeout, 12.0),
+        overall=min(timeout + 3.0, 18.0),
+    )
+    if winner is None:
         return None
+    name, data, _response, _slot = winner
+    return data
 
 
 def _download_from(
-    base: str, maven_path: str, part: Path, timeout: float, attempts: int
+    base: str,
+    maven_path: str,
+    part: Path,
+    timeout: float,
+    attempts: int,
+    name: str = "",
 ) -> bool | None:
     """从同一个源断点续传。True=完整拿到，False=源有问题，None=源没有这个文件。"""
     url = f"{base}/{maven_path}"
+    started = time.monotonic()
     for _ in range(attempts):
         have = part.stat().st_size if part.is_file() else 0
         headers = {"User-Agent": USER_AGENT}
@@ -191,6 +421,8 @@ def _download_from(
                     expected = int(total)
                     if part.stat().st_size < expected:
                         continue
+                if name:
+                    _health.ok(name, time.monotonic() - started, part.stat().st_size)
                 return True
         except urllib.error.HTTPError as exc:
             try:
@@ -198,34 +430,38 @@ def _download_from(
             except Exception:  # noqa: BLE001
                 pass
             if exc.code in (403, 404, 410):
-                part.unlink(missing_ok=True)
+                if name:
+                    _health.miss(name, maven_path)
                 return None
             continue
         except Exception:  # noqa: BLE001 - 断了就带着已下载的部分重试
             continue
+    if name:
+        _health.fail(name)
     return False
 
 
 def fetch_to(
     maven_path: str,
     target: Path,
-    timeout: float = 60.0,
-    attempts: int = 4,
+    timeout: float = 20.0,
+    attempts: int = 3,
     fast_only: bool = False,
 ) -> bool:
     maven_path = _normalize(maven_path)
     target.parent.mkdir(parents=True, exist_ok=True)
     part = target.with_suffix(target.suffix + ".part")
     part.unlink(missing_ok=True)
-    bases = [base for name, base in SOURCES if not fast_only or name in FAST_SOURCE_NAMES]
-    for base in bases + [CENTRAL]:
-        result = _download_from(base, maven_path, part, timeout, attempts)
+    pool = [(name, base) for name, base in SOURCES if not fast_only or name in FAST_SOURCE_NAMES]
+    pool.append(("central", CENTRAL))
+    for name, base in _health.order(pool, maven_path):
+        result = _download_from(base, maven_path, part, timeout, attempts, name=name)
         if result is True:
             os.replace(part, target)
             return True
         if result is None:
+            # 源明确没有这个文件，保留已下载的部分给下一个源续传。
             continue
-        part.unlink(missing_ok=True)
     part.unlink(missing_ok=True)
     return False
 
@@ -252,7 +488,7 @@ def needs_mirror(text: str) -> bool:
 # vanilla 依赖清单
 
 
-def mojang_version_json(version: str, timeout: float = 30.0) -> dict:
+def mojang_version_json(version: str, timeout: float = 12.0) -> dict:
     cached = cache_dir() / "mojang" / f"{version}.json"
     if cached.is_file():
         try:
@@ -267,8 +503,13 @@ def mojang_version_json(version: str, timeout: float = 30.0) -> dict:
         except (OSError, ValueError):
             data = None
     if data is None:
-        with _open(VERSION_MANIFEST, timeout) as response:
-            data = json.loads(response.read().decode("utf-8"))
+        data = _first_json(
+            (
+                VERSION_MANIFEST,
+                "https://bmclapi2.bangbang93.com/mc/game/version_manifest_v2.json",
+            ),
+            timeout,
+        )
         manifest.parent.mkdir(parents=True, exist_ok=True)
         manifest.write_text(json.dumps(data), encoding="utf-8")
     url = ""
@@ -276,13 +517,23 @@ def mojang_version_json(version: str, timeout: float = 30.0) -> dict:
         if item.get("id") == version:
             url = item.get("url") or ""
             break
-    if not url:
-        raise ValueError(f"Mojang 版本清单里没有 {version}")
-    with _open(url, timeout) as response:
-        version_data = json.loads(response.read().decode("utf-8"))
+    candidates = [url] if url else []
+    candidates.append(f"https://bmclapi2.bangbang93.com/version/{version}/json")
+    version_data = _first_json(candidates, timeout)
     cached.parent.mkdir(parents=True, exist_ok=True)
     cached.write_text(json.dumps(version_data), encoding="utf-8")
     return version_data
+
+
+def _first_json(urls: list[str] | tuple[str, ...], timeout: float) -> dict:
+    last: Exception | None = None
+    for url in urls:
+        try:
+            with _open(url, timeout) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except Exception as exc:  # noqa: BLE001 - 换下一个源
+            last = exc
+    raise ValueError(f"Mojang 版本清单获取失败：{last}")
 
 
 def _split_coordinate(name: str) -> tuple[str, str, str, str | None]:
@@ -706,7 +957,7 @@ class MirrorService:
         return cache
 
     def stream(self, maven_path: str, handler: _Handler) -> None:
-        """边下边转给 Gradle，避免大文件在代理里憋到超时。"""
+        """并发试源，先把首块转给 Gradle，剩下的边下边缓存。"""
         if maven_path in self._missing:
             handler._missing()
             return
@@ -714,108 +965,92 @@ class MirrorService:
         cache.parent.mkdir(parents=True, exist_ok=True)
         tmp = cache.with_suffix(cache.suffix + ".part")
         self._log(f"[镜像] 获取 {maven_path}")
-        transient = False
-        for name, base in SOURCES + (("central", CENTRAL),):
-            response, slot, bad = _open_source(name, base, maven_path)
-            if response is None:
+        started = time.monotonic()
+        ordered = _health.order(SOURCES + (("central", CENTRAL),), maven_path)
+        winner, _misses, failures = _race(ordered, maven_path, mode="stream")
+        if winner is None:
+            tmp.unlink(missing_ok=True)
+            if failures:
                 # 超时而已，别记成“没有这个文件”，否则本轮构建就一直 404 了。
-                transient = transient or bad
-                continue
-            try:
-                length = response.headers.get("Content-Length")
-                first = response.read(1 << 16)
-                if not first:
-                    transient = True
-                    continue
-                try:
-                    handler.send_response(200)
-                    handler.send_header("Content-Type", "application/octet-stream")
-                    if length:
-                        handler.send_header("Content-Length", length)
-                    else:
-                        handler.close_connection = True
-                    handler.end_headers()
-                except (BrokenPipeError, ConnectionResetError):
-                    return
-                try:
-                    with open(tmp, "wb") as handle:
-                        handle.write(first)
-                        handler.wfile.write(first)
-                        while True:
-                            chunk = response.read(1 << 16)
-                            if not chunk:
-                                break
-                            handler.wfile.write(chunk)
-                            handle.write(chunk)
-                except (BrokenPipeError, ConnectionResetError):
-                    tmp.unlink(missing_ok=True)
-                    return
-                except Exception:  # noqa: BLE001 - 头都发出去了，只能断开让 Gradle 重试
-                    tmp.unlink(missing_ok=True)
-                    handler.close_connection = True
-                    return
-                if tmp.is_file() and tmp.stat().st_size > 0:
-                    os.replace(tmp, cache)
-                return
-            finally:
-                try:
-                    response.close()
-                except Exception:  # noqa: BLE001
-                    pass
-                if slot is not None:
-                    slot.release()
-        tmp.unlink(missing_ok=True)
-        if transient:
-            self._log(f"[镜像] {maven_path} 上游暂时不可用，稍后重试")
-            handler._send_bytes(b"", 503)
+                self._log(f"[镜像] {maven_path} 上游暂时不可用，稍后重试")
+                handler._send_bytes(b"", 503)
+            else:
+                self._missing.add(maven_path)
+                handler._missing()
             return
-        self._missing.add(maven_path)
-        handler._missing()
+        name, first, response, slot = winner
+        try:
+            length = response.headers.get("Content-Length")
+            try:
+                handler.send_response(200)
+                handler.send_header("Content-Type", "application/octet-stream")
+                if length:
+                    handler.send_header("Content-Length", length)
+                else:
+                    handler.close_connection = True
+                handler.end_headers()
+            except (BrokenPipeError, ConnectionResetError):
+                tmp.unlink(missing_ok=True)
+                return
+            try:
+                with open(tmp, "wb") as handle:
+                    handle.write(first)
+                    handler.wfile.write(first)
+                    while True:
+                        chunk = response.read(1 << 16)
+                        if not chunk:
+                            break
+                        handler.wfile.write(chunk)
+                        handle.write(chunk)
+            except (BrokenPipeError, ConnectionResetError):
+                tmp.unlink(missing_ok=True)
+                return
+            except Exception:  # noqa: BLE001 - 头都发出去了，只能断开让 Gradle 重试
+                tmp.unlink(missing_ok=True)
+                handler.close_connection = True
+                return
+            if tmp.is_file() and tmp.stat().st_size > 0:
+                os.replace(tmp, cache)
+            size = cache.stat().st_size if cache.is_file() else 0
+            _health.ok(name, time.monotonic() - started, size)
+            if size >= 1 << 20:
+                speed = size / max(time.monotonic() - started, 0.05) / 1024 / 1024
+                self._log(f"[镜像] {maven_path} · {_human(size)} · {speed:.1f} MB/s（{name}）")
+            return
+        finally:
+            _close_quietly(response)
+            if slot is not None:
+                slot.release()
 
     def head(self, maven_path: str, handler: _Handler) -> None:
         """Gradle 有时用 HEAD 探测文件是否存在，不能一律回 404。"""
         if maven_path in self._missing:
             handler._missing()
             return
-        transient = False
-        for name, base in SOURCES + (("central", CENTRAL),):
-            response, slot, bad = _open_source(
-                name,
-                base,
-                maven_path,
-                timeout=45.0,
-                attempts=2,
-                headers={"Range": "bytes=0-0"},
-            )
-            if response is None:
-                transient = transient or bad
-                continue
-            try:
-                length = response.headers.get("Content-Length")
-                content_range = response.headers.get("Content-Range") or ""
-                if "/" in content_range:
-                    total = content_range.rsplit("/", 1)[-1]
-                    if total.isdigit():
-                        length = total
-                if length is None:
-                    continue
-                handler.send_response(200)
-                handler.send_header("Content-Type", "application/octet-stream")
-                handler.send_header("Content-Length", length)
-                handler.end_headers()
-                return
-            finally:
-                try:
-                    response.close()
-                except Exception:  # noqa: BLE001
-                    pass
-                if slot is not None:
-                    slot.release()
-        if transient:
-            handler._send_bytes(b"", 503)
+        started = time.monotonic()
+        ordered = _health.order(SOURCES + (("central", CENTRAL),), maven_path)
+        winner, _misses, failures = _race(
+            ordered,
+            maven_path,
+            mode="head",
+            timeout=8.0,
+            overall=10.0,
+            headers={"Range": "bytes=0-0"},
+            stagger=0.2,
+        )
+        if winner is None:
+            if failures:
+                handler._send_bytes(b"", 503)
+            else:
+                self._missing.add(maven_path)
+                handler._missing()
             return
-        self._missing.add(maven_path)
-        handler._missing()
+        name, length, _response, _slot = winner
+        _health.seen(name, time.monotonic() - started)
+        handler.send_response(200)
+        handler.send_header("Content-Type", "application/octet-stream")
+        handler.send_header("Content-Length", length)
+        handler.end_headers()
 
     def synthesize(self, maven_path: str) -> bytes | None:
         if not (
@@ -915,17 +1150,22 @@ _INIT_TEMPLATE = """\
 beforeSettings {{ settings ->
     def mirrorUrl = '{mirror}'
     def mojangUrl = '{mojang}'
+    def mojangMirror = 'https://bmclapi2.bangbang93.com/maven'
     def rewrite = {{ repo ->
         if (repo instanceof org.gradle.api.artifacts.repositories.MavenArtifactRepository) {{
             def u = repo.url
             if (u != null && u.host == 'maven.neoforged.net') {{
                 repo.url = mirrorUrl
                 repo.allowInsecureProtocol = true
+            }} else if (u != null && u.host == 'libraries.minecraft.net') {{
+                repo.url = mojangMirror
+                repo.allowInsecureProtocol = true
             }}
         }}
     }}
     settings.pluginManagement.repositories.all {{ repo -> rewrite(repo) }}
     settings.pluginManagement.repositories.maven {{ name = 'DMAMirror'; url = mirrorUrl; allowInsecureProtocol = true }}
+    settings.pluginManagement.repositories.maven {{ name = 'DMAMojangMirror'; url = mojangMirror; allowInsecureProtocol = true }}
     settings.pluginManagement.repositories.maven {{ name = 'DMAMojang'; url = mojangUrl }}
     settings.dependencyResolutionManagement.repositories.all {{ repo -> rewrite(repo) }}
 }}
@@ -933,22 +1173,29 @@ beforeSettings {{ settings ->
 allprojects {{
     def mirrorUrl = '{mirror}'
     def mojangUrl = '{mojang}'
+    def mojangMirror = 'https://bmclapi2.bangbang93.com/maven'
     def rewrite = {{ repo ->
         if (repo instanceof org.gradle.api.artifacts.repositories.MavenArtifactRepository) {{
             def u = repo.url
             if (u != null && u.host == 'maven.neoforged.net') {{
                 repo.url = mirrorUrl
                 repo.allowInsecureProtocol = true
+            }} else if (u != null && u.host == 'libraries.minecraft.net') {{
+                repo.url = mojangMirror
+                repo.allowInsecureProtocol = true
             }}
         }}
     }}
     repositories.all {{ repo -> rewrite(repo) }}
     repositories.maven {{ name = 'DMAMirror'; url = mirrorUrl; allowInsecureProtocol = true }}
+    repositories.maven {{ name = 'DMAMojangMirror'; url = mojangMirror; allowInsecureProtocol = true }}
     repositories.maven {{ name = 'DMAMojang'; url = mojangUrl }}
     buildscript {{
         def bsRewrite = rewrite
         repositories.all {{ repo -> bsRewrite(repo) }}
         repositories.maven {{ name = 'DMAMirror'; url = mirrorUrl; allowInsecureProtocol = true }}
+        repositories.maven {{ name = 'DMAMojangMirror'; url = mojangMirror; allowInsecureProtocol = true }}
+        repositories.maven {{ name = 'DMAMojang'; url = mojangUrl }}
     }}
 }}
 """
