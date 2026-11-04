@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import ctypes
 import json
 import os
 import re
 import shutil
+import sys
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -361,6 +363,139 @@ def recent_projects() -> list[dict[str, Any]]:
     except (OSError, ValueError):
         return []
     return [item for item in data if isinstance(item, dict)] if isinstance(data, list) else []
+
+
+def forget_project(root: Path) -> None:
+    """把工程从「最近」列表里移除。"""
+    path = paths.projects_path()
+    if not path.is_file():
+        return
+    try:
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        return
+    if not isinstance(data, list):
+        return
+    target = _norm_path(root)
+    items = [
+        item
+        for item in data
+        if not (isinstance(item, dict) and _norm_path(item.get("root")) == target)
+    ]
+    path.write_text(
+        json.dumps(items[:30], ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _norm_path(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        return os.path.normcase(os.path.normpath(str(Path(text).expanduser().resolve())))
+    except OSError:
+        return os.path.normcase(os.path.normpath(text))
+
+
+def _check_deletable(root: Path) -> Path:
+    try:
+        target = Path(root).expanduser().resolve()
+    except OSError as exc:
+        raise ProjectError(f"无法解析工程目录：{exc}") from exc
+    if not target.is_dir():
+        raise ProjectError("工程目录不存在，可能已经被移动或删除。")
+    if target == Path(target.anchor):
+        raise ProjectError("不能删除磁盘根目录。")
+    protected = (
+        Path.home().resolve(),
+        Path.cwd().resolve(),
+        paths.app_dir().resolve(),
+        paths.data_dir().resolve(),
+    )
+    for item in protected:
+        if target == item or item.is_relative_to(target):
+            raise ProjectError("这个目录包含程序或用户文件，已拒绝删除，请手动处理。")
+    return target
+
+
+class _SHFILEOPSTRUCTW(ctypes.Structure):
+    _fields_ = [
+        ("hwnd", ctypes.c_void_p),
+        ("wFunc", ctypes.c_uint),
+        ("pFrom", ctypes.c_wchar_p),
+        ("pTo", ctypes.c_wchar_p),
+        ("fFlags", ctypes.c_ushort),
+        ("fAnyOperationsAborted", ctypes.c_int),
+        ("hNameMappings", ctypes.c_void_p),
+        ("lpszProgressTitle", ctypes.c_wchar_p),
+    ]
+
+
+def _recycle_windows(target: Path) -> None:
+    if sys.platform != "win32":
+        raise ProjectError("当前系统不支持 Windows 回收站。")
+    flags = 0x0004 | 0x0010 | 0x0040 | 0x0400  # 静默 + 不确认 + 可撤销 + 不报错弹窗
+    source = ctypes.create_unicode_buffer(str(target) + "\0\0")
+    operation = _SHFILEOPSTRUCTW(
+        hwnd=None,
+        wFunc=3,  # FO_DELETE
+        pFrom=ctypes.cast(source, ctypes.c_wchar_p),
+        pTo=None,
+        fFlags=flags,
+        fAnyOperationsAborted=0,
+        hNameMappings=None,
+        lpszProgressTitle=None,
+    )
+    try:
+        result = ctypes.windll.shell32.SHFileOperationW(ctypes.byref(operation))
+    except OSError as exc:
+        raise ProjectError(f"调用回收站失败：{exc}") from exc
+    if result != 0 or operation.fAnyOperationsAborted:
+        raise ProjectError(
+            "移到回收站失败。请关闭正在占用该工程目录的程序（IDE、资源管理器、编译任务）后再试。"
+        )
+
+
+def move_to_trash(path: Path, *, recycle: bool = True) -> Path | None:
+    """把目录移到系统回收站；非 Windows 或指定 recycle=False 时移到 data/trash。"""
+    try:
+        target = Path(path).expanduser().resolve()
+    except OSError as exc:
+        raise ProjectError(f"无法解析目录：{exc}") from exc
+    if not target.exists():
+        raise ProjectError("目录不存在。")
+    if recycle and sys.platform == "win32":
+        _recycle_windows(target)
+        return None
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    trash = paths.data_dir() / "trash"
+    destination = trash / f"{target.name}-{stamp}"
+    counter = 1
+    while destination.exists():
+        destination = trash / f"{target.name}-{stamp}-{counter}"
+        counter += 1
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        shutil.move(str(target), str(destination))
+    except OSError as exc:
+        raise ProjectError(f"移动工程到回收目录失败：{exc}") from exc
+    return destination
+
+
+def delete_project(root: Path, *, recycle: bool = True) -> Path | None:
+    """删除工程目录并清理最近记录与会话记录。
+
+    默认走系统回收站，可以从回收站还原；返回 None 表示已进回收站，
+    返回路径表示移到了 data/trash 下的备用目录。
+    """
+    target = _check_deletable(root)
+    destination = move_to_trash(target, recycle=recycle)
+    forget_project(target)
+    from . import sessions
+
+    sessions.clear_history(target)
+    return destination
 
 
 def project_context(project: Project, max_files: int = 180) -> str:

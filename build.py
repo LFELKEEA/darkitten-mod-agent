@@ -21,12 +21,11 @@ BUILD = ROOT / "build"
 APP_DIST = DIST / "DarkittenModAgent"
 ZIP_NAME = f"DarkittenModAgent-{APP_VERSION}.zip"
 NOTES = [
-    "一键准备：自动挑 JDK（优先 21，缺了就从中科大镜像下载 Temurin 21），只补缺失的 Wrapper 文件，不覆盖工程已有版本。",
-    "Gradle 发行包不再只靠 Wrapper 慢慢下：优先从华为云镜像下载并校验 SHA-256，直接装进 wrapper 缓存，首次编译少等 150 MB。",
-    "点「编译 / 开发客户端 / 开发服务端 / 数据生成」会先自动准备环境再执行；120 秒内重复运行会跳过扫描。",
-    "构建环境把选中的 JDK 注入 JAVA_HOME / PATH，HTTP 超时放宽到 60 秒；依赖下载遇到 Connection reset / Read timed out 会自动重试两次。",
-    "Gradle 版本不匹配时自动把旧 Wrapper 重写为 9.8.2 并重试；仍有证书拦截时自动改用 Windows 证书库。",
-    "环境自检页新增「一键准备」，下载和安装进度实时显示；同时装了多个 JDK 时会优先选 Java 21。",
+    "对话页右上角新增「删除工程」：二次确认后把工程目录移到 Windows 回收站，可从回收站还原。",
+    "删除时一并清理最近工程和该工程的对话记录，避免留下打不开的死记录。",
+    "回收站不可用（非 Windows 或系统拒绝）时改移到 data/trash，不做永久删除。",
+    "磁盘根目录、用户主目录、程序目录、数据目录及其上级目录会被拒绝删除；助手生成或 Gradle 任务运行中也不允许删除。",
+    "确认框默认按钮是「取消」，并显示完整工程路径，避免误点。",
 ]
 
 

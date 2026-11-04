@@ -101,6 +101,45 @@ class ProjectTests(TempDataCase):
         self.assertIn("stardust_tools", context)
         self.assertIn("README.md", context)
 
+    def test_delete_moves_project_to_trash(self) -> None:
+        from dma import sessions
+
+        project = self.make()
+        sessions.save_history(project.root, [{"role": "user", "content": "你好"}])
+        self.assertTrue(project_mod.recent_projects())
+        destination = project_mod.delete_project(project.root, recycle=False)
+        self.assertFalse(project.root.exists())
+        self.assertIsNotNone(destination)
+        self.assertTrue(Path(destination).is_dir())
+        self.assertEqual(project_mod.recent_projects(), [])
+        self.assertEqual(sessions.load_history(project.root), [])
+
+    def test_delete_refuses_protected_directories(self) -> None:
+        from dma import paths
+
+        for target in (paths.data_dir(), Path.home()):
+            with self.assertRaises(ProjectError):
+                project_mod.delete_project(target, recycle=False)
+
+    def test_delete_missing_project(self) -> None:
+        missing = self.tmp / "not-there"
+        with self.assertRaises(ProjectError):
+            project_mod.delete_project(missing, recycle=False)
+
+    def test_forget_project_keeps_other_entries(self) -> None:
+        first = self.make()
+        second = project_mod.create_project(
+            self.tmp / "projects",
+            name="第二个",
+            mod_id="second_mod",
+            mc_version="1.20.1",
+            loader="Fabric",
+        )
+        project_mod.forget_project(first.root)
+        roots = [item["root"] for item in project_mod.recent_projects()]
+        self.assertNotIn(str(first.root), roots)
+        self.assertIn(str(second.root), roots)
+
 
 if __name__ == "__main__":
     unittest.main()

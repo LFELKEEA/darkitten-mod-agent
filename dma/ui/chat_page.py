@@ -68,7 +68,11 @@ class ChatPage(QWidget):
         self.new_btn.clicked.connect(self.new_project)
         self.open_btn = QPushButton("打开工程")
         self.open_btn.clicked.connect(self.open_project)
-        for button in (self.recent_btn, self.new_btn, self.open_btn):
+        self.delete_btn = QPushButton("删除工程")
+        self.delete_btn.setObjectName("Danger")
+        self.delete_btn.setEnabled(False)
+        self.delete_btn.clicked.connect(self.delete_project)
+        for button in (self.recent_btn, self.new_btn, self.open_btn, self.delete_btn):
             head.addWidget(button)
         root.addWidget(header)
 
@@ -192,6 +196,7 @@ class ChatPage(QWidget):
 
     def _show_empty(self) -> None:
         self.project = None
+        self.delete_btn.setEnabled(False)
         self.project_label.setText("尚未打开工程")
         self.project_meta.setText("先在右上角新建或打开一个模组工程。")
         self.project_path.setText("")
@@ -206,6 +211,7 @@ class ChatPage(QWidget):
 
     def _set_project(self, project, quiet: bool = False) -> None:
         self.project = project
+        self.delete_btn.setEnabled(True)
         self.main.config.last_project = str(project.root)
         self.main.save_config()
         project_mod.remember_project(project)
@@ -259,6 +265,52 @@ class ChatPage(QWidget):
             return
         self._set_project(project)
         self.main.status(f"已打开工程：{project.root}")
+
+    def delete_project(self) -> None:
+        project = self.project
+        if project is None:
+            QMessageBox.information(self, "还没有工程", "请先打开要删除的工程。")
+            return
+        if self._worker is not None:
+            QMessageBox.information(
+                self, "任务进行中", "助手还在生成内容，请先停止或等本轮结束后再删除。"
+            )
+            return
+        build = getattr(self.main, "build_page", None)
+        if build is not None and getattr(build.runner, "running", False):
+            QMessageBox.information(
+                self, "编译进行中", "请先在「编译运行」页停止 Gradle 任务，再删除工程。"
+            )
+            return
+        name = project.meta.name or project.meta.mod_id or project.root.name
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle("删除工程")
+        box.setText(f"确定要删除工程「{name}」吗？")
+        box.setInformativeText(
+            f"目录：{project.root}\n\n"
+            "工程文件夹会被移到 Windows 回收站，之后可以从回收站还原；"
+            "最近工程和对话记录会一并清除。"
+        )
+        delete_button = box.addButton("移到回收站", QMessageBox.DestructiveRole)
+        cancel_button = box.addButton("取消", QMessageBox.RejectRole)
+        box.setDefaultButton(cancel_button)
+        box.exec()
+        if box.clickedButton() is not delete_button:
+            return
+        try:
+            destination = project_mod.delete_project(project.root)
+        except Exception as exc:
+            QMessageBox.warning(self, "删除失败", str(exc))
+            return
+        self.main.config.last_project = ""
+        self.main.save_config()
+        self._show_empty()
+        self.main.project_changed.emit(None)
+        if destination is None:
+            self.main.status(f"工程已移到回收站：{project.root}")
+        else:
+            self.main.status(f"工程已移到：{destination}")
 
     def ask(self, text: str) -> bool:
         """外部页面调用：填入输入框并发送，返回是否真的启动了任务。"""
@@ -380,6 +432,7 @@ class ChatPage(QWidget):
         self.new_btn.setEnabled(not running)
         self.open_btn.setEnabled(not running)
         self.recent_btn.setEnabled(not running)
+        self.delete_btn.setEnabled(not running and self.project is not None)
         self.send_btn.setText("生成中…" if running else "发送")
 
     def _on_assistant(self, text: str) -> None:
