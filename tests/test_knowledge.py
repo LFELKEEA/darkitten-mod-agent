@@ -27,6 +27,48 @@ def make_docx(path: Path, paragraphs: list[str]) -> None:
         archive.writestr("word/document.xml", xml)
 
 
+def _utf8(text: str) -> bytes:
+    raw = text.encode("utf-8")
+    return b"\x01" + len(raw).to_bytes(2, "big") + raw
+
+
+def make_class() -> bytes:
+    pool = b"".join(
+        [
+            _utf8("com/example/ExampleMod"),       # 1
+            b"\x07\x00\x01",                       # 2 Class
+            _utf8("java/lang/Object"),             # 3
+            b"\x07\x00\x03",                       # 4 Class
+            _utf8("MOD_ID"),                       # 5
+            _utf8("Ljava/lang/String;"),           # 6
+            _utf8("onInitialize"),                 # 7
+            _utf8("()V"),                          # 8
+            _utf8("examplemod"),                   # 9
+            b"\x08\x00\x09",                       # 10 String
+            _utf8("examplemod:ruby"),              # 11
+            b"\x08\x00\x0b",                       # 12 String
+            _utf8("net/minecraft/world/level/Level"),  # 13
+            b"\x07\x00\x0d",                       # 14 Class
+            _utf8("getBlockState"),                # 15
+            _utf8("(Lnet/minecraft/core/BlockPos;)Lnet/minecraft/world/level/block/state/BlockState;"),  # 16
+            b"\x0c\x00\x0f\x00\x10",               # 17 NameAndType
+            b"\x0a\x00\x0e\x00\x11",               # 18 Methodref
+        ]
+    )
+    body = (
+        b"\x00\x21"          # public super
+        b"\x00\x02"          # this
+        b"\x00\x04"          # super
+        b"\x00\x00"          # interfaces
+        b"\x00\x01"          # fields
+        b"\x00\x19\x00\x05\x00\x06\x00\x00"
+        b"\x00\x01"          # methods
+        b"\x00\x01\x00\x07\x00\x08\x00\x00"
+        b"\x00\x00"          # class attributes
+    )
+    return b"\xca\xfe\xba\xbe\x00\x00\x00\x3d\x00\x13" + pool + body
+
+
 class KnowledgeStoreTests(TempDataCase):
     def setUp(self) -> None:
         super().setUp()
@@ -110,6 +152,61 @@ class KnowledgeStoreTests(TempDataCase):
         self.assertIn("注册物品", text)
         self.assertNotIn("hidden", text)
 
+    def test_jar_extraction_includes_metadata_classes_and_lang(self) -> None:
+        path = self.tmp / "examplemod-1.0.0.jar"
+        with zipfile.ZipFile(path, "w") as archive:
+            archive.writestr(
+                "fabric.mod.json",
+                '{"id":"examplemod","entrypoints":{"main":["com.example.ExampleMod"]}}',
+            )
+            archive.writestr(
+                "assets/examplemod/lang/zh_cn.json",
+                '{"block.examplemod.ruby":"红宝石块"}',
+            )
+            archive.writestr("com/example/ExampleMod.class", make_class())
+            archive.writestr("assets/examplemod/textures/block/ruby.png", b"\x89PNG\x00\x01")
+            archive.writestr("META-INF/jars/library.jar", b"PK\x03\x04nested")
+        text, kind = knowledge_mod.extract_text(path)
+        self.assertEqual(kind, "jar")
+        self.assertIn("模组 JAR：examplemod-1.0.0.jar", text)
+        self.assertIn("fabric.mod.json", text)
+        self.assertIn('"block.examplemod.ruby"', text)
+        self.assertIn("红宝石块", text)
+        self.assertIn("class com.example.ExampleMod", text)
+        self.assertIn("onInitialize()V", text)
+        self.assertIn("MOD_ID", text)
+        self.assertIn("examplemod:ruby", text)
+        self.assertIn(
+            "net.minecraft.world.level.Level.getBlockState", text
+        )
+        self.assertIn("已跳过 1 个内嵌 jar", text)
+        self.assertNotIn("PNG", text)
+
+    def test_jar_with_broken_class_still_reads_metadata(self) -> None:
+        path = self.tmp / "broken.jar"
+        with zipfile.ZipFile(path, "w") as archive:
+            archive.writestr("fabric.mod.json", '{"id":"brokenmod"}')
+            archive.writestr("com/example/Broken.class", b"\xca\xfe\xba\xbe\x00")
+        text, kind = knowledge_mod.extract_text(path)
+        self.assertEqual(kind, "jar")
+        self.assertIn("brokenmod", text)
+        self.assertNotIn("class com.example.Broken", text)
+
+    def test_jar_is_searchable_and_reports_kind(self) -> None:
+        path = self.tmp / "searchmod.jar"
+        with zipfile.ZipFile(path, "w") as archive:
+            archive.writestr(
+                "META-INF/mods.toml",
+                'modId="searchmod"\ndescription="Adds a ruby tool set"',
+            )
+        store = self.store()
+        result = store.add_file(path)
+        self.assertEqual(result["name"], "searchmod.jar")
+        hits = store.search("ruby tool")
+        self.assertTrue(hits)
+        self.assertEqual(hits[0]["name"], "searchmod.jar")
+        self.assertEqual(store.list_documents()[0]["kind"], "jar")
+
     def test_rejects_binary_and_missing(self) -> None:
         binary = self.tmp / "image.bin"
         binary.write_bytes(b"\x00\x01\x02")
@@ -184,6 +281,29 @@ class KnowledgeAgentTests(TempDataCase):
             ToolCall(name="read_knowledge", args={"id": document["document_id"]}), run
         )
         self.assertIn("禁止写 Mojmap", read)
+
+    def test_read_knowledge_supports_query_and_paging(self) -> None:
+        worker = self.worker()
+        run = AgentRun()
+        document = self.knowledge.add_text(
+            "大文件",
+            "开头内容。" + ("填充文字。" * 3000) + "\n唯一标记B在这里。",
+        )
+        matched = worker._execute(
+            ToolCall(
+                name="read_knowledge",
+                args={"id": document["id"], "query": "唯一标记B"},
+            ),
+            run,
+        )
+        self.assertIn("唯一标记B", matched)
+        self.assertIn("[片段", matched)
+        first_page = worker._execute(
+            ToolCall(name="read_knowledge", args={"id": document["id"], "offset": 0}),
+            run,
+        )
+        self.assertIn("继续读请把 offset", first_page)
+        self.assertIn("全文", first_page)
 
     def test_prompt_contains_knowledge_section(self) -> None:
         prompt = build_system_prompt(

@@ -446,10 +446,36 @@ class AgentWorker(QObject):
                     )
                 if document is None:
                     return "没有找到对应的知识库文件。请先用 search_knowledge 查编号。"
-                return (
+                header = (
                     f"# {document.get('name')}（编号 {document.get('id')}，"
-                    f"{document.get('chars')} 字符）\n\n{document.get('text') or ''}"
-                )[:MAX_TOOL_RESULT]
+                    f"{document.get('chars')} 字符）\n\n"
+                )
+                body = str(document.get("text") or "")
+                query = str(args.get("query") or "").strip()
+                if query:
+                    matches = self.knowledge.document_hits(
+                        int(document["id"]), query, limit=6, budget=10000
+                    )
+                    if not matches:
+                        return header + f"没有匹配「{query}」的片段。可以换关键词再查。"
+                    joined = "\n\n".join(
+                        f"[片段 {item['ord'] + 1}]\n{item['text']}" for item in matches
+                    )
+                    return (header + joined)[:MAX_TOOL_RESULT]
+                try:
+                    offset = max(0, int(args.get("offset") or 0))
+                except (TypeError, ValueError):
+                    offset = 0
+                if offset >= len(body):
+                    return header + f"起始位置 {offset} 超过正文长度。"
+                piece = body[offset : offset + MAX_TOOL_RESULT - len(header) - 80]
+                tail = ""
+                if offset + len(piece) < len(body):
+                    tail = (
+                        f"\n\n（从第 {offset} 字符开始，本次到第 {offset + len(piece)} 字符；"
+                        f"全文 {len(body)} 字符。继续读请把 offset 设为 {offset + len(piece)}。）"
+                    )
+                return header + piece + tail
             if name == "fetch_url":
                 url = str(args.get("url") or "").strip()
                 if not url:

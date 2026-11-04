@@ -43,12 +43,30 @@ TEXT_SUFFIXES = {
     ".md", ".markdown", ".txt", ".json", ".json5", ".yaml", ".yml", ".toml",
     ".properties", ".gradle", ".java", ".kt", ".kts", ".py", ".js", ".ts",
     ".html", ".htm", ".xml", ".csv", ".cfg", ".conf", ".lang", ".mcmeta",
+    ".mcfunction", ".accesswidener",
 }
-SUPPORTED_SUFFIXES = TEXT_SUFFIXES | {".docx", ".pdf"}
+SUPPORTED_SUFFIXES = TEXT_SUFFIXES | {".docx", ".pdf", ".jar"}
 SUPPORTED_FILTER = (
-    "文档 (*.md *.markdown *.txt *.docx *.pdf *.json *.yaml *.yml *.toml "
-    "*.properties *.gradle *.java *.kt *.py *.html *.xml *.csv);;所有文件 (*.*)"
+    "文档与模组 (*.md *.markdown *.txt *.docx *.pdf *.jar *.json *.yaml *.yml "
+    "*.toml *.properties *.gradle *.java *.kt *.py *.html *.xml *.csv);;"
+    "模组 JAR (*.jar);;所有文件 (*.*)"
 )
+
+JAR_METADATA = {
+    "fabric.mod.json",
+    "quilt.mod.json",
+    "mcmod.info",
+    "pack.mcmeta",
+    "meta-inf/mods.toml",
+    "meta-inf/neoforge.mods.toml",
+    "meta-inf/manifest.mf",
+}
+MAX_JAR_CLASSES = 500
+MAX_JAR_TEXT_ENTRIES = 400
+MAX_JAR_ENTRY_BYTES = 4 * 1024 * 1024
+MAX_JAR_READ_BYTES = 32 * 1024 * 1024
+MAX_JAR_ENTRY_CHARS = 200_000
+MAX_CLASS_CHARS = 6_000
 
 _WORD_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 _ASCII_TOKEN = re.compile(r"[A-Za-z0-9_.$#@-]{2,}")
@@ -177,6 +195,344 @@ def _html_text(path: Path) -> str:
     return parser.text()
 
 
+_CLASS_MEMBER_FLAGS = (
+    (0x0001, "public"), (0x0002, "private"), (0x0004, "protected"),
+    (0x0008, "static"), (0x0010, "final"), (0x0020, "synchronized"),
+    (0x0040, "bridge"), (0x0080, "varargs"), (0x0100, "native"),
+    (0x0400, "abstract"), (0x1000, "synthetic"),
+)
+_CLASS_TYPE_FLAGS = (
+    (0x0001, "public"), (0x0010, "final"), (0x0200, "interface"),
+    (0x0400, "abstract"), (0x1000, "synthetic"), (0x4000, "enum"),
+)
+_NAMESPACED_ID = re.compile(r"^[a-z][a-z0-9_.-]{1,64}:[a-z0-9_./-]{1,80}$")
+
+
+def _flags(value: int, table) -> str:
+    names = [label for bit, label in table if value & bit]
+    return " ".join(names)
+
+
+def _dot(name: str) -> str:
+    return name.replace("/", ".")
+
+
+def _class_summary(raw: bytes) -> str:
+    """从 .class 常量池和成员表提取结构，不依赖反编译器。"""
+    try:
+        view = memoryview(raw)
+        pos = 0
+
+        def take(count: int) -> bytes:
+            nonlocal pos
+            if count < 0 or pos + count > len(view):
+                raise ValueError("truncated")
+            chunk = bytes(view[pos : pos + count])
+            pos += count
+            return chunk
+
+        def u2() -> int:
+            return int.from_bytes(take(2), "big")
+
+        def u4() -> int:
+            return int.from_bytes(take(4), "big")
+
+        if take(4) != b"\xca\xfe\xba\xbe":
+            return ""
+        u2()
+        u2()
+        pool_count = u2()
+        utf8: dict[int, str] = {}
+        class_names: dict[int, str] = {}
+        name_and_types: dict[int, tuple[int, int]] = {}
+        member_refs: list[tuple[int, int]] = []
+        string_refs: list[int] = []
+        index = 1
+        while index < pool_count:
+            tag = take(1)[0]
+            if tag == 1:
+                utf8[index] = take(u2()).decode("utf-8", "replace")
+            elif tag in (3, 4):
+                take(4)
+            elif tag in (5, 6):
+                take(8)
+                index += 1
+            elif tag == 7:
+                class_names[index] = u2()
+            elif tag == 8:
+                string_refs.append(u2())
+            elif tag in (9, 10, 11):
+                member_refs.append((u2(), u2()))
+            elif tag == 12:
+                name_and_types[index] = (u2(), u2())
+            elif tag in (17, 18):
+                take(4)
+            elif tag == 15:
+                take(3)
+            elif tag in (16, 19, 20):
+                take(2)
+            else:
+                return ""
+            index += 1
+
+        access = u2()
+        this_index = u2()
+        super_index = u2()
+        interface_count = u2()
+        interfaces = [u2() for _ in range(interface_count)]
+
+        def class_name(cp_index: int) -> str:
+            if not cp_index:
+                return ""
+            return utf8.get(class_names.get(cp_index, -1), "")
+
+        def members() -> list[tuple[int, str, str]]:
+            count = u2()
+            items: list[tuple[int, str, str]] = []
+            for _ in range(count):
+                flags = u2()
+                name_index = u2()
+                desc_index = u2()
+                attribute_count = u2()
+                for _ in range(attribute_count):
+                    u2()
+                    take(u4())
+                items.append(
+                    (flags, utf8.get(name_index, ""), utf8.get(desc_index, ""))
+                )
+            return items
+
+        fields = members()
+        methods = members()
+
+        name = _dot(class_name(this_index))
+        if not name:
+            return ""
+        is_interface = bool(access & 0x0200)
+        modifiers = _flags(access, _CLASS_TYPE_FLAGS)
+        if is_interface:
+            modifiers = (
+                modifiers.replace("interface", "")
+                .replace("abstract", "")
+                .replace("  ", " ")
+                .strip()
+            )
+        header = f"{('interface' if is_interface else 'class')} {name}"
+        super_name = _dot(class_name(super_index))
+        if super_name and super_name != "java.lang.Object" and not is_interface:
+            header += f" extends {super_name}"
+        parents = [_dot(class_name(item)) for item in interfaces]
+        parents = [item for item in parents if item]
+        if parents:
+            header += " implements " + ", ".join(parents)
+        if modifiers:
+            header = f"{modifiers} {header}"
+
+        lines = [header]
+        if fields:
+            lines.append("字段：")
+            for flags, field_name, desc in fields[:40]:
+                mods = _flags(flags, _CLASS_MEMBER_FLAGS)
+                lines.append(f"  - {(mods + ' ') if mods else ''}{field_name}: {desc}")
+            if len(fields) > 40:
+                lines.append(f"  - …还有 {len(fields) - 40} 个字段")
+        if methods:
+            lines.append("方法：")
+            for flags, method_name, desc in methods[:60]:
+                mods = _flags(flags, _CLASS_MEMBER_FLAGS)
+                lines.append(f"  - {(mods + ' ') if mods else ''}{method_name}{desc}")
+            if len(methods) > 60:
+                lines.append(f"  - …还有 {len(methods) - 60} 个方法")
+        refs: list[str] = []
+        for cp_index in class_names:
+            value = _dot(class_name(cp_index))
+            if value and value not in {name, "java.lang.Object"} and value not in refs:
+                refs.append(value)
+        if refs:
+            lines.append("引用的类：")
+            lines.append("  - " + ", ".join(refs[:40]))
+            if len(refs) > 40:
+                lines.append(f"  - …还有 {len(refs) - 40} 个")
+        calls: list[str] = []
+        for owner_index, nat_index in member_refs:
+            owner = _dot(class_name(owner_index))
+            nat = name_and_types.get(nat_index)
+            if not owner or not nat:
+                continue
+            member = utf8.get(nat[0], "")
+            desc = utf8.get(nat[1], "")
+            if not member:
+                continue
+            value = f"{owner}.{member}{desc}" if desc.startswith("(") else f"{owner}.{member}:{desc}"
+            if value not in calls:
+                calls.append(value)
+        if calls:
+            lines.append("调用的方法/字段：")
+            for item in calls[:60]:
+                lines.append(f"  - {item}")
+            if len(calls) > 60:
+                lines.append(f"  - …还有 {len(calls) - 60} 个")
+        literals: list[str] = []
+        for cp_index in string_refs:
+            value = utf8.get(cp_index, "")
+            if value and value not in literals:
+                literals.append(value)
+        for value in utf8.values():
+            if _NAMESPACED_ID.match(value) and value not in literals:
+                literals.append(value)
+        literals = [
+            item.strip()
+            for item in literals
+            if 3 <= len(item.strip()) <= 160
+            and all(ord(char) >= 32 for char in item)
+        ]
+        if literals:
+            lines.append("字符串常量：")
+            for item in literals[:30]:
+                lines.append(f'  - "{item}"')
+            if len(literals) > 30:
+                lines.append(f"  - …还有 {len(literals) - 30} 个")
+        text = "\n".join(lines)
+        if len(text) > MAX_CLASS_CHARS:
+            text = text[:MAX_CLASS_CHARS] + "\n…（该类结构已截断）"
+        return text
+    except Exception:
+        return ""
+
+
+def _jar_rank(info: zipfile.ZipInfo) -> tuple[int, str]:
+    low = info.filename.lower()
+    if low in JAR_METADATA:
+        return (0, low)
+    if low.endswith(".java"):
+        return (1, low)
+    if low.endswith(".mixins.json") or low.endswith(".accesswidener"):
+        return (2, low)
+    if low.endswith(".class"):
+        return (3, low)
+    return (4, low)
+
+
+def _jar_entry_kind(name: str) -> str:
+    low = name.lower()
+    if low.startswith("meta-inf/jars/") or low.startswith("meta-inf/versions/"):
+        return "skip"
+    if low.endswith((".sf", ".rsa", ".dsa", ".ec")):
+        return "skip"
+    if low.endswith(".class"):
+        return "class"
+    if low in JAR_METADATA or low.startswith("meta-inf/services/"):
+        return "text"
+    if "refmap" in low.rsplit("/", 1)[-1] and low.endswith(".json"):
+        return "skip"
+    if Path(low).suffix in TEXT_SUFFIXES:
+        return "text"
+    return "skip"
+
+
+def _decode_entry(raw: bytes) -> str:
+    for encoding in ("utf-8-sig", "utf-8", "gb18030"):
+        try:
+            return raw.decode(encoding).replace("\x00", "")
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("utf-8", "replace").replace("\x00", "")
+
+
+def _jar_text(path: Path) -> str:
+    try:
+        archive = zipfile.ZipFile(path)
+    except (zipfile.BadZipFile, OSError) as exc:
+        raise KnowledgeError("这个 .jar 无法打开，文件可能损坏。") from exc
+    with archive:
+        infos = [info for info in archive.infolist() if not info.is_dir()]
+        infos.sort(key=_jar_rank)
+        header = (
+            f"# 模组 JAR：{path.name}\n"
+            "说明：以下内容由程序自动提取，包括模组元数据、语言与资源文本、"
+            "类结构（字段、方法、引用的类、字符串常量）以及包内源码。"
+            "这不是完整反编译源码，复杂逻辑需要结合类名和调用关系推断。"
+        )
+        parts = [header]
+        used = len(header)
+        classes = 0
+        text_entries = 0
+        omitted = 0
+        skipped = 0
+        nested = 0
+        read_bytes = 0
+        truncated = False
+        for info in infos:
+            name = info.filename
+            low = name.lower()
+            kind = _jar_entry_kind(name)
+            if kind == "skip":
+                if low.startswith("meta-inf/jars/"):
+                    nested += 1
+                skipped += 1
+                continue
+            if info.flag_bits & 0x1:
+                skipped += 1
+                continue
+            if kind == "class" and classes >= MAX_JAR_CLASSES:
+                omitted += 1
+                continue
+            if kind == "text" and text_entries >= MAX_JAR_TEXT_ENTRIES:
+                omitted += 1
+                continue
+            if info.file_size > MAX_JAR_ENTRY_BYTES:
+                skipped += 1
+                continue
+            if read_bytes + info.file_size > MAX_JAR_READ_BYTES:
+                omitted += 1
+                continue
+            try:
+                raw = archive.read(info)
+            except (RuntimeError, OSError, ValueError, NotImplementedError, zipfile.BadZipFile):
+                skipped += 1
+                continue
+            read_bytes += len(raw)
+            if kind == "class":
+                body = _class_summary(raw)
+                if not body:
+                    skipped += 1
+                    continue
+                classes += 1
+                title = f"## 类：{_dot(name[:-6])}"
+            else:
+                body = _decode_entry(raw)
+                if not body.strip():
+                    continue
+                text_entries += 1
+                limit = 8_000 if low == "meta-inf/manifest.mf" else MAX_JAR_ENTRY_CHARS
+                if len(body) > limit:
+                    body = body[:limit] + "\n…（该文件已截断）"
+                title = f"## 文件：{name}"
+            block = title + "\n" + body.strip()
+            if used + len(block) + 2 > MAX_DOC_CHARS:
+                remain = MAX_DOC_CHARS - used - 2
+                if remain > 200:
+                    parts.append(block[:remain] + "\n（内容超过上限，已截断）")
+                truncated = True
+                break
+            parts.append(block)
+            used += len(block) + 2
+        notes: list[str] = []
+        if truncated:
+            notes.append("内容超过单份资料上限，后面的条目未展开。")
+        if omitted:
+            notes.append(f"另有 {omitted} 个条目因数量或体积上限未展开。")
+        if nested:
+            notes.append(f"已跳过 {nested} 个内嵌 jar（通常是依赖库）。")
+        if skipped:
+            notes.append(f"已跳过 {skipped} 个二进制、签名或损坏条目。")
+        if classes == 0 and text_entries == 0:
+            raise KnowledgeError("这个 .jar 里没有可提取的文本或类结构，可能只是资源包或空包。")
+        if notes:
+            parts.append("---\n" + "\n".join(notes))
+        return "\n\n".join(parts)
+
+
 def extract_text(path: Path) -> tuple[str, str]:
     """返回（正文, 类型）。支持 txt/md/docx/pdf 和常见代码/配置文件。"""
     source = Path(path)
@@ -187,13 +543,15 @@ def extract_text(path: Path) -> tuple[str, str]:
         text = _docx_text(source)
     elif suffix == ".pdf":
         text = _pdf_text(source)
+    elif suffix == ".jar":
+        text = _jar_text(source)
     elif suffix in {".html", ".htm"}:
         text = _html_text(source)
     elif suffix in TEXT_SUFFIXES or suffix == "":
         text = _decode(source.read_bytes())
     else:
         raise KnowledgeError(
-            f"暂不支持 {suffix or '无扩展名'} 文件，可导入 txt / md / docx / pdf 或代码文本。"
+            f"暂不支持 {suffix or '无扩展名'} 文件，可导入 txt / md / docx / pdf / jar 或代码文本。"
         )
     text = _normalize(text)
     if not text.strip():
@@ -471,6 +829,40 @@ class KnowledgeStore:
             hits.append(hit)
             per_document[document_id] = per_document.get(document_id, 0) + 1
             used += len(hit["text"])
+            if len(hits) >= max(1, int(limit)):
+                break
+        return hits
+
+    def document_hits(
+        self,
+        document_id: int,
+        query: str,
+        *,
+        limit: int = 5,
+        budget: int = 10000,
+    ) -> list[dict[str, Any]]:
+        tokens = _tokens(query)
+        if not tokens:
+            return []
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT ord, text FROM chunks WHERE document_id=? ORDER BY ord",
+                (int(document_id),),
+            ).fetchall()
+        scored: list[tuple[float, int, str]] = []
+        for row in rows:
+            text = str(row["text"])
+            value = _score("", text, tokens)
+            if value > 0:
+                scored.append((value, int(row["ord"]), text))
+        scored.sort(key=lambda item: item[0], reverse=True)
+        hits: list[dict[str, Any]] = []
+        used = 0
+        for _value, order, text in scored:
+            if used + len(text) > budget and hits:
+                continue
+            hits.append({"ord": order, "text": text})
+            used += len(text)
             if len(hits) >= max(1, int(limit)):
                 break
         return hits
