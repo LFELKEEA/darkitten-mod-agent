@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QMessageBox,
@@ -21,8 +22,14 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .. import project as project_mod
 from .. import toolchain
-from ..knowledge import SUPPORTED_FILTER, KnowledgeStore
+from ..knowledge import (
+    SUPPORTED_FILTER,
+    KnowledgeStore,
+    decompile_jar_sources,
+    write_decompiled_tree,
+)
 from .widgets import card, tiny
 
 PREVIEW_CHARS = 40000
@@ -57,13 +64,24 @@ class KnowledgePage(QWidget):
         self.import_btn = QPushButton("导入文件")
         self.import_btn.setObjectName("Primary")
         self.import_btn.clicked.connect(self.import_files)
+        self.decompile_btn = QPushButton("反编译到工程")
+        self.decompile_btn.setToolTip(
+            "把选中的 JAR（或另选一个 JAR）反编译成 .java，写到工程内的参考资料目录；"
+            "不会放进 src/main/java，不影响编译。"
+        )
+        self.decompile_btn.clicked.connect(self.decompile_to_project)
         self.delete_btn = QPushButton("删除")
         self.delete_btn.setObjectName("Danger")
         self.delete_btn.clicked.connect(self._delete)
         self.refresh_btn = QPushButton("刷新")
         self.refresh_btn.setObjectName("Ghost")
         self.refresh_btn.clicked.connect(self.refresh)
-        for button in (self.import_btn, self.delete_btn, self.refresh_btn):
+        for button in (
+            self.import_btn,
+            self.decompile_btn,
+            self.delete_btn,
+            self.refresh_btn,
+        ):
             head.addWidget(button)
         root.addWidget(header)
 
@@ -244,6 +262,118 @@ class KnowledgePage(QWidget):
             )
         elif not imported and not progress.wasCanceled():
             self.main.status("没有导入任何文件")
+
+    def decompile_to_project(self) -> None:
+        project = self._project()
+        if project is None:
+            QMessageBox.information(
+                self,
+                "还没有工程",
+                "先打开或新建一个工程，反编译出来的源码需要放进工程目录。",
+            )
+            return
+        jar: Path | None = None
+        item = self._selected()
+        if item is not None and str(item.get("kind") or "") == "jar":
+            candidate = Path(str(item.get("source") or ""))
+            if candidate.is_file():
+                jar = candidate
+        if jar is None:
+            filename, _ = QFileDialog.getOpenFileName(
+                self,
+                "选择要反编译的 JAR",
+                str(project.root),
+                "模组 JAR (*.jar);;所有文件 (*.*)",
+            )
+            if not filename:
+                return
+            jar = Path(filename)
+        java = toolchain.find_java()
+        if java is None or java.major < 17:
+            QMessageBox.warning(
+                self,
+                "没有可用的 JDK",
+                "反编译需要 JDK 17 或更高版本。请先到「环境」页点「一键准备」装好 JDK 21。",
+            )
+            return
+        default = f"reference/decompiled/{jar.stem}"
+        target, ok = QInputDialog.getText(
+            self,
+            "反编译到工程",
+            "目标目录（相对工程根目录）：",
+            text=default,
+        )
+        if not ok:
+            return
+        target = str(target or "").replace("\\", "/").strip().strip("/")
+        if not target:
+            QMessageBox.warning(self, "目录为空", "请填写工程内的目标目录。")
+            return
+        if target == "src" or target.startswith("src/"):
+            QMessageBox.warning(
+                self,
+                "不建议放进 src",
+                "反编译代码通常缺少当前版本的映射和依赖，直接放进 src/main/java "
+                "会导致编译失败。\n\n建议用 reference/decompiled/ 作为参考目录，"
+                "再让助手逐个文件迁移。",
+            )
+            return
+        try:
+            target_path = project_mod.safe_path(project.root, target)
+        except project_mod.ProjectError as exc:
+            QMessageBox.warning(self, "目录不合法", str(exc))
+            return
+        if target_path.exists() and any(target_path.rglob("*.java")):
+            answer = QMessageBox.question(
+                self,
+                "目录里已有源码",
+                f"「{target}」里已经有 .java 文件，继续会覆盖同名文件。\n\n确定继续吗？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+
+        progress = QProgressDialog("正在反编译…", "", 0, 0, self)
+        progress.setWindowTitle(f"反编译到工程：{jar.name}")
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setCancelButton(None)
+        progress.show()
+        QApplication.processEvents()
+
+        def report(message: str) -> None:
+            progress.setLabelText(message)
+            QApplication.processEvents()
+
+        try:
+            files, notes = decompile_jar_sources(jar, progress=report)
+            result = write_decompiled_tree(
+                project.root,
+                target,
+                files,
+                jar_name=jar.name,
+                notes=notes,
+            )
+        except Exception as exc:
+            progress.close()
+            QMessageBox.critical(self, "反编译失败", str(exc))
+            return
+        progress.close()
+        skipped = int(result.get("skipped") or 0)
+        extra = f"\n跳过 {skipped} 个不安全路径。" if skipped else ""
+        QMessageBox.information(
+            self,
+            "反编译完成",
+            f"已写入 {result['written']} 个 Java 文件到：\n{result['target']}\n\n"
+            f"索引：{result['index']}\n\n"
+            "这些文件不在编译路径里，只作为迁移参考。"
+            "在对话里让助手读取这个目录，它就能按文件逐个迁移。"
+            + extra,
+        )
+        self.main.status(
+            f"已反编译 {jar.name}：{result['written']} 个 Java 文件，目录 {result['target']}"
+        )
 
     def _delete(self) -> None:
         item = self._selected()

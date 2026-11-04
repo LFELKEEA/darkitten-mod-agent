@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import unittest
 import zipfile
 from pathlib import Path
@@ -11,6 +12,7 @@ from dma.config import Config
 from dma.connectors import ConnectorStore
 from dma.knowledge import KnowledgeError, KnowledgeStore, knowledge_context
 from dma.memory import MemoryStore
+from dma.project import Project, ProjectMeta
 from dma.prompt import build_system_prompt
 from dma.skills import SkillStore
 
@@ -281,6 +283,57 @@ class KnowledgeStoreTests(TempDataCase):
         self.assertIn("## 类索引", overview[0]["text"])
         self.assertIn("OldMod", overview[0]["text"])
 
+    def test_decompile_jar_sources_includes_nested_modules(self) -> None:
+        nested = io.BytesIO()
+        with zipfile.ZipFile(nested, "w") as archive:
+            archive.writestr("cn/test/Extra.class", b"\xca\xfe\xba\xbe")
+        path = self.tmp / "mod.jar"
+        with zipfile.ZipFile(path, "w") as archive:
+            archive.writestr("com/example/Main.class", b"\xca\xfe\xba\xbe")
+            archive.writestr("META-INF/jars/extra.jar", nested.getvalue())
+
+        def fake_decompile(target, progress=None, label=""):
+            if Path(target).name.startswith("nested-"):
+                return [("cn/test/Extra.java", "package cn.test; class Extra {}")], ""
+            return [("com/example/Main.java", "package com.example; class Main {}")], ""
+
+        with mock.patch("dma.knowledge._decompile_jar", side_effect=fake_decompile):
+            files, notes = knowledge_mod.decompile_jar_sources(path)
+        paths = {item["path"] for item in files}
+        self.assertEqual(paths, {"com/example/Main.java", "cn/test/Extra.java"})
+        origins = {item["origin"] for item in files}
+        self.assertIn("mod.jar", origins)
+        self.assertIn("META-INF/jars/extra.jar", origins)
+        self.assertIn("共生成 2 个 Java 文件。", notes)
+
+    def test_write_decompiled_tree_creates_index(self) -> None:
+        root = self.tmp / "project"
+        (root / "src" / "main" / "java").mkdir(parents=True)
+        files = [
+            {
+                "path": "com/example/A.java",
+                "text": "package com.example; class A {}",
+                "origin": "a.jar",
+            }
+        ]
+        result = knowledge_mod.write_decompiled_tree(
+            root,
+            "reference/decompiled/a",
+            files,
+            jar_name="a.jar",
+            notes=["测试备注"],
+        )
+        self.assertEqual(result["written"], 1)
+        target = root / "reference/decompiled/a/com/example/A.java"
+        self.assertIn("class A", target.read_text(encoding="utf-8"))
+        index = (root / "reference/decompiled/a/INDEX.md").read_text(encoding="utf-8")
+        self.assertIn("a.jar", index)
+        self.assertIn("测试备注", index)
+        with self.assertRaises(knowledge_mod.KnowledgeError):
+            knowledge_mod.write_decompiled_tree(
+                root, "../outside", files, jar_name="a.jar"
+            )
+
     def test_rejects_binary_and_missing(self) -> None:
         binary = self.tmp / "image.bin"
         binary.write_bytes(b"\x00\x01\x02")
@@ -290,10 +343,18 @@ class KnowledgeStoreTests(TempDataCase):
             knowledge_mod.extract_text(self.tmp / "missing.txt")
 
     def test_context_text_mentions_file(self) -> None:
-        hits = [{"name": "规范.md", "project": "", "text": "使用 Yarn。"}]
+        hits = [
+            {
+                "name": "规范.md",
+                "project": "",
+                "text": "使用 Yarn。",
+                "document_id": 7,
+            }
+        ]
         text = knowledge_context(hits)
         self.assertIn("规范.md", text)
         self.assertIn("全部工程", text)
+        self.assertIn("编号 7", text)
         self.assertIn("使用 Yarn", text)
 
 
@@ -394,6 +455,78 @@ class KnowledgeAgentTests(TempDataCase):
         )
         self.assertIn("模组速览", result)
         self.assertIn("TestMod", result)
+
+    def test_decompile_jar_tool_writes_reference_tree(self) -> None:
+        root = self.tmp / "project"
+        root.mkdir()
+        jar = self.tmp / "tool.jar"
+        jar.write_bytes(b"PK\x03\x04")
+        document = self.knowledge.add_text(
+            "tool.jar", "# jar", kind="jar", source=str(jar)
+        )
+        project = Project(
+            root=root,
+            meta=ProjectMeta(
+                name="测试",
+                mod_id="testmod",
+                mc_version="1.21.1",
+                loader="Fabric",
+            ),
+        )
+        config = Config()
+        config.ai.provider = "pollinations"
+        config.max_steps = 2
+        worker = AgentWorker(
+            user_text="把 tool.jar 反编译进工程",
+            history=[],
+            project=project,
+            config=config,
+            skill_store=SkillStore(),
+            memory=self.memory,
+            connector_store=ConnectorStore(),
+            knowledge=self.knowledge,
+        )
+        files = [
+            {
+                "path": "com/example/A.java",
+                "text": "package com.example; class A {}",
+                "origin": "tool.jar",
+            }
+        ]
+        with mock.patch(
+            "dma.agent.decompile_jar_sources", return_value=(files, ["ok"])
+        ):
+            result = worker._execute(
+                ToolCall(
+                    name="decompile_jar",
+                    args={
+                        "knowledge_id": document["id"],
+                        "target": "reference/decompiled/tool",
+                    },
+                ),
+                AgentRun(),
+            )
+        self.assertIn("反编译完成", result)
+        self.assertTrue(
+            (root / "reference/decompiled/tool/com/example/A.java").is_file()
+        )
+        self.assertTrue((root / "reference/decompiled/tool/INDEX.md").is_file())
+
+    def test_prompt_mentions_decompiled_reference(self) -> None:
+        root = self.tmp / "proj"
+        (root / "reference" / "decompiled").mkdir(parents=True)
+        (root / "reference/decompiled/INDEX.md").write_text("x", encoding="utf-8")
+        project = Project(
+            root=root,
+            meta=ProjectMeta(
+                name="测试",
+                mod_id="testmod",
+                mc_version="1.21.1",
+                loader="Fabric",
+            ),
+        )
+        prompt = build_system_prompt(project, SkillStore())
+        self.assertIn("reference/decompiled/INDEX.md", prompt)
 
     def test_prompt_contains_knowledge_section(self) -> None:
         prompt = build_system_prompt(

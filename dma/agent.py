@@ -12,7 +12,12 @@ from PySide6.QtCore import QObject, Signal
 
 from . import ai, connectors, project as project_mod
 from .config import Config
-from .knowledge import KnowledgeStore, knowledge_context
+from .knowledge import (
+    KnowledgeStore,
+    decompile_jar_sources,
+    knowledge_context,
+    write_decompiled_tree,
+)
 from .memory import MemoryStore, memory_context
 from .prompt import build_system_prompt
 from .skills import SkillStore
@@ -496,6 +501,51 @@ class AgentWorker(QObject):
                         f"全文 {len(body)} 字符。继续读请把 offset 设为 {offset + len(piece)}。）"
                     )
                 return header + piece + tail
+            if name == "decompile_jar":
+                if self.knowledge is None:
+                    return "知识库不可用。"
+                project_key = str(self.project.root) if self.project else ""
+                document = None
+                document_id = args.get("knowledge_id") or args.get("id")
+                if document_id:
+                    try:
+                        document = self.knowledge.get_document(int(document_id))
+                    except (TypeError, ValueError):
+                        document = None
+                if document is None and args.get("name"):
+                    document = self.knowledge.find_document(
+                        str(args.get("name") or ""), project=project_key
+                    )
+                if document is None:
+                    return "没有找到对应的知识库 JAR。请先用 search_knowledge 查编号。"
+                if str(document.get("kind") or "") != "jar":
+                    return "这份知识库资料不是 JAR，无法反编译。"
+                source = Path(str(document.get("source") or ""))
+                if not source.is_file():
+                    return f"找不到原始 JAR：{source}。请重新导入这个文件。"
+                target = str(args.get("target") or "").replace("\\", "/").strip()
+                if not target:
+                    target = f"reference/decompiled/{source.stem}"
+                if target == "src" or target.startswith("src/"):
+                    return (
+                        "不能把反编译结果直接写进 src/，会缺映射和依赖导致编译失败。"
+                        "请用 reference/decompiled/ 作为参考目录。"
+                    )
+                files, notes = decompile_jar_sources(source)
+                result = write_decompiled_tree(
+                    self.project.root,
+                    target,
+                    files,
+                    jar_name=source.name,
+                    notes=notes,
+                )
+                return (
+                    f"反编译完成：{result['written']} 个 Java 文件，"
+                    f"写到 {result['target']}。\n"
+                    f"索引：{result['index']}\n"
+                    "这些文件不在编译路径里，只作为迁移参考；"
+                    "需要迁移时按文件读取，再把改写后的完整文件写到 src/main/java。"
+                )[:MAX_TOOL_RESULT]
             if name == "fetch_url":
                 url = str(args.get("url") or "").strip()
                 if not url:
@@ -503,7 +553,8 @@ class AgentWorker(QObject):
                 return connectors.fetch_url(url)[:MAX_TOOL_RESULT]
             return (
                 f"未知工具：{name}。可用工具：list_files、read_file、search_text、write_file、"
-                "read_skill、remember、recall、search_knowledge、read_knowledge、fetch_url。"
+                "read_skill、remember、recall、search_knowledge、read_knowledge、"
+                "decompile_jar、fetch_url。"
             )
         except Exception as exc:
             return f"工具执行失败：{exc}"

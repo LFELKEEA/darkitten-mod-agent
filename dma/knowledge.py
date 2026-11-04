@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 import math
 import os
@@ -74,6 +75,15 @@ MAX_CLASS_CHARS = 6_000
 MAX_DECOMPILE_CHARS = 700_000
 MAX_DECOMPILE_FILE_BYTES = 2 * 1024 * 1024
 DECOMPILE_TIMEOUT = 180
+MAX_EXPORT_FILES = 2500
+MAX_NESTED_JARS = 4
+MAX_NESTED_JAR_BYTES = 12 * 1024 * 1024
+_LIBRARY_PACKAGES = (
+    "net/fabricmc/", "net/minecraft/", "com/mojang/", "com/google/",
+    "org/apache/", "org/slf4j/", "org/jetbrains/", "org/intellij/",
+    "org/spongepowered/", "kotlin/", "kotlinx/", "io/netty/", "it/unimi/",
+    "javax/", "java/", "jdk/", "sun/", "com/electronwill/",
+)
 Progress = Callable[[str], None]
 
 _WORD_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
@@ -656,7 +666,7 @@ def _java_for_decompile() -> tuple[Path | None, str]:
 
 
 def _decompile_jar(
-    path: Path, progress: Progress | None = None
+    path: Path, progress: Progress | None = None, label: str = ""
 ) -> tuple[list[tuple[str, str]], str]:
     jar = paths.resource_dir() / "decompiler" / "vineflower.jar"
     if not jar.is_file():
@@ -664,7 +674,7 @@ def _decompile_jar(
     java, note = _java_for_decompile()
     if java is None:
         return [], note
-    _notify(progress, f"正在反编译 {path.name}，这一步可能需要几十秒…")
+    _notify(progress, f"正在反编译 {label or path.name}，这一步可能需要几十秒…")
     command = [
         str(java),
         "-Xmx1024m",
@@ -720,6 +730,187 @@ def _decompile_jar(
     if proc.returncode:
         return files, f"反编译器返回码 {proc.returncode}，生成的结果可能不完整。"
     return files, ""
+
+
+def _is_library_class(name: str) -> bool:
+    low = name.lower()
+    return any(low.startswith(prefix) for prefix in _LIBRARY_PACKAGES)
+
+
+def _nested_jar_candidates(
+    path: Path, progress: Progress | None, notes: list[str]
+) -> list[tuple[str, bytes]]:
+    """挑出 JAR 里 META-INF/jars 下属于模组自己的内嵌模块。"""
+    candidates: list[tuple[str, bytes]] = []
+    try:
+        archive = zipfile.ZipFile(path)
+    except (zipfile.BadZipFile, OSError):
+        return candidates
+    with archive:
+        infos = [
+            item
+            for item in archive.infolist()
+            if not item.is_dir()
+            and item.filename.lower().startswith("meta-inf/jars/")
+            and item.filename.lower().endswith(".jar")
+        ]
+        for info in sorted(infos, key=lambda item: item.filename.lower()):
+            if len(candidates) >= MAX_NESTED_JARS:
+                notes.append(f"内嵌 jar 超过 {MAX_NESTED_JARS} 个，后面的未展开。")
+                break
+            if info.file_size > MAX_NESTED_JAR_BYTES:
+                notes.append(f"跳过过大的内嵌 jar：{info.filename}")
+                continue
+            try:
+                raw = archive.read(info)
+                with zipfile.ZipFile(io.BytesIO(raw)) as nested:
+                    names = nested.namelist()
+                    classes = [name for name in names if name.endswith(".class")]
+                    if not classes:
+                        continue
+                    if not any(not _is_library_class(name) for name in classes):
+                        notes.append(f"跳过依赖库内嵌 jar：{info.filename}")
+                        continue
+            except (OSError, RuntimeError, NotImplementedError, zipfile.BadZipFile):
+                continue
+            candidates.append((info.filename, raw))
+    return candidates
+
+
+def decompile_jar_sources(
+    path: Path,
+    *,
+    progress: Progress | None = None,
+    include_nested: bool = True,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """把 JAR 和它自己的内嵌模块反编译成可写入工程的 .java 文件列表。"""
+    source = Path(path).expanduser()
+    if not source.is_file():
+        raise KnowledgeError(f"文件不存在：{source}")
+    if source.suffix.lower() != ".jar":
+        raise KnowledgeError("只能反编译 .jar 文件。")
+    notes: list[str] = []
+    files: list[dict[str, Any]] = []
+    main_files, note = _decompile_jar(source, progress)
+    if note:
+        notes.append(note)
+    for relative, body in main_files:
+        files.append({"path": relative, "text": body, "origin": source.name})
+    if include_nested:
+        nested = _nested_jar_candidates(source, progress, notes)
+        if nested:
+            _notify(progress, f"正在反编译 {len(nested)} 个内嵌模块…")
+            with tempfile.TemporaryDirectory(prefix="dma-export-") as temp:
+                for index, (name, raw) in enumerate(nested):
+                    item = Path(temp) / f"nested-{index}.jar"
+                    try:
+                        item.write_bytes(raw)
+                    except OSError as exc:
+                        notes.append(f"无法展开内嵌 jar {name}：{exc}")
+                        continue
+                    part, part_note = _decompile_jar(
+                        item, progress, label=Path(name).name
+                    )
+                    if part_note:
+                        notes.append(f"{Path(name).name}：{part_note}")
+                    for relative, body in part:
+                        files.append(
+                            {"path": relative, "text": body, "origin": name}
+                        )
+    if not files:
+        detail = "；".join(dict.fromkeys(note for note in notes if note))
+        raise KnowledgeError(
+            detail
+            or (
+                "反编译没有生成 Java 源码，可能这个 JAR 只有资源，"
+                "或本机 JDK 版本不受支持。"
+            )
+        )
+    deduped: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in files:
+        relative = str(item["path"]).replace("\\", "/").lstrip("/")
+        if not relative or ".." in Path(relative).parts:
+            notes.append(f"跳过不安全的源码路径：{relative}")
+            continue
+        if relative in seen:
+            notes.append(f"多个模块包含同名文件，保留先出现的：{relative}")
+            continue
+        seen.add(relative)
+        deduped.append({**item, "path": relative})
+    if len(deduped) > MAX_EXPORT_FILES:
+        notes.append(f"源码文件超过 {MAX_EXPORT_FILES} 个，后面的未导出。")
+        deduped = deduped[:MAX_EXPORT_FILES]
+    notes.append(f"共生成 {len(deduped)} 个 Java 文件。")
+    return deduped, notes
+
+
+def write_decompiled_tree(
+    project_root: Path,
+    target: str,
+    files: list[dict[str, Any]],
+    *,
+    jar_name: str,
+    notes: list[str] | None = None,
+) -> dict[str, Any]:
+    """把反编译结果写到工程内的参考目录，并生成 INDEX.md。"""
+    from . import project as project_mod
+
+    relative_target = str(target or "").replace("\\", "/").strip("/")
+    if not relative_target:
+        raise KnowledgeError("目标目录不能为空。")
+    try:
+        base = project_mod.safe_path(project_root, relative_target)
+    except project_mod.ProjectError as exc:
+        raise KnowledgeError(str(exc)) from exc
+    base.mkdir(parents=True, exist_ok=True)
+    written = 0
+    skipped = 0
+    origins: dict[str, int] = {}
+    for item in files:
+        relative = str(item.get("path") or "").replace("\\", "/").lstrip("/")
+        if not relative:
+            skipped += 1
+            continue
+        try:
+            path = project_mod.safe_path(
+                project_root, f"{relative_target}/{relative}"
+            )
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(str(item.get("text") or ""), encoding="utf-8")
+        except (project_mod.ProjectError, OSError):
+            skipped += 1
+            continue
+        written += 1
+        origin = str(item.get("origin") or jar_name)
+        origins[origin] = origins.get(origin, 0) + 1
+    lines = [
+        f"# 反编译参考资料：{jar_name}",
+        "",
+        f"- 生成时间：{_now()}",
+        f"- 目标目录：{relative_target}",
+        f"- Java 文件：{written} 个",
+        "- 说明：这些文件只用于阅读和迁移，不参与编译；"
+        "迁移时逐个改写包名、映射和目标加载器 API。",
+        "- 工具：Vineflower 1.12.0（Apache-2.0），机器还原，"
+        "变量名和部分结构可能与作者原稿不同。",
+        "",
+        "## 来源",
+    ]
+    for origin, count in origins.items():
+        lines.append(f"- {origin}：{count} 个")
+    if notes:
+        lines.extend(["", "## 备注"])
+        lines.extend(f"- {note}" for note in notes)
+    index_path = base / "INDEX.md"
+    index_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return {
+        "base": str(base),
+        "target": relative_target,
+        "written": written,
+        "skipped": skipped,
+        "index": f"{relative_target}/INDEX.md",
+    }
 
 
 def _jar_text(path: Path, progress: Progress | None = None) -> str:
@@ -1318,5 +1509,7 @@ def knowledge_context(hits: list[dict[str, Any]]) -> str:
     ]
     for hit in hits:
         scope = "当前工程" if hit.get("project") else "全部工程"
-        lines.append(f"\n[{hit.get('name')}｜{scope}]\n{hit.get('text')}")
+        ident = hit.get("document_id")
+        suffix = f"｜编号 {ident}" if ident else ""
+        lines.append(f"\n[{hit.get('name')}｜{scope}{suffix}]\n{hit.get('text')}")
     return "\n".join(lines)

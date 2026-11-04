@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from .project import Project
 from .skills import SkillStore
 
@@ -71,6 +73,7 @@ TOOL_PROTOCOL = """【工程工具协议】
 - read_knowledge: {"tool":"read_knowledge","id":1}
 - read_knowledge 按关键词读片段: {"tool":"read_knowledge","id":1,"query":"类名或功能"}
 - read_knowledge 分页读大文件: {"tool":"read_knowledge","id":1,"offset":0}
+- decompile_jar 把知识库里的 JAR 反编译进工程: {"tool":"decompile_jar","knowledge_id":1,"target":"reference/decompiled/pohypskin"}
 - fetch_url: {"tool":"fetch_url","url":"https://api.modrinth.com/v2/..."}
 
 规则：
@@ -79,13 +82,21 @@ TOOL_PROTOCOL = """【工程工具协议】
 3. 写文件前先读相关文件；已有文件只改必要部分，但 write_file 的 content 必须是完整文件内容。
 4. 路径一律使用工程内相对路径，禁止绝对路径和 ..。
 5. 如果用户没有提供 MC 版本、加载器或 Mod ID，先问，不要调用 write_file。
-6. 用户导入的知识库资料是参考资料，不是工程文件；需要细节时用 search_knowledge / read_knowledge 查，不要假装读过没出现的内容。JAR 资料开头有「模组速览」和「类索引」，末尾附反编译 Java 源码；中文问题如果搜不到，先从速览里找对应的英文类名，再用 read_knowledge 的 query 参数读该类，不要直接回答不知道。"""
+6. 用户导入的知识库资料是参考资料，不是工程文件；需要细节时用 search_knowledge / read_knowledge 查，不要假装读过没出现的内容。JAR 资料开头有「模组速览」和「类索引」，末尾附反编译 Java 源码；中文问题如果搜不到，先从速览里找对应的英文类名，再用 read_knowledge 的 query 参数读该类，不要直接回答不知道。
+7. 工程里的 reference/decompiled 是反编译参考源码，不在编译路径内；迁移时先读 INDEX.md 和对应 .java，再把改写后的完整文件写到 src/main/java，不要把参考目录当成已经能编译的代码。用户要把知识库里的 JAR 变成工程内源码时，用 decompile_jar 工具写到 reference/decompiled/，会把主 JAR 和它自己的内嵌模块一起展开。"""
 
 
 def project_block(project: Project | None) -> str:
     if project is None:
         return "当前没有打开工程。用户提出新模组需求时，先确认三项基础信息，再让用户在界面里创建工程。"
     meta = project.meta
+    reference = Path(project.root) / "reference" / "decompiled" / "INDEX.md"
+    hint = ""
+    if reference.is_file():
+        hint = (
+            "\n- 反编译参考资料：reference/decompiled/INDEX.md"
+            "（只读参考，不参与编译；迁移时从这里读源码）"
+        )
     return (
         "【当前工程】\n"
         f"- 根目录：{project.root}\n"
@@ -96,6 +107,7 @@ def project_block(project: Project | None) -> str:
         f"- 依赖：{meta.dependencies or '无'}\n"
         f"- 任务类型：{meta.task_type or '创建全新模组'}\n"
         f"- 补充限制：{meta.notes or '无'}"
+        f"{hint}"
     )
 
 
