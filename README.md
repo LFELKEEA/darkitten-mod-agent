@@ -2,7 +2,7 @@
 
 只写 Minecraft Java 模组的独立桌面 Agent。基于 PySide6，自带对话工作台、技能、连接器和知识库，可从下载站、GitHub 与 Darkitten 启动器获取，并支持自动更新。
 
-当前版本：`0.3.9`
+当前版本：`0.3.10`
 
 ## 功能
 
@@ -20,7 +20,7 @@
 - **环境自检**：检查 Java、JAVA_HOME、Gradle、Git、目录写入、资料源连通性和模型通道，给出缺失项与修复建议，可复制报告。
 - **编译运行**：点任务按钮时先自动准备环境，再执行 `gradlew build` / `runClient` / `runServer` / `runDatagen`；日志实时回显，可停止、复制日志、打开 `build/libs`。
 - **工具轮数**：默认 32 轮，可调到 999；填 0 表示不限制，适合大型工程。
-- **知识库**：导入 txt / md / docx / pdf / jar / 代码和配置文件，自动提取正文、分片；每轮对话前检索相关片段，也能让助手用 `search_knowledge` / `read_knowledge` 按需查。
+- **知识库**：导入 txt / md / docx / pdf / jar / 代码和配置文件，自动提取正文、分片；每轮对话前检索相关片段，也能让助手用 `search_knowledge` / `read_knowledge` 按需查。列表里点选文件只加载前 4 万字符预览，上千万字的大 JAR 也不会卡住界面。
 - **模组 JAR 分析**：直接导入现成模组，提取 `fabric.mod.json` / `mods.toml`、语言与资源 JSON、类结构，并用内置 Vineflower 反编译出 Java 源码；开头生成「模组速览 + 类索引」，中文问题也能对上英文类名，做兼容、移植或复刻功能时可直接参考实现。
 - **反编译到工程**：知识库页选中 JAR 点「反编译到工程」，把主 JAR 和 `META-INF/jars` 里的自有内嵌模块一起展开成 `.java`，写到 `reference/decompiled/<JAR 名>/`；按原包路径保存，生成 `INDEX.md`，不参与编译，方便让助手逐个文件迁移。对话里也可以直接让助手调用 `decompile_jar`。
 - **桌面快捷方式**：首次启动询问是否创建。

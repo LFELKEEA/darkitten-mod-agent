@@ -185,7 +185,9 @@ class KnowledgePage(QWidget):
         if item is None:
             self.detail.clear()
             return
-        document = self.store.get_document(int(item["id"]))
+        document = self.store.get_document(
+            int(item["id"]), limit_chars=PREVIEW_CHARS + 1
+        )
         if document is None:
             self.detail.clear()
             return
@@ -195,7 +197,7 @@ class KnowledgePage(QWidget):
             header += f"来源：{source}\n"
         header += f"范围：{'当前工程' if document.get('project') else '全部工程'}"
         body = str(document.get("text") or "")
-        if len(body) > PREVIEW_CHARS:
+        if document.get("truncated"):
             body = body[:PREVIEW_CHARS] + "\n\n…（预览已截断）"
         self.detail.setPlainText(f"{header}\n\n{body}")
 

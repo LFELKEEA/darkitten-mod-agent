@@ -102,6 +102,32 @@ class KnowledgeStoreTests(TempDataCase):
         self.assertIn("Yarn", hits[0]["text"])
         self.assertEqual(store.search("完全无关的量子物理"), [])
 
+    def test_join_chunks_matches_overlap_append(self) -> None:
+        text = "\n\n".join(f"第 {index} 段：" + "内容" * 300 for index in range(40))
+        chunks = knowledge_mod.split_chunks(text)
+        expected = ""
+        for chunk in chunks:
+            expected = knowledge_mod._append_overlap(expected, chunk)
+        body, truncated = knowledge_mod._join_chunks(chunks)
+        self.assertFalse(truncated)
+        self.assertEqual(body, expected)
+
+    def test_get_document_preview_stops_at_limit(self) -> None:
+        store = self.store()
+        text = "\n\n".join(f"第 {index} 段：" + "内容" * 300 for index in range(40))
+        result = store.add_text("长文", text)
+        full = store.get_document(result["id"])
+        self.assertFalse(full["truncated"])
+        self.assertIn("第 39 段", full["text"])
+        preview = store.get_document(result["id"], limit_chars=500)
+        self.assertTrue(preview["truncated"])
+        self.assertEqual(len(preview["text"]), 500)
+        self.assertTrue(preview["text"].startswith("第 0 段："))
+        self.assertEqual(preview["text"], full["text"][:500])
+        exact = store.get_document(result["id"], limit_chars=len(full["text"]))
+        self.assertFalse(exact["truncated"])
+        self.assertEqual(exact["text"], full["text"])
+
     def test_scope_filters_project_documents(self) -> None:
         store = self.store()
         store.add_text("公共资料", "Fabric 事件注册通用说明。")

@@ -10,6 +10,7 @@ import subprocess
 import tempfile
 import threading
 import zipfile
+from collections.abc import Iterable
 from datetime import datetime
 from html.parser import HTMLParser
 from pathlib import Path
@@ -1152,20 +1153,52 @@ def split_chunks(text: str) -> list[str]:
     return chunks
 
 
-def _append_overlap(base: str, chunk: str) -> str:
-    """拼接相邻分块，去掉 split_chunks 留下的重叠部分。"""
-    if not base:
-        return chunk
+def _overlap_remainder(tail: str, chunk: str) -> str:
+    """chunk 接在 tail 后面时真正需要追加的部分，去掉重叠。"""
     candidates = [chunk]
     stripped = chunk.lstrip()
     if stripped != chunk:
         candidates.append(stripped)
     for candidate in candidates:
-        limit = min(len(base), len(candidate), CHUNK_OVERLAP + 12)
+        limit = min(len(tail), len(candidate), CHUNK_OVERLAP + 12)
         for size in range(limit, 19, -1):
-            if base.endswith(candidate[:size]):
-                return base + candidate[size:]
-    return base + "\n" + chunk
+            if tail.endswith(candidate[:size]):
+                return candidate[size:]
+    return "\n" + chunk
+
+
+def _append_overlap(base: str, chunk: str) -> str:
+    """拼接相邻分块，去掉 split_chunks 留下的重叠部分。"""
+    if not base:
+        return chunk
+    return base + _overlap_remainder(base, chunk)
+
+
+def _join_chunks(chunks: Iterable[str], limit: int | None = None) -> tuple[str, bool]:
+    """按顺序拼接分块；只保留上一块的尾部用于去重，整体复杂度是线性的。
+
+    limit 不为空时最多返回 limit 个字符，第二个返回值表示后面是否还有内容。
+    """
+    parts: list[str] = []
+    tail = ""
+    total = 0
+    truncated = False
+    iterator = iter(chunks)
+    for raw in iterator:
+        piece = str(raw)
+        added = piece if not parts else _overlap_remainder(tail, piece)
+        if limit is not None and total + len(added) > limit:
+            parts.append(added[: max(0, limit - total)])
+            truncated = True
+            break
+        parts.append(added)
+        total += len(added)
+        if added:
+            tail = (tail + added)[-(CHUNK_OVERLAP + 12) :]
+        if limit is not None and total >= limit:
+            truncated = next(iterator, None) is not None
+            break
+    return "".join(parts), truncated
 
 
 def _entry_points(
@@ -1453,21 +1486,30 @@ class KnowledgeStore:
             self._conn.execute("DELETE FROM chunks WHERE document_id=?", (int(document_id),))
             self._conn.execute("DELETE FROM documents WHERE id=?", (int(document_id),))
 
-    def get_document(self, document_id: int) -> dict[str, Any] | None:
+    def get_document(
+        self, document_id: int, *, limit_chars: int | None = None
+    ) -> dict[str, Any] | None:
+        """读取资料正文。
+
+        limit_chars 用于界面预览：只按需读取前面的分块，不会把几千万字的
+        大文件整个拼出来，避免点一下列表就卡住。
+        """
         with self._lock:
             row = self._conn.execute(
                 "SELECT * FROM documents WHERE id=?", (int(document_id),)
             ).fetchone()
             if row is None:
                 return None
-            chunks = self._conn.execute(
+            cursor = self._conn.execute(
                 "SELECT text FROM chunks WHERE document_id=? ORDER BY ord", (int(document_id),)
-            ).fetchall()
+            )
+            body, truncated = _join_chunks(
+                (str(chunk["text"]) for chunk in cursor),
+                None if limit_chars is None else max(1, int(limit_chars)),
+            )
         item = dict(row)
-        body = ""
-        for chunk in chunks:
-            body = _append_overlap(body, str(chunk["text"]))
         item["text"] = body
+        item["truncated"] = truncated
         return item
 
     def find_document(self, name: str, *, project: str = "") -> dict[str, Any] | None:
