@@ -2,7 +2,7 @@
 
 只写 Minecraft Java 模组的独立桌面 Agent。基于 PySide6，自带对话工作台、技能、连接器和知识库，可从下载站、GitHub 与 Darkitten 启动器获取，并支持自动更新。
 
-当前版本：`0.3.1`
+当前版本：`0.3.2`
 
 ## 功能
 
@@ -18,7 +18,7 @@
 - **编译运行**：点任务按钮时先自动准备环境，再执行 `gradlew build` / `runClient` / `runServer` / `runDatagen`；日志实时回显，可停止、复制日志、打开 `build/libs`。
 - **工具轮数**：默认 32 轮，可调到 999；填 0 表示不限制，适合大型工程。
 - **知识库**：导入 txt / md / docx / pdf / jar / 代码和配置文件，自动提取正文、分片；每轮对话前检索相关片段，也能让助手用 `search_knowledge` / `read_knowledge` 按需查。
-- **模组 JAR 分析**：直接导入现成模组，提取 `fabric.mod.json` / `mods.toml`、语言与资源 JSON、类结构（字段、方法、引用类、字符串常量）和包内源码，做兼容或移植时可直接参考。
+- **模组 JAR 分析**：直接导入现成模组，提取 `fabric.mod.json` / `mods.toml`、语言与资源 JSON、类结构，并用内置 Vineflower 反编译出 Java 源码；做兼容、移植或复刻功能时可直接参考实现。
 - **桌面快捷方式**：首次启动询问是否创建。
 - **自动更新**：读取 `mod_agent_release.json`，下载 ZIP、校验 SHA-256，退出后由后台脚本替换程序文件并重启。
 
@@ -45,7 +45,9 @@ Windows 上也可以双击 `main.py`（需要已安装 Python 与依赖）。
 侧边栏「知识库」用来放做模组时要参考的资料：开发规范、版本笔记、API 文档、以前的踩坑记录都可以导入。
 
 - **支持格式**：`txt` / `md` / `docx` / `pdf` / `jar`，以及 `json`、`yaml`、`toml`、`properties`、`gradle`、`java`、`kt`、`py`、`html`、`xml`、`csv` 等文本文件。
-- **模组 JAR**：导入 `.jar` 后会提取模组元数据、`lang` 语言文件、资源 JSON、`.java` 源码，以及每个 `.class` 的类名、父类、接口、字段、方法、引用类和字符串常量。它不会反编译方法体，复杂逻辑要结合类名、调用关系和字符串推断；需要完整源码时，优先再导入对应的 `-sources.jar`。超过 500 个类、400 个文本条目或单份 150 万字符时只保留前面的部分。
+- **模组 JAR**：导入 `.jar` 后会提取模组元数据、`lang` 语言文件、资源 JSON、包内 `.java` 源码和类结构，并在本机有 JDK 17+ 时调用内置的 Vineflower 1.12.0 反编译出 Java 源码。反编译结果按类拼接进同一份资料，助手可以直接检索方法体。
+- **JAR 限制**：Fabric 模组里常见 `class_1234` / `method_5678`，这是 intermediary 名称，不是反编译失败；需要可读名称时对照工程当前的 Yarn / Mojmap 映射，或再导入对应的 `-sources.jar`。反编译属于机器还原，变量名和部分控制流可能与作者原稿不同。
+- **JAR 上限**：最多展开 500 个类和 400 个文本条目，反编译源码最多 70 万字符；结构和源码共享单份资料 150 万字符上限，超出会截断并注明。
 - **导入范围**：默认所有工程共用；勾选「导入到当前工程」后只有当前工程能检索到。重复导入同一个文件会更新原条目。
 - **自动检索**：每轮对话前，助手会按用户这句话从知识库里挑最相关的片段放进系统提示，不需要手动复制粘贴。
 - **按需深挖**：资料片段不够时，助手会调用 `search_knowledge` 再搜，或用 `read_knowledge` 读整份文件。
@@ -110,6 +112,8 @@ API Key 只保存在本机 `data/config.json`，不会上传到本项目服务�
 版本匹配：Fabric 的 `fabric-loom` 1.19.x 要求 Gradle 9.8.0 及以上，所以内置 Wrapper 用 9.8.2。工程里已有更旧的 Wrapper 时，编译会报 `requires at least Gradle X` / `Minimum supported Gradle version is X`；只要 X 不高于 9.8.2，工坊会自动把 Wrapper 重写成 9.8.2、装好对应发行包并重试一次。X 更高时才会提示你去降插件或手动升级。
 
 `assets/wrapper/` 里的 Wrapper 文件来自 [gradle/gradle v9.8.2](https://github.com/gradle/gradle/tree/v9.8.2)，遵循 Apache-2.0，出处与许可见该目录下的 `NOTICE.txt`。
+
+`assets/decompiler/vineflower.jar` 来自 [Vineflower 1.12.0](https://github.com/Vineflower/vineflower/releases/tag/1.12.0)，遵循 Apache-2.0；许可证与出处见同目录的 `LICENSE.txt`、`NOTICE.txt`。反编译只在本机运行，不会把 JAR 或生成的源码上传到任何服务器。
 
 ### 证书与代理
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 import zipfile
 from pathlib import Path
+from unittest import mock
 
 from dma import knowledge as knowledge_mod
 from dma.agent import AgentRun, AgentWorker, ToolCall
@@ -166,7 +167,8 @@ class KnowledgeStoreTests(TempDataCase):
             archive.writestr("com/example/ExampleMod.class", make_class())
             archive.writestr("assets/examplemod/textures/block/ruby.png", b"\x89PNG\x00\x01")
             archive.writestr("META-INF/jars/library.jar", b"PK\x03\x04nested")
-        text, kind = knowledge_mod.extract_text(path)
+        with mock.patch("dma.knowledge._decompile_jar", return_value=([], "")):
+            text, kind = knowledge_mod.extract_text(path)
         self.assertEqual(kind, "jar")
         self.assertIn("模组 JAR：examplemod-1.0.0.jar", text)
         self.assertIn("fabric.mod.json", text)
@@ -182,12 +184,44 @@ class KnowledgeStoreTests(TempDataCase):
         self.assertIn("已跳过 1 个内嵌 jar", text)
         self.assertNotIn("PNG", text)
 
+    def test_jar_appends_decompiled_source(self) -> None:
+        path = self.tmp / "sourcemod.jar"
+        with zipfile.ZipFile(path, "w") as archive:
+            archive.writestr("fabric.mod.json", '{"id":"sourcemod"}')
+            archive.writestr("com/example/ExampleMod.class", make_class())
+        sources = [
+            (
+                "com/example/ExampleMod.java",
+                "package com.example;\npublic class ExampleMod { public void onInitialize() {} }",
+            )
+        ]
+        with mock.patch("dma.knowledge._decompile_jar", return_value=(sources, "")):
+            text, kind = knowledge_mod.extract_text(path)
+        self.assertEqual(kind, "jar")
+        self.assertIn("反编译源码（Vineflower", text)
+        self.assertIn("## 源码：com/example/ExampleMod.java", text)
+        self.assertIn("public class ExampleMod", text)
+        self.assertIn("只用于理解实现", text)
+
+    def test_jar_reports_missing_jdk_note(self) -> None:
+        path = self.tmp / "nojdk.jar"
+        with zipfile.ZipFile(path, "w") as archive:
+            archive.writestr("fabric.mod.json", '{"id":"nojdk"}')
+            archive.writestr("com/example/NoJdk.class", make_class())
+        note = "本机没有找到 JDK，未生成反编译源码。"
+        with mock.patch("dma.knowledge._decompile_jar", return_value=([], note)):
+            text, kind = knowledge_mod.extract_text(path)
+        self.assertEqual(kind, "jar")
+        self.assertIn("nojdk", text)
+        self.assertIn(note, text)
+
     def test_jar_with_broken_class_still_reads_metadata(self) -> None:
         path = self.tmp / "broken.jar"
         with zipfile.ZipFile(path, "w") as archive:
             archive.writestr("fabric.mod.json", '{"id":"brokenmod"}')
             archive.writestr("com/example/Broken.class", b"\xca\xfe\xba\xbe\x00")
-        text, kind = knowledge_mod.extract_text(path)
+        with mock.patch("dma.knowledge._decompile_jar", return_value=([], "")):
+            text, kind = knowledge_mod.extract_text(path)
         self.assertEqual(kind, "jar")
         self.assertIn("brokenmod", text)
         self.assertNotIn("class com.example.Broken", text)
@@ -200,7 +234,8 @@ class KnowledgeStoreTests(TempDataCase):
                 'modId="searchmod"\ndescription="Adds a ruby tool set"',
             )
         store = self.store()
-        result = store.add_file(path)
+        with mock.patch("dma.knowledge._decompile_jar", return_value=([], "")):
+            result = store.add_file(path)
         self.assertEqual(result["name"], "searchmod.jar")
         hits = store.search("ruby tool")
         self.assertTrue(hits)

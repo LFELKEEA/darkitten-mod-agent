@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .. import toolchain
 from ..knowledge import SUPPORTED_FILTER, KnowledgeStore
 from .widgets import card, tiny
 
@@ -190,6 +191,21 @@ class KnowledgePage(QWidget):
         files, _ = QFileDialog.getOpenFileNames(self, "导入到知识库", start, SUPPORTED_FILTER)
         if not files:
             return
+        if any(Path(name).suffix.lower() == ".jar" for name in files):
+            java = toolchain.find_java()
+            if java is None or java.major < 17:
+                choice = QMessageBox.question(
+                    self,
+                    "没有可用的 JDK",
+                    "本机没有 JDK 17 或更高版本。JAR 仍然会提取元数据和类结构，"
+                    "但不会生成 Java 源码。\n\n"
+                    "可以先去「环境」页点「一键准备」装好 JDK，再重新导入。\n\n"
+                    "现在仍然导入吗？",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.Yes,
+                )
+                if choice != QMessageBox.StandardButton.Yes:
+                    return
         scope = self._project_key() if self.import_scope.isChecked() else ""
         progress = QProgressDialog("正在读取文件…", "取消", 0, len(files), self)
         progress.setWindowTitle("导入知识库")
@@ -203,8 +219,14 @@ class KnowledgePage(QWidget):
             QApplication.processEvents()
             if progress.wasCanceled():
                 break
+            def report(message: str) -> None:
+                progress.setLabelText(message)
+                QApplication.processEvents()
+
             try:
-                result = self.store.add_file(Path(filename), project=scope)
+                result = self.store.add_file(
+                    Path(filename), project=scope, progress=report
+                )
             except Exception as exc:
                 errors.append(f"{Path(filename).name}：{exc}")
             else:

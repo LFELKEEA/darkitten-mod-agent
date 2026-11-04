@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import math
+import os
 import re
 import sqlite3
+import subprocess
+import tempfile
 import threading
 import zipfile
 from datetime import datetime
 from html.parser import HTMLParser
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from xml.etree import ElementTree
 
 from . import paths
@@ -67,6 +70,10 @@ MAX_JAR_ENTRY_BYTES = 4 * 1024 * 1024
 MAX_JAR_READ_BYTES = 32 * 1024 * 1024
 MAX_JAR_ENTRY_CHARS = 200_000
 MAX_CLASS_CHARS = 6_000
+MAX_DECOMPILE_CHARS = 700_000
+MAX_DECOMPILE_FILE_BYTES = 2 * 1024 * 1024
+DECOMPILE_TIMEOUT = 180
+Progress = Callable[[str], None]
 
 _WORD_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 _ASCII_TOKEN = re.compile(r"[A-Za-z0-9_.$#@-]{2,}")
@@ -439,7 +446,106 @@ def _decode_entry(raw: bytes) -> str:
     return raw.decode("utf-8", "replace").replace("\x00", "")
 
 
-def _jar_text(path: Path) -> str:
+def _notify(progress: Progress | None, message: str) -> None:
+    if progress is None:
+        return
+    try:
+        progress(message)
+    except Exception:
+        pass
+
+
+def _java_for_decompile() -> tuple[Path | None, str]:
+    try:
+        from . import toolchain
+
+        install = toolchain.find_java()
+    except Exception as exc:  # noqa: BLE001 - 检测失败不应影响结构提取
+        return None, f"检测 JDK 失败：{exc}"
+    if install is None:
+        return None, (
+            "本机没有找到 JDK，未生成反编译源码。到「环境」页点「一键准备」"
+            "装好 JDK 21，再重新导入这个 JAR。"
+        )
+    if install.major < 17:
+        return None, (
+            f"本机 JDK {install.version} 版本过低，未生成反编译源码；"
+            "反编译需要 JDK 17 或更高。"
+        )
+    executable = install.home / "bin" / ("java.exe" if os.name == "nt" else "java")
+    if not executable.is_file():
+        return None, "没有找到可用的 java 可执行文件，未生成反编译源码。"
+    return executable, ""
+
+
+def _decompile_jar(
+    path: Path, progress: Progress | None = None
+) -> tuple[list[tuple[str, str]], str]:
+    jar = paths.resource_dir() / "decompiler" / "vineflower.jar"
+    if not jar.is_file():
+        return [], "没有找到内置反编译器，未生成反编译源码。"
+    java, note = _java_for_decompile()
+    if java is None:
+        return [], note
+    _notify(progress, f"正在反编译 {path.name}，这一步可能需要几十秒…")
+    command = [
+        str(java),
+        "-Xmx1024m",
+        "-jar",
+        str(jar),
+        "-s",
+        "--thread-count",
+        "4",
+        str(path),
+    ]
+    kwargs: dict[str, Any] = {}
+    if os.name == "nt":
+        kwargs["creationflags"] = 0x08000000
+    try:
+        with tempfile.TemporaryDirectory(prefix="dma-jar-") as temp:
+            output = Path(temp) / "src"
+            output.mkdir()
+            proc = subprocess.run(
+                command + [str(output)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                timeout=DECOMPILE_TIMEOUT,
+                **kwargs,
+            )
+            files: list[tuple[str, str]] = []
+            total = 0
+            for item in sorted(output.rglob("*.java")):
+                try:
+                    raw = item.read_bytes()
+                except OSError:
+                    continue
+                if len(raw) > MAX_DECOMPILE_FILE_BYTES:
+                    continue
+                body = raw.decode("utf-8-sig", "replace").replace("\x00", "")
+                if not body.strip():
+                    continue
+                relative = item.relative_to(output).as_posix()
+                files.append((relative, body))
+                total += len(body)
+                if total >= MAX_DECOMPILE_CHARS * 2:
+                    break
+    except subprocess.TimeoutExpired:
+        return [], f"反编译超过 {DECOMPILE_TIMEOUT} 秒，已停止；没有生成源码。"
+    except OSError as exc:
+        return [], f"无法启动反编译器：{exc}"
+    if not files:
+        detail = ""
+        if proc.returncode:
+            detail = proc.stderr.decode("utf-8", "replace").strip().splitlines()
+            detail = f"：{detail[-1][:160]}" if detail else ""
+        return [], f"反编译没有生成 Java 源码，可能是纯资源包或类版本不受支持{detail}。"
+    _notify(progress, f"反编译完成，共 {len(files)} 个 Java 文件，正在整理…")
+    if proc.returncode:
+        return files, f"反编译器返回码 {proc.returncode}，生成的结果可能不完整。"
+    return files, ""
+
+
+def _jar_text(path: Path, progress: Progress | None = None) -> str:
     try:
         archive = zipfile.ZipFile(path)
     except (zipfile.BadZipFile, OSError) as exc:
@@ -450,8 +556,8 @@ def _jar_text(path: Path) -> str:
         header = (
             f"# 模组 JAR：{path.name}\n"
             "说明：以下内容由程序自动提取，包括模组元数据、语言与资源文本、"
-            "类结构（字段、方法、引用的类、字符串常量）以及包内源码。"
-            "这不是完整反编译源码，复杂逻辑需要结合类名和调用关系推断。"
+            "类结构（字段、方法、引用类、调用关系、字符串常量），"
+            "并尝试用内置反编译器生成 Java 源码（需要本机安装 JDK 17 或更高）。"
         )
         parts = [header]
         used = len(header)
@@ -517,24 +623,73 @@ def _jar_text(path: Path) -> str:
                 break
             parts.append(block)
             used += len(block) + 2
+        if classes == 0 and text_entries == 0:
+            raise KnowledgeError("这个 .jar 里没有可提取的文本或类结构，可能只是资源包或空包。")
+        structural = "\n\n".join(parts)
+        source_files: list[tuple[str, str]] = []
+        source_note = ""
+        if classes:
+            source_files, source_note = _decompile_jar(path, progress)
+        source_text = ""
+        decompile_truncated = False
+        if source_files:
+            source_header = (
+                "# 反编译源码（Vineflower 1.12.0，Apache-2.0）\n"
+                "以下源码由机器反编译生成，变量名和部分结构可能与作者原稿不同，"
+                "只用于理解实现。需要精确对应时，请以官方源码或 -sources.jar 为准。"
+                "Fabric 模组里如果出现 class_1234 / method_5678，这是 intermediary 名称，"
+                "需要用工程当前的 Yarn / Mojmap 映射对照。"
+            )
+            source_parts = [source_header]
+            source_used = len(source_header)
+            for relative, body in source_files:
+                block = f"## 源码：{relative}\n{body.strip()}"
+                if source_used + len(block) + 2 > MAX_DECOMPILE_CHARS:
+                    decompile_truncated = True
+                    break
+                source_parts.append(block)
+                source_used += len(block) + 2
+            if len(source_parts) > 1:
+                source_text = "\n\n".join(source_parts)
+        max_structural = MAX_DOC_CHARS - (len(source_text) + 2 if source_text else 0) - 2000
+        structural_trimmed = False
+        if len(structural) > max_structural:
+            structural = (
+                structural[: max(0, max_structural)]
+                + "\n\n（结构部分已截断，为反编译源码让出空间）"
+            )
+            structural_trimmed = True
         notes: list[str] = []
-        if truncated:
+        if structural_trimmed:
+            notes.append("结构部分超过单份资料上限，已截断并为反编译源码让出空间。")
+        elif truncated:
             notes.append("内容超过单份资料上限，后面的条目未展开。")
+        if decompile_truncated:
+            notes.append("反编译源码超过单份资料上限，后面的 Java 文件未展开。")
+        if source_note:
+            notes.append(source_note)
         if omitted:
             notes.append(f"另有 {omitted} 个条目因数量或体积上限未展开。")
         if nested:
             notes.append(f"已跳过 {nested} 个内嵌 jar（通常是依赖库）。")
+            if classes == 0:
+                notes.append(
+                    "这个 JAR 的代码主要在内嵌模块里，没有顶层类；"
+                    "需要分析实现时，请单独导入对应的模块 jar。"
+                )
         if skipped:
             notes.append(f"已跳过 {skipped} 个二进制、签名或损坏条目。")
-        if classes == 0 and text_entries == 0:
-            raise KnowledgeError("这个 .jar 里没有可提取的文本或类结构，可能只是资源包或空包。")
+        if source_text:
+            structural += "\n\n" + source_text
         if notes:
-            parts.append("---\n" + "\n".join(notes))
-        return "\n\n".join(parts)
+            structural += "\n\n---\n" + "\n".join(notes)
+        return structural
 
 
-def extract_text(path: Path) -> tuple[str, str]:
-    """返回（正文, 类型）。支持 txt/md/docx/pdf 和常见代码/配置文件。"""
+def extract_text(
+    path: Path, *, progress: Progress | None = None
+) -> tuple[str, str]:
+    """返回（正文, 类型）。支持 txt/md/docx/pdf/jar 和常见代码/配置文件。"""
     source = Path(path)
     if not source.is_file():
         raise KnowledgeError(f"文件不存在：{source}")
@@ -544,7 +699,7 @@ def extract_text(path: Path) -> tuple[str, str]:
     elif suffix == ".pdf":
         text = _pdf_text(source)
     elif suffix == ".jar":
-        text = _jar_text(source)
+        text = _jar_text(source, progress=progress)
     elif suffix in {".html", ".htm"}:
         text = _html_text(source)
     elif suffix in TEXT_SUFFIXES or suffix == "":
@@ -642,9 +797,15 @@ class KnowledgeStore:
             pass
 
     # ------------------------------------------------------------------
-    def add_file(self, path: Path, *, project: str = "") -> dict[str, Any]:
+    def add_file(
+        self,
+        path: Path,
+        *,
+        project: str = "",
+        progress: Progress | None = None,
+    ) -> dict[str, Any]:
         source = Path(path).expanduser().resolve()
-        text, kind = extract_text(source)
+        text, kind = extract_text(source, progress=progress)
         try:
             size = source.stat().st_size
         except OSError:
