@@ -26,6 +26,13 @@ def data_dir() -> Path:
     return path
 
 
+def tools_dir() -> Path:
+    """程序自己下载的 JDK / 缓存，放在 data 目录里，更新程序时不会被覆盖。"""
+    path = data_dir() / "tools"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 def config_path() -> Path:
     return data_dir() / "config.json"
 

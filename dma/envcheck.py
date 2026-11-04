@@ -5,6 +5,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -61,6 +62,23 @@ def java_major(version: str) -> int:
     return int(match.group(1)) if match else 0
 
 
+def java_rank(major: int) -> int:
+    """给已安装的 JDK 排优先级：模组构建最想要 21，其次 17，再往后是其他 17–24。"""
+    if major == 21:
+        return 0
+    if major == 17:
+        return 1
+    if 18 <= major <= 24:
+        return 2
+    if major == 25:
+        return 3
+    if major >= 26:
+        return 4
+    if major >= 8:
+        return 9
+    return 8
+
+
 def _run(command: list[str], timeout: int = 15) -> subprocess.CompletedProcess:
     flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
     return subprocess.run(
@@ -74,16 +92,183 @@ def _run(command: list[str], timeout: int = 15) -> subprocess.CompletedProcess:
     )
 
 
-def _java_candidates() -> list[Path]:
+_JAVA_REGISTRY = (
+    (r"SOFTWARE\JavaSoft\JDK", "JavaHome"),
+    (r"SOFTWARE\JavaSoft\Java Development Kit", "JavaHome"),
+    (r"SOFTWARE\Eclipse Adoptium\JDK", "JavaHome"),
+    (r"SOFTWARE\Microsoft\JDK", "JavaHome"),
+    (r"SOFTWARE\Amazon Corretto\JDK", "JavaHome"),
+    (r"SOFTWARE\Azul Systems\Zulu", "InstallationPath"),
+    (r"SOFTWARE\BellSoft\LibericaJDK", "Home"),
+)
+
+_HOME_CACHE: list[Path] | None = None
+_HOME_CACHE_AT = 0.0
+_HOME_CACHE_TTL = 15.0
+
+
+def java_executable(home: Path) -> Path | None:
     names = ("java.exe", "java") if os.name == "nt" else ("java",)
+    for name in names:
+        item = Path(home) / "bin" / name
+        if item.is_file():
+            return item
+    return None
+
+
+def is_java_home(home: Path) -> bool:
+    return java_executable(home) is not None
+
+
+def java_version_at(home: Path) -> str:
+    """优先读 JDK 自带的 release 文件，比启动 java -version 快很多。"""
+    try:
+        text = (Path(home) / "release").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    for line in text.splitlines():
+        if line.startswith("JAVA_VERSION="):
+            return line.split("=", 1)[1].strip().strip('"')
+    return ""
+
+
+def _registry_homes() -> list[Path]:
+    if os.name != "nt":
+        return []
+    try:
+        import winreg
+    except ImportError:
+        return []
     result: list[Path] = []
+    for key_path, value_name in _JAVA_REGISTRY:
+        for view in (winreg.KEY_WOW64_64KEY, winreg.KEY_WOW64_32KEY):
+            try:
+                root = winreg.OpenKey(
+                    winreg.HKEY_LOCAL_MACHINE,
+                    key_path,
+                    0,
+                    winreg.KEY_READ | view,
+                )
+            except OSError:
+                continue
+            with root:
+                index = 0
+                while True:
+                    try:
+                        child_name = winreg.EnumKey(root, index)
+                    except OSError:
+                        break
+                    index += 1
+                    try:
+                        child = winreg.OpenKey(root, child_name)
+                        with child:
+                            value, _ = winreg.QueryValueEx(child, value_name)
+                    except OSError:
+                        continue
+                    if value:
+                        result.append(Path(str(value)))
+    return result
+
+
+def _search_roots() -> list[Path]:
+    roots = [Path.home() / ".jdks", Path.home() / ".gradle" / "jdks"]
+    if os.name != "nt":
+        return roots
+    program_dirs = (
+        "Java",
+        "Eclipse Adoptium",
+        "Microsoft",
+        "Amazon Corretto",
+        "Zulu",
+        "BellSoft",
+        "Semeru",
+        "JetBrains",
+    )
+    for base in (Path("C:/Program Files"), Path("C:/Program Files (x86)")):
+        roots.extend(base / name for name in program_dirs)
+    # 只扫常见的本机盘符，避免在网络盘上挂住。
+    for letter in "CDEF":
+        drive = Path(f"{letter}:/")
+        try:
+            if not drive.exists():
+                continue
+        except OSError:
+            continue
+        roots.extend(
+            [
+                drive / "developer" / "Java",
+                drive / "Java",
+                drive / "tools",
+                drive / "dev",
+            ]
+        )
+    return roots
+
+
+def java_homes(refresh: bool = False) -> list[Path]:
+    """列出本机所有 JDK 根目录，包括程序自己下载到 data/tools 的 JDK。"""
+    global _HOME_CACHE, _HOME_CACHE_AT
+    now = time.monotonic()
+    if not refresh and _HOME_CACHE is not None and now - _HOME_CACHE_AT < _HOME_CACHE_TTL:
+        return list(_HOME_CACHE)
+
+    found: list[Path] = []
+
+    def add(path: Path | str) -> None:
+        try:
+            candidate = Path(path).expanduser()
+        except (OSError, ValueError):
+            return
+        if is_java_home(candidate):
+            found.append(candidate)
+
     home = os.environ.get("JAVA_HOME", "").strip()
     if home:
-        for name in names:
-            item = Path(home) / "bin" / name
-            if item.is_file():
-                result.append(item)
-                break
+        add(home)
+
+    located = shutil.which("java")
+    if located:
+        add(Path(located).parent.parent)
+
+    try:
+        for item in paths.tools_dir().glob("jdk*"):
+            add(item)
+    except OSError:
+        pass
+
+    for item in _registry_homes():
+        add(item)
+
+    for root in _search_roots():
+        try:
+            children = list(root.iterdir())
+        except OSError:
+            continue
+        for child in children:
+            add(child)
+
+    unique: list[Path] = []
+    seen: set[str] = set()
+    for item in found:
+        try:
+            key = str(item.resolve())
+        except OSError:
+            key = str(item)
+        key = key.lower()
+        if key not in seen:
+            seen.add(key)
+            unique.append(item)
+    _HOME_CACHE = unique
+    _HOME_CACHE_AT = now
+    return list(unique)
+
+
+def _java_candidates() -> list[Path]:
+    result: list[Path] = []
+    for home in java_homes():
+        exe = java_executable(home)
+        if exe is not None:
+            result.append(exe)
     found = shutil.which("java")
     if found:
         result.append(Path(found))
@@ -105,6 +290,27 @@ def resolve_tools() -> ToolPaths:
     )
 
 
+def _probe_java(java: Path) -> tuple[str, str]:
+    """返回 (版本号, 错误信息)。有 release 文件时不启动子进程。"""
+    version = java_version_at(Path(java).parent.parent)
+    if version:
+        return version, ""
+    try:
+        proc = _run([str(java), "-version"], timeout=15)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return "", str(exc)
+    output = (proc.stderr or "") + "\n" + (proc.stdout or "")
+    return parse_java_version(output), ""
+
+
+def probe_java_home(home: Path) -> str:
+    exe = java_executable(home)
+    if exe is None:
+        return ""
+    version, _ = _probe_java(exe)
+    return version
+
+
 def check_java(candidates: list[Path] | None = None) -> CheckItem:
     candidates = _java_candidates() if candidates is None else list(candidates)
     if not candidates:
@@ -114,26 +320,37 @@ def check_java(candidates: list[Path] | None = None) -> CheckItem:
             STATUS_FAIL,
             "未找到 Java",
             "PATH 和 JAVA_HOME 都没有找到 java。",
-            "安装 JDK 17 或 21（Temurin / Microsoft OpenJDK），安装时勾选加入 PATH，或设置 JAVA_HOME。",
+            "点「一键准备」会自动下载 JDK 21 并配置好；也可以安装 JDK 17 或 21（Temurin / Microsoft OpenJDK）。",
             JAVA_DOWNLOAD_URL,
         )
-    java = candidates[0]
-    try:
-        proc = _run([str(java), "-version"], timeout=15)
-    except (OSError, subprocess.SubprocessError) as exc:
+
+    probed = []
+    for java in candidates:
+        version, error = _probe_java(java)
+        probed.append((java_rank(java_major(version)), version, java, error))
+    valid = [item for item in probed if item[1]]
+    if not valid:
+        rank, version, java, error = probed[0]
         return CheckItem(
             "java",
             "Java 运行时",
             STATUS_FAIL,
             "Java 无法启动",
-            f"{java}：{exc}",
-            "确认 JDK 安装完整，重新安装后再检测。",
+            f"{java}：{error or '没有返回版本号'}",
+            "确认 JDK 安装完整；也可以点「一键准备」让程序重新下载 JDK 21。",
             JAVA_DOWNLOAD_URL,
         )
-    output = (proc.stderr or "") + "\n" + (proc.stdout or "")
-    version = parse_java_version(output)
+
+    rank, version, java, error = min(valid, key=lambda item: item[0])
     major = java_major(version)
     detail = f"{version or '版本未知'} · {java}"
+    others = [
+        f"Java {java_major(item[1])}"
+        for item in valid
+        if str(item[2]).lower() != str(java).lower()
+    ]
+    if others:
+        detail += "\n其他可用：" + "、".join(dict.fromkeys(others))
     if major in (17, 21):
         return CheckItem(
             "java",
@@ -141,7 +358,7 @@ def check_java(candidates: list[Path] | None = None) -> CheckItem:
             STATUS_OK,
             f"Java {major} 可用",
             detail,
-            "与多数 Fabric / NeoForge 工程匹配。",
+            "与多数 Fabric / NeoForge 工程匹配；一键准备会优先选这个版本。",
         )
     if major >= 22:
         return CheckItem(
@@ -150,7 +367,7 @@ def check_java(candidates: list[Path] | None = None) -> CheckItem:
             STATUS_WARN,
             f"Java {major} 可能不兼容",
             detail,
-            "多数模组工程要求 Java 17 或 21；Java 22 及以上可能导致 Gradle 或加载器不兼容。建议同时安装 17 和 21，并用 JAVA_HOME 切换。",
+            "多数模组工程要求 Java 17 或 21；Java 22 及以上可能导致 Gradle 或加载器不兼容。点「一键准备」会自动换用或下载 JDK 21。",
             JAVA_DOWNLOAD_URL,
         )
     if major and major < 17:
@@ -160,7 +377,7 @@ def check_java(candidates: list[Path] | None = None) -> CheckItem:
             STATUS_FAIL,
             f"Java {major} 版本过低",
             detail,
-            "模组开发至少需要 Java 17；1.20.5 及以后通常需要 Java 21。",
+            "模组开发至少需要 Java 17；1.20.5 及以后通常需要 Java 21。点「一键准备」会自动下载 JDK 21。",
             JAVA_DOWNLOAD_URL,
         )
     return CheckItem(
@@ -169,7 +386,7 @@ def check_java(candidates: list[Path] | None = None) -> CheckItem:
         STATUS_WARN,
         "无法确认 Java 版本",
         detail,
-        "运行 java -version 确认版本；建议使用 JDK 17 或 21。",
+        "点「一键准备」会自动下载并配置 JDK 21。",
         JAVA_DOWNLOAD_URL,
     )
 

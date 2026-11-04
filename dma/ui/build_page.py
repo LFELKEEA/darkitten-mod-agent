@@ -19,8 +19,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .. import envcheck, gradle, wrapper
+from .. import envcheck, gradle, toolchain, wrapper
 from . import theme
+from .prep_worker import PrepareWorker
 from .widgets import card, tiny
 
 
@@ -62,6 +63,14 @@ class BuildPage(QWidget):
         self._cert_error = False
         self._last_run: tuple[str, str] | None = None
         self._output: list[str] = []
+        self._preparing = False
+        self._prepare_worker: PrepareWorker | None = None
+        self._prepared: toolchain.Prepared | None = None
+        self._prepared_root = ""
+        self._prepared_at = 0.0
+        self._pending_after_prepare: tuple[str, str] | None = None
+        self._auto_upgraded = False
+        self._network_retries = 0
         self._timer = QTimer(self)
         self._timer.setInterval(1000)
         self._timer.timeout.connect(self._tick)
@@ -90,8 +99,9 @@ class BuildPage(QWidget):
         box.addWidget(title)
         box.addWidget(
             tiny(
-                "在当前工程目录执行 Gradle：编译产物在 build/libs，开发客户端会自动加载本工程，"
-                "游戏目录是工程下的 run/。首次运行需要下载依赖，可能要几分钟。关闭工坊会结束正在运行的任务。"
+                "点任务按钮会先自动准备环境：挑一个合适的 JDK、补齐 Wrapper、从国内镜像装好 Gradle，"
+                "然后直接执行。编译产物在 build/libs，游戏目录是工程下的 run/。"
+                "首次编译仍要下载 Minecraft 依赖，时间取决于网络。关闭工坊会结束正在运行的任务。"
             )
         )
         head.addLayout(box, 1)
@@ -141,19 +151,27 @@ class BuildPage(QWidget):
         self.status.setObjectName("H2")
         bar.addWidget(self.status)
         self.detail = tiny(
-            "选择工程后点「编译」。缺少 build.gradle 就点「让助手补全配置」，"
-            "缺少 gradlew 就点「生成 Wrapper」。"
+            "选择工程后点「编译」即可，缺什么会自动补什么。"
+            "也可以先点「一键准备」只装环境、不跑任务。"
         )
         bar.addWidget(self.detail)
 
         actions = QHBoxLayout()
         actions.setSpacing(8)
+        self.prepare_btn = QPushButton("一键准备")
+        self.prepare_btn.setObjectName("Primary")
+        self.prepare_btn.setToolTip(
+            "自动检测并配置构建环境：优先选 Java 21，缺 JDK 就下载 Temurin 21；"
+            "缺 Wrapper 就写入；再从中科大 / 华为云镜像装好 Gradle 发行包。已就绪的步骤会跳过。"
+        )
+        self.prepare_btn.clicked.connect(self._prepare_clicked)
         self.assist_btn = QPushButton("让助手补全配置")
         self.assist_btn.setToolTip("切到对话页，让助手按当前 MC 版本和加载器生成 build.gradle / settings.gradle / gradle.properties")
         self.assist_btn.clicked.connect(self._assist_config)
         self.wrapper_btn = QPushButton("生成 Wrapper")
         self.wrapper_btn.setToolTip("把 gradlew、gradlew.bat 和 gradle-wrapper.jar 写入工程，不需要本机安装 Gradle")
         self.wrapper_btn.clicked.connect(self._make_wrapper)
+        actions.addWidget(self.prepare_btn)
         actions.addWidget(self.assist_btn)
         actions.addWidget(self.wrapper_btn)
         self.cert_box = QCheckBox("使用 Windows 证书库")
@@ -217,17 +235,22 @@ class BuildPage(QWidget):
         else:
             self.project_label.setText(project.label())
             self.project_label.setStyleSheet("")
+        self._prepared = None
+        self._prepared_root = ""
+        self._prepared_at = 0.0
         self._refresh_buttons()
 
     def _refresh_buttons(self) -> None:
         has_project = getattr(self.main, "active_project", None) is not None
         running = self.runner.running
+        busy = running or self._preparing
         for button in self._buttons:
-            button.setEnabled(has_project and not running)
-        self.stop_btn.setEnabled(running)
+            button.setEnabled(has_project and not busy)
+        self.stop_btn.setEnabled(running and not self._preparing)
         self.open_project_btn.setEnabled(has_project)
-        self.assist_btn.setEnabled(has_project)
-        self.wrapper_btn.setEnabled(has_project and not running)
+        self.prepare_btn.setEnabled(has_project and not busy)
+        self.assist_btn.setEnabled(has_project and not busy)
+        self.wrapper_btn.setEnabled(has_project and not busy)
 
     def _on_java(self, item) -> None:
         if item is None:
@@ -244,8 +267,8 @@ class BuildPage(QWidget):
 
     # ------------------------------------------------------------------
     def _run(self, task: str, label: str, retry: bool = False) -> None:
-        if self.runner.running:
-            self._status("已有任务在运行，先等它结束或点「停止」。", theme.COLORS["warn"])
+        if self.runner.running or self._preparing:
+            self._status("已有任务在进行，先等它结束或点「停止」。", theme.COLORS["warn"])
             return
         project = getattr(self.main, "active_project", None)
         if project is None:
@@ -254,8 +277,107 @@ class BuildPage(QWidget):
         root = Path(project.root)
         if not gradle.has_gradle_files(root):
             self._status(
-                "工程里还没有 Gradle 配置文件。点「让助手补全配置」生成 build.gradle / settings.gradle 后再编译。",
+                "工程里还没有 Gradle 配置，正在切到对话页让助手补全；生成后点「编译」即可。",
                 theme.COLORS["warn"],
+            )
+            self._assist_config()
+            return
+        if retry:
+            self._launch(task, label, retry=True)
+            return
+        self._network_retries = 0
+        fresh = (
+            self._prepared is not None
+            and self._prepared_root == str(root)
+            and time.monotonic() - self._prepared_at < 120
+        )
+        if fresh:
+            self._launch(task, label)
+            return
+        self._start_prepare((task, label), reset_upgrade=True)
+
+    def _prepare_clicked(self) -> None:
+        project = getattr(self.main, "active_project", None)
+        if project is None:
+            self._status("还没有选择工程。先在对话页新建工程。", theme.COLORS["warn"])
+            return
+        self._start_prepare(None, reset_upgrade=True)
+
+    def _start_prepare(
+        self, then: tuple[str, str] | None, *, reset_upgrade: bool = False
+    ) -> None:
+        project = getattr(self.main, "active_project", None)
+        if project is None:
+            self._status("还没有选择工程。", theme.COLORS["warn"])
+            return
+        if self.runner.running or self._preparing:
+            return
+        if reset_upgrade:
+            self._auto_upgraded = False
+        self._pending_after_prepare = then
+        self._preparing = True
+        self._prepared = None
+        self._append(f"=== 一键准备环境 {time.strftime('%H:%M:%S')} ===")
+        self._status("正在检查并准备 JDK、Gradle…", theme.COLORS["accent"])
+        self._refresh_buttons()
+        worker = PrepareWorker(Path(project.root))
+        worker.signals.line.connect(self._append)
+        worker.signals.done.connect(self._on_prepare_done)
+        worker.signals.failed.connect(self._on_prepare_failed)
+        self._prepare_worker = worker
+        worker.start()
+
+    def _on_prepare_done(self, prepared) -> None:
+        self._preparing = False
+        self._prepare_worker = None
+        self._prepared = prepared
+        project = getattr(self.main, "active_project", None)
+        self._prepared_root = str(Path(project.root)) if project is not None else ""
+        self._prepared_at = time.monotonic()
+        if prepared.java_home:
+            self._append(
+                f"[准备] 构建用 Java：{prepared.java_version} · {prepared.java_home}"
+            )
+        if prepared.gradle_home:
+            self._append(
+                f"[准备] Gradle：{prepared.gradle_version} · {prepared.gradle_home}"
+            )
+        for note in prepared.notes:
+            self._append(f"[准备] 注意：{note}")
+        self._append("=== 环境准备完成 ===")
+        self._status("环境已就绪", theme.COLORS["ok"])
+        self._refresh_buttons()
+        then = self._pending_after_prepare
+        self._pending_after_prepare = None
+        if then:
+            QTimer.singleShot(60, lambda: self._launch(then[0], then[1]))
+            return
+        self.detail.setText("JDK、Wrapper 和 Gradle 已就绪，点「编译」开始。")
+        self.main.status("一键准备完成")
+
+    def _on_prepare_failed(self, message: str) -> None:
+        self._preparing = False
+        self._prepare_worker = None
+        self._pending_after_prepare = None
+        self._append(f"[准备失败] {message}")
+        self._status("环境准备失败", theme.COLORS["danger"])
+        self.detail.setText("检查网络后重试；也可以到「环境自检」页复制详细报告。")
+        self._refresh_buttons()
+        self.main.status("环境准备失败")
+
+    def _launch(self, task: str, label: str, retry: bool = False) -> None:
+        project = getattr(self.main, "active_project", None)
+        if project is None:
+            self._status("还没有选择工程。", theme.COLORS["warn"])
+            return
+        root = Path(project.root)
+        if not gradle.has_gradle_files(root):
+            self._status("工程里还没有 Gradle 配置文件。", theme.COLORS["warn"])
+            return
+        if self._prepared is not None and not self._prepared.java_home:
+            self._status(
+                "没有找到可用的 JDK，Gradle 无法启动。点「一键准备」重新下载 JDK 21。",
+                theme.COLORS["danger"],
             )
             return
         try:
@@ -278,6 +400,8 @@ class BuildPage(QWidget):
         self._refresh_buttons()
         self.main.status(f"正在{label}：{project.label()}")
         env = gradle.build_env(self.cert_box.isChecked())
+        if self._prepared is not None and self._prepared.java_home:
+            env = toolchain.with_java_home(env, self._prepared.java_home)
         try:
             self.runner.start(launch, env)
         except gradle.GradleError as exc:
@@ -309,6 +433,7 @@ class BuildPage(QWidget):
             self._task = ""
             return
         if code == 0:
+            self._network_retries = 0
             self._status(f"{self._task}完成", theme.COLORS["ok"])
             if self._task == "编译":
                 self.detail.setText("编译成功，jar 在 build/libs 目录。点「复制日志」可以把结果贴回对话页。")
@@ -336,7 +461,42 @@ class BuildPage(QWidget):
             if required:
                 project = getattr(self.main, "active_project", None)
                 current = wrapper.current_distribution(Path(project.root)) if project else ""
-                if gradle.version_tuple(required) <= gradle.version_tuple(wrapper.DEFAULT_DISTRIBUTION):
+                needs_upgrade = (
+                    gradle.version_tuple(current) < gradle.version_tuple(required)
+                    and gradle.version_tuple(required)
+                    <= gradle.version_tuple(wrapper.DEFAULT_DISTRIBUTION)
+                )
+                if needs_upgrade and not self._auto_upgraded and project is not None:
+                    task, label = self._last_run or ("build", "编译")
+                    try:
+                        written = wrapper.ensure_wrapper(
+                            Path(project.root), wrapper.DEFAULT_DISTRIBUTION
+                        )
+                    except Exception as exc:  # noqa: BLE001 - 失败时退回提示
+                        self._append(f"[自动升级 Wrapper 失败] {exc}")
+                    else:
+                        self._auto_upgraded = True
+                        self._append(
+                            f"=== 自动升级 Wrapper：{current or '缺失'} → "
+                            f"{wrapper.DEFAULT_DISTRIBUTION} ==="
+                        )
+                        for item in written:
+                            self._append(f"写入 {item}")
+                        self._status("已自动升级 Wrapper，正在重新准备并重试…", theme.COLORS["warn"])
+                        self._task = ""
+                        self._start_prepare((task, label), reset_upgrade=False)
+                        return
+                if (
+                    current
+                    and gradle.version_tuple(current) >= gradle.version_tuple(required)
+                ):
+                    self.detail.setText(
+                        f"Gradle 版本已经满足要求（需要 {required}，当前 {current}），"
+                        "这次失败更可能是依赖下载、插件或代码问题。把上面的日志复制回对话页排查。"
+                    )
+                elif gradle.version_tuple(required) <= gradle.version_tuple(
+                    wrapper.DEFAULT_DISTRIBUTION
+                ):
                     self.detail.setText(
                         f"构建脚本要求 Gradle {required}，工程当前是 {current or '未知版本'}。"
                         f"点「生成 Wrapper」写入 {wrapper.DEFAULT_DISTRIBUTION}，再重新编译。"
@@ -354,6 +514,24 @@ class BuildPage(QWidget):
                     "证书链校验仍然失败：先在加速器里关掉 GitHub 加速，或把它的根证书导入 JDK 的 cacerts。"
                     "急着编译可以在有网的环境手动下载 Gradle 发行包，解开后把 bin 目录临时加入 PATH。"
                 )
+            elif (
+                gradle.is_network_error("\n".join(self._output))
+                and self._network_retries < 2
+                and self._last_run is not None
+            ):
+                self._network_retries += 1
+                task, label = self._last_run
+                self._append(
+                    f"=== 依赖下载中断，自动重试（{self._network_retries}/2）==="
+                )
+                self._append(
+                    "已经下完的依赖会保留，重试通常能继续往前走。"
+                    "如果连续中断，换网络或给 Gradle 配代理会更稳。"
+                )
+                self._status("依赖下载中断，正在自动重试…", theme.COLORS["warn"])
+                self._task = ""
+                QTimer.singleShot(1500, lambda: self._launch(task, label))
+                return
             else:
                 self.detail.setText("把上面的日志复制回对话页，任务类型选「修复崩溃 / 编译报错」，助手会按报错改文件。")
             self._append(f"=== {self._task}失败（退出码 {code}）===")
@@ -510,7 +688,8 @@ def scaffold_request(project) -> str:
             "所有版本号先查 Fabric Meta / NeoForged 官方仓库确认，不要猜；查不到就写明需要用户确认，不要编造。",
             f"当前「生成 Wrapper」写入的是 Gradle {wrapper.DEFAULT_DISTRIBUTION}，插件版本必须兼容它；"
             "如果选的 loom / NeoGradle 要求更高版本的 Gradle，要么改用兼容版本，要么在回复里明确说明需要升级 Wrapper。",
-            "gradlew 和 gradle-wrapper.jar 不用生成，页面上有「生成 Wrapper」按钮。",
+            "gradlew 和 gradle-wrapper.jar 不用生成；页面上有「生成 Wrapper」按钮，"
+            "环境依赖点「一键准备」会自动下载并配置。",
             "按工程相对路径输出完整文件内容，文件进入待写入列表，等用户确认后再写入。",
         ]
     )

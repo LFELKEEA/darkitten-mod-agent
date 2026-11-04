@@ -21,11 +21,12 @@ BUILD = ROOT / "build"
 APP_DIST = DIST / "DarkittenModAgent"
 ZIP_NAME = f"DarkittenModAgent-{APP_VERSION}.zip"
 NOTES = [
-    "内置 Wrapper 升级到 Gradle 9.8.2，和当前 Fabric loom 的要求对齐；「生成 Wrapper」不再生成过旧的 8.10.2。",
-    "编译失败时识别「requires at least Gradle X」/「Minimum supported Gradle version」，直接提示差了哪个版本、该点哪个按钮。",
-    "「让助手补全配置」的请求里补上 Gradle 版本约束，要求插件版本与内置 Wrapper 兼容，避免再出现 loom 要 9.8、Wrapper 却是 8.x 的情况。",
-    "修复加速器 / 代理环境下 Gradle 下载报 PKIX 证书错误：自动改用 Windows 证书库重试，并提供手动开关。",
-    "编译运行页：一键执行 gradlew build / runClient / runServer / runDatagen，日志实时显示，可停止、复制日志、打开 build/libs。",
+    "一键准备：自动挑 JDK（优先 21，缺了就从中科大镜像下载 Temurin 21），只补缺失的 Wrapper 文件，不覆盖工程已有版本。",
+    "Gradle 发行包不再只靠 Wrapper 慢慢下：优先从华为云镜像下载并校验 SHA-256，直接装进 wrapper 缓存，首次编译少等 150 MB。",
+    "点「编译 / 开发客户端 / 开发服务端 / 数据生成」会先自动准备环境再执行；120 秒内重复运行会跳过扫描。",
+    "构建环境把选中的 JDK 注入 JAVA_HOME / PATH，HTTP 超时放宽到 60 秒；依赖下载遇到 Connection reset / Read timed out 会自动重试两次。",
+    "Gradle 版本不匹配时自动把旧 Wrapper 重写为 9.8.2 并重试；仍有证书拦截时自动改用 Windows 证书库。",
+    "环境自检页新增「一键准备」，下载和安装进度实时显示；同时装了多个 JDK 时会优先选 Java 21。",
 ]
 
 

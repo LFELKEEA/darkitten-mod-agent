@@ -2,7 +2,7 @@
 
 只写 Minecraft Java 模组的独立桌面 Agent。基于 PySide6，自带对话工作台、技能、连接器和记忆库，可从下载站、GitHub 与 Darkitten 启动器获取，并支持自动更新。
 
-当前版本：`0.1.7`
+当前版本：`0.2.0`
 
 ## 功能
 
@@ -12,8 +12,9 @@
 - **待写入确认**：生成的文件先进入右侧列表，确认后才落盘；覆盖前自动备份。
 - **技能**：内置 10 个模组开发工作流，可停用、改写、恢复默认或新建自定义技能。
 - **连接器**：Modrinth、Fabric Meta、GitHub API 开箱可用，支持自定义 HTTP 接口与 `${ENV}` 密钥引用。
+- **一键准备**：自动挑 JDK（优先 21，缺了就下载 Temurin 21）、补齐 Wrapper、从中科大 / 华为云镜像装好 Gradle 发行包，不用手动配环境变量。
 - **环境自检**：检查 Java、JAVA_HOME、Gradle、Git、目录写入、资料源连通性和模型通道，给出缺失项与修复建议，可复制报告。
-- **编译运行**：一键执行 `gradlew build` / `runClient` / `runServer` / `runDatagen`，日志实时回显，可停止、复制日志、打开 `build/libs`。
+- **编译运行**：点任务按钮时先自动准备环境，再执行 `gradlew build` / `runClient` / `runServer` / `runDatagen`；日志实时回显，可停止、复制日志、打开 `build/libs`。
 - **工具轮数**：默认 32 轮，可调到 999；填 0 表示不限制，适合大型工程。
 - **记忆库**：SQLite 本地存储，按工程召回，支持标签、搜索、导出 JSON。
 - **桌面快捷方式**：首次启动询问是否创建。
@@ -50,7 +51,7 @@ API Key 只保存在本机 `data/config.json`，不会上传到本项目服务�
 
 侧边栏「环境」页首次打开会自动检测：
 
-- Java 是否在 PATH / JAVA_HOME 中，版本是否为 17 或 21。
+- Java 是否在 PATH / JAVA_HOME / 常见安装目录中，版本是否为 17 或 21；同时装了多个 JDK 时会优先选 21。
 - JAVA_HOME 是否指向 JDK 根目录。
 - 当前工程是否有可用的 Gradle Wrapper，系统是否安装 Gradle。
 - Git 是否可用（可选）。
@@ -58,7 +59,15 @@ API Key 只保存在本机 `data/config.json`，不会上传到本项目服务�
 - Modrinth、Fabric Meta、GitHub API 是否连通。
 - 当前模型通道是否缺少 API Key。
 
-检测结果按「通过 / 注意 / 缺失 / 提示」分级，并给出下载页或修复命令。安装 JDK 或修改环境变量后点「重新检测」即可。环境页只做检查，不会替用户安装 JDK；执行 Gradle 和启动游戏在「编译运行」页。
+检测结果按「通过 / 注意 / 缺失 / 提示」分级，并给出下载页或修复命令。安装 JDK 或修改环境变量后点「重新检测」即可。
+
+环境页右上角的「一键准备」会把缺的东西直接装好：
+
+- **JDK**：扫描 JAVA_HOME、PATH、注册表和常见目录（`C:\Program Files\Java`、`D:\developer\Java`、`~/.jdks`、`~/.gradle/jdks` 等），优先选 Java 21；本机一个 17–25 的 JDK 都没有时，从中科大 Adoptium 镜像下载 Temurin 21，校验 SHA-256 后解压到 `data/tools/jdk-*`，不写系统环境变量。
+- **Wrapper**：只补缺失的 `gradlew` / `gradlew.bat` / `gradle-wrapper.jar` / `gradle-wrapper.properties`，不覆盖工程里已有的 Gradle 版本。
+- **Gradle**：读取工程 Wrapper 里配置的版本，先看 `~/.gradle/wrapper/dists` 是否已安装；缺了就从华为云镜像或 Gradle 官方下载，校验 SHA-256 后直接解压进 Wrapper 缓存。这样第一次编译不用再等 Wrapper 自己慢慢下 150 MB。
+
+下载和安装进度会显示在「一键准备」下面的日志框里。执行 Gradle 和启动游戏仍在「编译运行」页。
 
 ## 编译与运行
 
@@ -69,14 +78,19 @@ API Key 只保存在本机 `data/config.json`，不会上传到本项目服务�
 - **开发服务端**：`gradlew runServer`。
 - **数据生成**：`gradlew runDatagen`。
 
-优先使用工程自带的 `gradlew` / `gradlew.bat`，没有则回退到系统 PATH 里的 `gradle`。日志逐行实时显示，可以停止任务、复制日志贴回对话页，或直接打开 `build/libs`。关闭工坊会结束正在运行的 Gradle 任务。首次运行需要下载依赖，耗时取决于网络。
+点任何一个任务按钮，工坊会先自动跑一遍「一键准备」：挑 JDK、补 Wrapper、装 Gradle，然后再执行任务。环境刚准备过（120 秒内、同一个工程）会直接启动，不重复扫描。准备过程写在运行日志里，和 Gradle 输出连在一起。
 
-页面底部有两个补配置的按钮：
+优先使用工程自带的 `gradlew` / `gradlew.bat`，没有则回退到系统 PATH 里的 `gradle`。构建会把选中的 JDK 放进 `JAVA_HOME` 和 `PATH`，并用 `GRADLE_OPTS` 把 HTTP 超时放宽到 60 秒。依赖下载遇到 `Connection reset` / `Read timed out` / `Could not download` 时，会自动重试最多两次，已经下完的依赖会保留。
 
+日志逐行实时显示，可以停止任务、复制日志贴回对话页，或直接打开 `build/libs`。关闭工坊会结束正在运行的 Gradle 任务。首次运行仍要下载 Minecraft 和 Fabric / NeoForge 依赖，这部分速度取决于你的网络和源站；Fabric 的 `maven.fabricmc.net` 目前没有可用的国内镜像，工坊无法替它加速。
+
+页面底部有三个补配置的按钮：
+
+- **一键准备**：只装环境、不跑任务；适合第一次打开工程或换机器时先确认 JDK / Gradle 都就绪。
 - **让助手补全配置**：工程里没有 `build.gradle` / `settings.gradle` 时，自动切到对话页并发出构建脚本请求，按工程记录的 MC 版本、加载器和 mod id 生成这三个文件（`gradle.properties` 一并给出），加载器分别用 Fabric Loom、NeoGradle / ModDevGradle 或 Architectury 多模块写法。
-- **生成 Wrapper**：把内置的 Gradle 9.8.2 Wrapper 文件（`gradlew`、`gradlew.bat`、`gradle-wrapper.jar`、`gradle-wrapper.properties`）写进工程，本机不装 Gradle 也能编译；首次编译时 Wrapper 会自行下载 Gradle 发行包。已有 Wrapper 时会先问是否覆盖。
+- **生成 Wrapper**：把内置的 Gradle 9.8.2 Wrapper 文件（`gradlew`、`gradlew.bat`、`gradle-wrapper.jar`、`gradle-wrapper.properties`）写进工程，本机不装 Gradle 也能编译；一键准备会预下载发行包，避免首次编译卡在下载。已有 Wrapper 时会先问是否覆盖。
 
-版本匹配：Fabric 的 `fabric-loom` 1.19.x 要求 Gradle 9.8.0 及以上，所以内置 Wrapper 用 9.8.2。工程里已有更旧的 Wrapper 时，编译会报 `requires at least Gradle X` / `Minimum supported Gradle version is X`，页面会显示当前版本和需要升级到哪个版本。
+版本匹配：Fabric 的 `fabric-loom` 1.19.x 要求 Gradle 9.8.0 及以上，所以内置 Wrapper 用 9.8.2。工程里已有更旧的 Wrapper 时，编译会报 `requires at least Gradle X` / `Minimum supported Gradle version is X`；只要 X 不高于 9.8.2，工坊会自动把 Wrapper 重写成 9.8.2、装好对应发行包并重试一次。X 更高时才会提示你去降插件或手动升级。
 
 `assets/wrapper/` 里的 Wrapper 文件来自 [gradle/gradle v9.8.2](https://github.com/gradle/gradle/tree/v9.8.2)，遵循 Apache-2.0，出处与许可见该目录下的 `NOTICE.txt`。
 

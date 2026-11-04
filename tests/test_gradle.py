@@ -60,6 +60,12 @@ class GradleResolveTests(TempDataCase):
         self.assertEqual(gradle.decode_line("中文输出".encode("gbk")), "中文输出")
         self.assertEqual(gradle.decode_line("中文输出".encode("utf-8")), "中文输出")
 
+    def test_network_error_detection(self) -> None:
+        self.assertTrue(gradle.is_network_error("Could not download fabric-loom.jar"))
+        self.assertTrue(gradle.is_network_error("Connection reset"))
+        self.assertTrue(gradle.is_network_error("Read timed out"))
+        self.assertFalse(gradle.is_network_error("error: cannot find symbol"))
+
     def test_cert_error_detection(self) -> None:
         self.assertTrue(
             gradle.is_cert_error(

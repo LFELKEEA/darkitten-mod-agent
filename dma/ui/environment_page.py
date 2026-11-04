@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QPlainTextEdit,
     QPushButton,
     QScrollArea,
     QVBoxLayout,
@@ -20,6 +21,7 @@ from PySide6.QtWidgets import (
 from .. import envcheck
 from ..envcheck import CheckItem, ToolPaths
 from . import theme
+from .prep_worker import PrepareWorker
 from .widgets import card, tiny
 
 STATUS_LABELS = {
@@ -75,6 +77,7 @@ class EnvironmentPage(QWidget):
         super().__init__(parent)
         self.main = main
         self._worker: _CheckWorker | None = None
+        self._prepare_worker: PrepareWorker | None = None
         self._items: list[CheckItem] = []
         self._auto_ran = False
         self._context: tuple[Path | None, Path | None, ToolPaths] | None = None
@@ -95,7 +98,8 @@ class EnvironmentPage(QWidget):
         box.addWidget(
             tiny(
                 "检查 Java、JAVA_HOME、Gradle、Git、目录写入、资料源连通性和当前模型通道。"
-                "Agent 不替你安装 JDK，也不执行 gradlew；这里只告诉你缺什么、怎么补。"
+                "缺 JDK 或 Gradle 时点「一键准备」，程序会自动装到 data/tools 或 Wrapper 缓存里，"
+                "不需要手动配环境变量。"
             )
         )
         head.addLayout(box, 1)
@@ -103,10 +107,17 @@ class EnvironmentPage(QWidget):
         self.copy_btn.setObjectName("Ghost")
         self.copy_btn.setEnabled(False)
         self.copy_btn.clicked.connect(self._copy_report)
+        self.prepare_btn = QPushButton("一键准备")
+        self.prepare_btn.setToolTip(
+            "自动选择 Java 21（没有就下载），补齐当前工程的 Gradle Wrapper，"
+            "并从中科大 / 华为云镜像安装 Gradle 发行包。"
+        )
+        self.prepare_btn.clicked.connect(self.start_prepare)
         self.refresh_btn = QPushButton("重新检测")
         self.refresh_btn.setObjectName("Primary")
         self.refresh_btn.clicked.connect(self.run_check)
         head.addWidget(self.copy_btn)
+        head.addWidget(self.prepare_btn)
         head.addWidget(self.refresh_btn)
         outer.addWidget(header)
 
@@ -121,6 +132,13 @@ class EnvironmentPage(QWidget):
             "首次打开会自动检测。点击「重新检测」可以在安装 JDK、修改环境变量后复查。"
         )
         summary_box.addWidget(self.summary_detail)
+        self.prep_log = QPlainTextEdit()
+        self.prep_log.setReadOnly(True)
+        self.prep_log.setMaximumBlockCount(400)
+        self.prep_log.setFixedHeight(96)
+        self.prep_log.setPlaceholderText("点「一键准备」后，下载和安装进度会显示在这里。")
+        self.prep_log.hide()
+        summary_box.addWidget(self.prep_log)
         summary_layout.addLayout(summary_box, 1)
         outer.addWidget(summary_card)
 
@@ -162,6 +180,7 @@ class EnvironmentPage(QWidget):
         worker.done.connect(self._on_local_done)
         worker.failed.connect(self._on_failed)
         self.refresh_btn.setEnabled(False)
+        self.prepare_btn.setEnabled(False)
         self.refresh_btn.setText("检测中…")
         self.summary.setText("正在检测…")
         self.summary.setStyleSheet("")
@@ -188,6 +207,7 @@ class EnvironmentPage(QWidget):
         self._worker = None
         self.refresh_btn.setEnabled(True)
         self.refresh_btn.setText("重新检测")
+        self.prepare_btn.setEnabled(self._prepare_worker is None)
 
     def _on_local_done(self, items: list[CheckItem]) -> None:
         self._worker = None
@@ -299,6 +319,73 @@ class EnvironmentPage(QWidget):
             body.addWidget(hint)
         row.addLayout(body, 1)
         return frame
+
+    # ------------------------------------------------------------------
+    def start_prepare(self) -> None:
+        if self._prepare_worker is not None:
+            return
+        project = getattr(self.main, "active_project", None)
+        if project is not None:
+            root = Path(project.root)
+        else:
+            text = str(getattr(self.main.config, "project_root", "") or "").strip()
+            if not text:
+                self.summary.setText("还没有可准备的工程")
+                self.summary_detail.setText("先在对话页新建工程，再回来点「一键准备」。")
+                return
+            root = Path(text)
+        if not root.is_dir():
+            self.summary.setText("工程目录不存在")
+            self.summary_detail.setText(str(root))
+            return
+        self.prepare_btn.setEnabled(False)
+        self.refresh_btn.setEnabled(False)
+        self.prep_log.clear()
+        self.prep_log.show()
+        self.summary.setText("正在一键准备…")
+        self.summary.setStyleSheet(f"color: {theme.COLORS['accent']};")
+        self.summary_detail.setText(f"工程目录：{root}")
+        self._append_prep(f"=== 一键准备 {root} ===")
+        worker = PrepareWorker(root)
+        worker.signals.line.connect(self._append_prep)
+        worker.signals.done.connect(self._on_prepare_done)
+        worker.signals.failed.connect(self._on_prepare_failed)
+        self._prepare_worker = worker
+        worker.start()
+
+    def _append_prep(self, text: str) -> None:
+        self.prep_log.appendPlainText(text)
+        bar = self.prep_log.verticalScrollBar()
+        bar.setValue(bar.maximum())
+        self.summary_detail.setText(text)
+
+    def _on_prepare_done(self, prepared) -> None:
+        self._prepare_worker = None
+        self.summary.setText("一键准备完成")
+        self.summary.setStyleSheet(f"color: {theme.COLORS['ok']};")
+        parts: list[str] = []
+        if prepared.java_home:
+            parts.append(f"Java {prepared.java_version}")
+        if prepared.gradle_home:
+            parts.append(f"Gradle {prepared.gradle_version}")
+        if prepared.wrapper_written:
+            parts.append("已写入 Wrapper")
+        for note in prepared.notes:
+            parts.append(note)
+        self.summary_detail.setText("；".join(parts) or "环境已就绪。")
+        self._append_prep("=== 一键准备完成 ===")
+        self.main.status("一键准备完成")
+        QTimer.singleShot(300, self.run_check)
+
+    def _on_prepare_failed(self, message: str) -> None:
+        self._prepare_worker = None
+        self.summary.setText("一键准备失败")
+        self.summary.setStyleSheet(f"color: {theme.COLORS['danger']};")
+        self.summary_detail.setText(message)
+        self._append_prep(f"[失败] {message}")
+        self.prepare_btn.setEnabled(True)
+        self.refresh_btn.setEnabled(True)
+        self.main.status(f"一键准备失败：{message}")
 
     def _copy_report(self) -> None:
         if not self._items:

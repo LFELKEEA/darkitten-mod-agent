@@ -22,16 +22,39 @@ BUILD_FILES = ("build.gradle", "build.gradle.kts", "settings.gradle", "settings.
 
 WINDOWS_TRUST_OPTION = "-Djavax.net.ssl.trustStoreType=Windows-ROOT"
 
+HTTP_TIMEOUT_OPTS = (
+    "-Dorg.gradle.internal.http.connectionTimeout=60000",
+    "-Dorg.gradle.internal.http.socketTimeout=60000",
+)
+
 CERT_ERROR_MARKERS = (
     "PKIX path building failed",
     "unable to find valid certification path",
     "SSLHandshakeException",
 )
 
+NETWORK_ERROR_MARKERS = (
+    "connection reset",
+    "read timed out",
+    "connect timed out",
+    "could not download",
+    "could not get resource",
+    "remote host terminated",
+    "software caused connection abort",
+    "unexpected end of file",
+    "premature end of content-length",
+    "temporary failure in name resolution",
+)
+
 
 def is_cert_error(text: str) -> bool:
     lowered = (text or "").lower()
     return any(marker.lower() in lowered for marker in CERT_ERROR_MARKERS)
+
+
+def is_network_error(text: str) -> bool:
+    lowered = (text or "").lower()
+    return any(marker.lower() in lowered for marker in NETWORK_ERROR_MARKERS)
 
 
 _GRADLE_REQUIRED = (
@@ -59,14 +82,37 @@ def version_tuple(value: str) -> tuple[int, ...]:
     return tuple(parts)
 
 
-def build_env(windows_trust: bool = False, base: dict | None = None) -> dict[str, str]:
+def build_env(
+    windows_trust: bool = False,
+    base: dict | None = None,
+    java_home: str | Path | None = None,
+) -> dict[str, str]:
     """给 Gradle / Wrapper 准备环境变量。
 
-    加速器和公司代理常用自己的根证书做 HTTPS 拦截，JDK 自带的 cacerts 不认，
-    会出现 PKIX path building failed。Windows 证书库里一般已经装了这张根证书，
-    所以这里可以通过 JAVA_OPTS 让 JVM 改用 Windows 证书库。
+    - java_home：指定构建用的 JDK，gradlew.bat 会优先用它。
+    - 拉依赖时把超时放宽到 60 秒，慢速 Maven 源不至于直接断掉。
+    - windows_trust：加速器和公司代理常用自己的根证书做 HTTPS 拦截，JDK 自带的
+      cacerts 不认，会出现 PKIX path building failed。Windows 证书库里一般已经装了
+      这张根证书，所以这里通过 JAVA_OPTS 让 JVM 改用 Windows 证书库。
     """
     env = dict(os.environ if base is None else base)
+
+    opts = env.get("GRADLE_OPTS", "").strip()
+    for option in HTTP_TIMEOUT_OPTS:
+        if option not in opts:
+            opts = f"{opts} {option}".strip()
+    env["GRADLE_OPTS"] = opts
+
+    if java_home:
+        home = Path(java_home)
+        env["JAVA_HOME"] = str(home)
+        bin_dir = str(home / "bin")
+        path = env.get("PATH", "")
+        parts = path.split(os.pathsep) if path else []
+        existing = {os.path.normcase(os.path.normpath(part)) for part in parts if part}
+        if os.path.normcase(os.path.normpath(bin_dir)) not in existing:
+            env["PATH"] = os.pathsep.join([bin_dir, *parts])
+
     if not windows_trust or os.name != "nt":
         return env
     current = env.get("JAVA_OPTS", "").strip()
