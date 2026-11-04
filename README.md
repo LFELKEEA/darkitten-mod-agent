@@ -2,7 +2,7 @@
 
 只写 Minecraft Java 模组的独立桌面 Agent。基于 PySide6，自带对话工作台、技能、连接器和记忆库，可从下载站、GitHub 与 Darkitten 启动器获取，并支持自动更新。
 
-当前版本：`0.1.4`
+当前版本：`0.1.5`
 
 ## 功能
 
@@ -69,7 +69,14 @@ API Key 只保存在本机 `data/config.json`，不会上传到本项目服务�
 - **开发服务端**：`gradlew runServer`。
 - **数据生成**：`gradlew runDatagen`。
 
-优先使用工程自带的 `gradlew` / `gradlew.bat`，没有则回退到系统 PATH 里的 `gradle`；两者都没有时会提示先在工程目录执行 `gradle wrapper`。日志逐行实时显示，可以停止任务、复制日志贴回对话页，或直接打开 `build/libs`。关闭工坊会结束正在运行的 Gradle 任务。首次运行需要下载依赖，耗时取决于网络。
+优先使用工程自带的 `gradlew` / `gradlew.bat`，没有则回退到系统 PATH 里的 `gradle`。日志逐行实时显示，可以停止任务、复制日志贴回对话页，或直接打开 `build/libs`。关闭工坊会结束正在运行的 Gradle 任务。首次运行需要下载依赖，耗时取决于网络。
+
+页面底部有两个补配置的按钮：
+
+- **让助手补全配置**：工程里没有 `build.gradle` / `settings.gradle` 时，自动切到对话页并发出构建脚本请求，按工程记录的 MC 版本、加载器和 mod id 生成这三个文件（`gradle.properties` 一并给出），加载器分别用 Fabric Loom、NeoGradle / ModDevGradle 或 Architectury 多模块写法。
+- **生成 Wrapper**：把内置的 Gradle 8.10.2 Wrapper 文件（`gradlew`、`gradlew.bat`、`gradle-wrapper.jar`、`gradle-wrapper.properties`）写进工程，本机不装 Gradle 也能编译；首次编译时 Wrapper 会自行下载 Gradle 发行包。已有 Wrapper 时会先问是否覆盖。
+
+`assets/wrapper/` 里的 Wrapper 文件来自 [gradle/gradle v8.10.2](https://github.com/gradle/gradle/tree/v8.10.2)，遵循 Apache-2.0，出处与许可见该目录下的 `NOTICE.txt`。
 
 ## 工具轮数
 

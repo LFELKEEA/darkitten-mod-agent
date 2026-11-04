@@ -21,10 +21,11 @@ BUILD = ROOT / "build"
 APP_DIST = DIST / "DarkittenModAgent"
 ZIP_NAME = f"DarkittenModAgent-{APP_VERSION}.zip"
 NOTES = [
-    "新增「编译运行」页：一键执行 gradlew build / runClient / runServer / runDatagen，日志实时显示。",
+    "编译运行页新增「让助手补全配置」：自动切到对话并发出构建脚本请求，按工程版本和加载器生成 settings.gradle / build.gradle / gradle.properties。",
+    "编译运行页新增「生成 Wrapper」：内置 Gradle 8.10.2 Wrapper 文件，一键写入 gradlew / gradlew.bat / gradle-wrapper.jar，本机不装 Gradle 也能编译。",
+    "编译运行页：一键执行 gradlew build / runClient / runServer / runDatagen，日志实时显示。",
     "支持停止任务、复制日志、打开 build/libs 和工程目录；关闭工坊会结束正在运行的 Gradle 任务。",
-    "自动识别工程 Wrapper 或系统 Gradle；缺少时提示先在工程目录执行 gradle wrapper。",
-    "页面会提示 Java 版本风险：Java 22 及以上可能不被 Gradle / Loom 支持。",
+    "自动识别工程 Wrapper 或系统 Gradle；页面会提示 Java 版本风险（Java 22 及以上可能不被 Gradle / Loom 支持）。",
 ]
 
 

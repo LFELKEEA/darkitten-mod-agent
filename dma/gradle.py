@@ -67,7 +67,7 @@ def resolve_launch(project_root: Path, task: str, *, system: str | None = None) 
         return Launch(argv=[exe, task], cwd=root, task=task, source="system")
     raise GradleError(
         "工程里没有 gradlew，系统 PATH 里也没有 gradle。"
-        "先在工程目录执行 gradle wrapper 生成 Wrapper，或安装 Gradle 8.x 并加入 PATH。"
+        "点「生成 Wrapper」补齐 Wrapper，或安装 Gradle 8.x 并加入 PATH。"
     )
 
 

@@ -260,6 +260,18 @@ class ChatPage(QWidget):
         self._set_project(project)
         self.main.status(f"已打开工程：{project.root}")
 
+    def ask(self, text: str) -> bool:
+        """外部页面调用：填入输入框并发送，返回是否真的启动了任务。"""
+        text = (text or "").strip()
+        if not text:
+            return False
+        if self._worker is not None:
+            self.main.status("上一轮还在运行，先等它完成或点停止。")
+            return False
+        self.input.setPlainText(text)
+        self._send()
+        return self._worker is not None
+
     def _show_recent(self) -> None:
         menu = QMenu(self)
         rows = project_mod.recent_projects()
