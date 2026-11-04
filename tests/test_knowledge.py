@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import re
 import unittest
 import zipfile
 from pathlib import Path
@@ -439,6 +440,126 @@ class KnowledgeAgentTests(TempDataCase):
         )
         self.assertIn("继续读请把 offset", first_page)
         self.assertIn("全文", first_page)
+
+    def test_read_knowledge_reads_whole_source_file(self) -> None:
+        methods = "\n".join(f"   public void method{i}() {{}}" for i in range(80))
+        text = (
+            "# 模组 JAR：mod.jar\n\n## 类：com.example.BodyPossession\n方法：\n"
+            "  - public void start()V\n\n"
+            "## 源码：com/example/BodyPossession.java\n"
+            "package com.example;\n\npublic class BodyPossession {\n"
+            + methods
+            + "\n}\n\n"
+            "## 源码：com/example/Other.java\npackage com.example;\nclass Other {}\n"
+        )
+        document = self.knowledge.add_text(
+            "mod.jar", text, kind="jar", source="mod.jar"
+        )
+        result = self.worker()._execute(
+            ToolCall(
+                name="read_knowledge",
+                args={"id": document["id"], "file": "BodyPossession.java"},
+            ),
+            AgentRun(),
+        )
+        self.assertIn("## 源码：com/example/BodyPossession.java", result)
+        self.assertIn("method79", result)
+        self.assertNotIn("class Other", result)
+
+    def test_read_knowledge_source_pages_with_offset(self) -> None:
+        methods = "\n".join(f"   public void method{i}() {{}}" for i in range(900))
+        text = (
+            "## 源码：com/example/Big.java\npackage com.example;\n"
+            + methods
+            + "\n"
+        )
+        document = self.knowledge.add_text(
+            "mod.jar", text, kind="jar", source="mod.jar"
+        )
+        worker = self.worker()
+        first = worker._execute(
+            ToolCall(
+                name="read_knowledge",
+                args={"id": document["id"], "file": "Big.java"},
+            ),
+            AgentRun(),
+        )
+        self.assertIn("offset=", first)
+        self.assertIn("method0", first)
+        self.assertNotIn("method449", first)
+        offset = int(re.findall(r"offset=(\d+)", first)[-1])
+        second = worker._execute(
+            ToolCall(
+                name="read_knowledge",
+                args={"id": document["id"], "file": "Big.java", "offset": offset},
+            ),
+            AgentRun(),
+        )
+        self.assertIn("method449", second)
+
+    def test_read_knowledge_unknown_file_lists_sources(self) -> None:
+        document = self.knowledge.add_text(
+            "mod.jar",
+            "## 源码：com/example/Alpha.java\npackage com.example;\nclass Alpha {}\n",
+            kind="jar",
+            source="mod.jar",
+        )
+        result = self.worker()._execute(
+            ToolCall(
+                name="read_knowledge",
+                args={"id": document["id"], "file": "Missing.java"},
+            ),
+            AgentRun(),
+        )
+        self.assertIn("没有找到", result)
+        self.assertIn("com/example/Alpha.java", result)
+
+    def test_read_source_prefers_source_over_class_summary(self) -> None:
+        document = self.knowledge.add_text(
+            "mod.jar",
+            "## 类：com.example.BodyPossession\n方法：\n  - public void start()V\n"
+            "\n## 源码：com/example/BodyPossession.java\n"
+            "package com.example;\nclass BodyPossession { void start() {} }\n",
+            kind="jar",
+            source="mod.jar",
+        )
+        result = self.knowledge.read_source(document["id"], "BodyPossession.java")
+        self.assertIsNotNone(result)
+        self.assertEqual(result["kind"], "源码")
+        self.assertIn("package com.example;", result["text"])
+
+    def test_read_knowledge_warns_about_truncated_import(self) -> None:
+        document = self.knowledge.add_text(
+            "old.jar",
+            "## 类：com.example.Old\n方法：\n  - void run()V\n\n"
+            "（内容超过上限，已截断）",
+            kind="jar",
+            source="old.jar",
+        )
+        result = self.worker()._execute(
+            ToolCall(name="read_knowledge", args={"id": document["id"]}),
+            AgentRun(),
+        )
+        self.assertIn("重新导入", result)
+        self.assertIn("旧版本导入", result)
+
+    def test_document_hits_include_source_body(self) -> None:
+        filler = "\n".join(f"   int value{i} = {i};" for i in range(300))
+        document = self.knowledge.add_text(
+            "mod.jar",
+            "## 源码：com/example/Alpha.java\npackage com.example;\n"
+            + filler
+            + "\n\n## 源码：com/example/Beta.java\npackage com.example;\nclass Beta {}\n",
+            kind="jar",
+            source="mod.jar",
+        )
+        hits = self.knowledge.document_hits(
+            document["id"], "Alpha.java", limit=1, budget=8000
+        )
+        self.assertTrue(hits)
+        self.assertIn("package com.example;", hits[0]["text"])
+        self.assertIn("value139", hits[0]["text"])
+        self.assertNotIn("class Beta", hits[0]["text"])
 
     def test_search_knowledge_falls_back_to_jar_overview(self) -> None:
         self.knowledge.add_text(

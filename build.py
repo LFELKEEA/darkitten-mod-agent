@@ -21,12 +21,12 @@ BUILD = ROOT / "build"
 APP_DIST = DIST / "DarkittenModAgent"
 ZIP_NAME = f"DarkittenModAgent-{APP_VERSION}.zip"
 NOTES = [
-    "知识库页新增「反编译到工程」：选中一个 JAR（或临时另选），把主 JAR 和 META-INF/jars 下属于模组自己的内嵌模块一起反编译成 .java。",
-    "默认写到工程内的 reference/decompiled/<JAR 名>/，按原包路径保存，并生成 INDEX.md 记录来源、文件数和反编译备注；不放进 src/main/java，不影响编译。",
-    "新增 decompile_jar 工具：在对话里让助手把知识库中的 JAR 展开到工程，助手会自己调用，不需要手动点按钮。",
-    "如果工程里已有 reference/decompiled/INDEX.md，系统提示会自动告诉助手这个参考目录存在，迁移时先读它再改写到 src/main/java。",
-    "实测 PoHypSkin：主 JAR 106 个 Java 文件 + 内嵌 skinblade 模块 17 个，共 123 个，modd0bde892 和 mod7e1537e4 两个包都能展开。",
-    "安全限制：不写入 src/；目标目录已有 .java 时先确认覆盖；只允许工程内相对路径，越界路径直接拒绝。",
+    "read_knowledge 新增 file 参数：直接按 .java 文件名或类名读完整源码，支持 offset 分段，不再只返回零散片段。",
+    "关键词命中源码条目标题时，会自动把后面的方法体一起带回来，避免只看到 import 就误判「反编译不完整」。",
+    "类结构摘要明确标注「只列出前 60 个方法」，系统提示会告诉助手：摘要截断不等于源码缺失，要看实现请读 file。",
+    "单份 JAR 资料上限从 150 万字符提高到 600 万，类结构上限 1200 个、反编译源码 300 万字符；MCA 这种大包能完整收进主类和内嵌模块。",
+    "知识库里的 JAR 现在会把属于模组自己的内嵌模块源码一起收进来，例如 PoHypSkin 的 skinblade 包。",
+    "旧版本导入、正文被截断的资料会在读取时提示重新导入；建议把之前导入的 MCA / PoHypSkin 重新导入一次。",
 ]
 
 

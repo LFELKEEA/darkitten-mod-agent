@@ -471,6 +471,50 @@ class AgentWorker(QObject):
                     f"{document.get('chars')} 字符）\n\n"
                 )
                 body = str(document.get("text") or "")
+                if "资料上限" in body or "内容超过上限" in body:
+                    header += (
+                        "注意：这份资料是旧版本导入的，正文被截断过。"
+                        "如果找不到需要的类，请让用户在「知识库」页重新导入同一个 JAR。\n\n"
+                    )
+                target = str(
+                    args.get("file") or args.get("source") or args.get("class") or ""
+                ).strip()
+                if target:
+                    try:
+                        start_at = max(0, int(args.get("offset") or 0))
+                    except (TypeError, ValueError):
+                        start_at = 0
+                    window = max(400, MAX_TOOL_RESULT - len(header) - 700)
+                    item = self.knowledge.read_source(
+                        int(document["id"]), target, offset=start_at, limit=window
+                    )
+                    if item is None:
+                        available = self.knowledge.source_entries(
+                            int(document["id"]), limit=40
+                        )
+                        listing = "、".join(available) if available else "（没有源码条目）"
+                        return (
+                            header
+                            + f"没有找到「{target}」。可用的源码文件（前 40 个）：\n{listing}\n"
+                            "可以只写类名，例如 file=\"BodyPossession.java\" 或 file=\"BodyPossession\"。"
+                        )
+                    piece = str(item.get("text") or "")
+                    done = item.get("next") is None
+                    tail = (
+                        f"\n\n（{item['kind']}：{item['name']}，本段第 {item['offset']}～"
+                        f"{item['offset'] + len(piece)} 字符，共 {item['total']} 字符。"
+                        + (
+                            "已到结尾。）"
+                            if done
+                            else f"继续读请保持 file 不变，offset={item['next']}。）"
+                        )
+                    )
+                    return (
+                        header
+                        + f"## {item['kind']}：{item['name']}\n\n"
+                        + piece
+                        + tail
+                    )[:MAX_TOOL_RESULT]
                 query = str(args.get("query") or "").strip()
                 if query:
                     matches = self.knowledge.document_hits(
@@ -481,7 +525,8 @@ class AgentWorker(QObject):
                             header
                             + f"没有匹配「{query}」的片段。JAR 资料的类名是英文，"
                             "可以先用 offset=0 读开头的「模组速览 / 类索引」，"
-                            "再用类名或方法名作为 query。"
+                            "再用类名或方法名作为 query，"
+                            "或者直接用 file=\"类名.java\" 读整个文件。"
                         )
                     joined = "\n\n".join(
                         f"[片段 {item['ord'] + 1}]\n{item['text']}" for item in matches

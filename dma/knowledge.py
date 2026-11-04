@@ -42,7 +42,7 @@ CREATE INDEX IF NOT EXISTS idx_chunks_document ON chunks(document_id);
 
 CHUNK_SIZE = 1200
 CHUNK_OVERLAP = 150
-MAX_DOC_CHARS = 1_500_000
+MAX_DOC_CHARS = 6_000_000
 MAX_XML_BYTES = 40 * 1024 * 1024
 TEXT_SUFFIXES = {
     ".md", ".markdown", ".txt", ".json", ".json5", ".yaml", ".yml", ".toml",
@@ -66,13 +66,13 @@ JAR_METADATA = {
     "meta-inf/neoforge.mods.toml",
     "meta-inf/manifest.mf",
 }
-MAX_JAR_CLASSES = 500
-MAX_JAR_TEXT_ENTRIES = 400
+MAX_JAR_CLASSES = 1_200
+MAX_JAR_TEXT_ENTRIES = 600
 MAX_JAR_ENTRY_BYTES = 4 * 1024 * 1024
-MAX_JAR_READ_BYTES = 32 * 1024 * 1024
+MAX_JAR_READ_BYTES = 48 * 1024 * 1024
 MAX_JAR_ENTRY_CHARS = 200_000
 MAX_CLASS_CHARS = 6_000
-MAX_DECOMPILE_CHARS = 700_000
+MAX_DECOMPILE_CHARS = 3_000_000
 MAX_DECOMPILE_FILE_BYTES = 2 * 1024 * 1024
 DECOMPILE_TIMEOUT = 180
 MAX_EXPORT_FILES = 2500
@@ -89,6 +89,7 @@ Progress = Callable[[str], None]
 _WORD_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 _ASCII_TOKEN = re.compile(r"[A-Za-z0-9_.$#@-]{2,}")
 _CJK_RUN = re.compile(r"[\u4e00-\u9fff]{2,}")
+_SECTION_MARKER = re.compile(r"^## (源码|类|文件)：([^\n]+)$", re.MULTILINE)
 _STOPWORDS = {
     "the", "and", "for", "with", "this", "that", "you", "are", "was", "but",
     "not", "have", "from", "they", "will", "can", "all", "any", "how", "why",
@@ -390,7 +391,10 @@ def _class_summary(raw: bytes) -> str:
                 mods = _flags(flags, _CLASS_MEMBER_FLAGS)
                 lines.append(f"  - {(mods + ' ') if mods else ''}{method_name}{desc}")
             if len(methods) > 60:
-                lines.append(f"  - …还有 {len(methods) - 60} 个方法")
+                lines.append(
+                    f"  - …（这里只列出前 60 个方法，另有 {len(methods) - 60} 个；"
+                    "完整实现看反编译源码，不要据此判断源码不完整）"
+                )
         refs: list[str] = []
         for cp_index in class_names:
             value = _dot(class_name(cp_index))
@@ -1008,8 +1012,29 @@ def _jar_text(path: Path, progress: Progress | None = None) -> str:
         structural = "\n\n".join(parts)
         source_files: list[tuple[str, str]] = []
         source_note = ""
+        source_origin = ""
         if classes:
-            source_files, source_note = _decompile_jar(path, progress)
+            try:
+                exported, export_notes = decompile_jar_sources(
+                    path, progress=progress, include_nested=True
+                )
+            except KnowledgeError as exc:
+                exported, export_notes = [], [str(exc)]
+            for item in exported:
+                source_files.append((str(item["path"]), str(item["text"])))
+            origins = {
+                str(item.get("origin") or path.name) for item in exported
+            }
+            extra_origins = [item for item in origins if item != path.name]
+            if extra_origins:
+                source_origin = f"，其中包含 {len(extra_origins)} 个内嵌模块的源码"
+            notes_from_export = [
+                note
+                for note in export_notes
+                if note and not note.startswith("共生成")
+            ]
+            if notes_from_export:
+                source_note = "；".join(notes_from_export)
         source_text = ""
         decompile_truncated = False
         if source_files:
@@ -1019,6 +1044,7 @@ def _jar_text(path: Path, progress: Progress | None = None) -> str:
                 "只用于理解实现。需要精确对应时，请以官方源码或 -sources.jar 为准。"
                 "Fabric 模组里如果出现 class_1234 / method_5678，这是 intermediary 名称，"
                 "需要用工程当前的 Yarn / Mojmap 映射对照。"
+                f"共 {len(source_files)} 个 Java 文件{source_origin}。"
             )
             source_parts = [source_header]
             source_used = len(source_header)
@@ -1124,6 +1150,56 @@ def split_chunks(text: str) -> list[str]:
             break
         start = max(end - CHUNK_OVERLAP, start + 1)
     return chunks
+
+
+def _append_overlap(base: str, chunk: str) -> str:
+    """拼接相邻分块，去掉 split_chunks 留下的重叠部分。"""
+    if not base:
+        return chunk
+    candidates = [chunk]
+    stripped = chunk.lstrip()
+    if stripped != chunk:
+        candidates.append(stripped)
+    for candidate in candidates:
+        limit = min(len(base), len(candidate), CHUNK_OVERLAP + 12)
+        for size in range(limit, 19, -1):
+            if base.endswith(candidate[:size]):
+                return base + candidate[size:]
+    return base + "\n" + chunk
+
+
+def _next_other_marker(
+    text: str, kind: str, name: str
+) -> re.Match[str] | None:
+    """找到与当前条目不同的下一个条目标题，跳过同名标记（分块重叠会重复）。"""
+    pos = 0
+    while True:
+        match = _SECTION_MARKER.search(text, pos)
+        if match is None:
+            return None
+        if match.group(1) == kind and match.group(2).strip() == name:
+            pos = match.end()
+            continue
+        return match
+
+
+def _entry_matches(name: str, needle: str) -> bool:
+    left = name.strip().lower()
+    right = needle.strip().lower()
+    if not left or not right:
+        return False
+    if left == right or left.endswith("/" + right) or left.endswith("." + right):
+        return True
+
+    def simple(value: str) -> str:
+        value = value.replace("\\", "/").rsplit("/", 1)[-1]
+        if value.endswith(".java"):
+            return value[:-5]
+        if "." in value:
+            return value.rsplit(".", 1)[-1]
+        return value
+
+    return simple(left) == simple(right)
 
 
 def _tokens(query: str) -> set[str]:
@@ -1270,7 +1346,10 @@ class KnowledgeStore:
                 "SELECT text FROM chunks WHERE document_id=? ORDER BY ord", (int(document_id),)
             ).fetchall()
         item = dict(row)
-        item["text"] = "\n\n".join(str(chunk["text"]) for chunk in chunks)
+        body = ""
+        for chunk in chunks:
+            body = _append_overlap(body, str(chunk["text"]))
+        item["text"] = body
         return item
 
     def find_document(self, name: str, *, project: str = "") -> dict[str, Any] | None:
@@ -1471,23 +1550,166 @@ class KnowledgeStore:
                 "SELECT ord, text FROM chunks WHERE document_id=? ORDER BY ord",
                 (int(document_id),),
             ).fetchall()
+        items = [(int(row["ord"]), str(row["text"])) for row in rows]
         scored: list[tuple[float, int, str]] = []
-        for row in rows:
-            text = str(row["text"])
+        for order, text in items:
             value = _score("", text, tokens)
             if value > 0:
-                scored.append((value, int(row["ord"]), text))
+                scored.append((value, order, text))
         scored.sort(key=lambda item: item[0], reverse=True)
         hits: list[dict[str, Any]] = []
         used = 0
         for _value, order, text in scored:
             if used + len(text) > budget and hits:
                 continue
-            hits.append({"ord": order, "text": text})
-            used += len(text)
+            body = text
+            # 命中的往往只是条目标题（源码开头的 import），把后面的正文一起带上。
+            markers = list(_SECTION_MARKER.finditer(text))
+            if markers:
+                last = markers[-1]
+                marker = (last.group(1), last.group(2).strip())
+                room = max(0, min(4000, budget - used - len(text)))
+                expanded = ""
+                if room > 200:
+                    expanded = self._entry_tail(items, order, marker, room)
+                body = expanded or text[last.start() :]
+            if used + len(body) > budget and hits:
+                body = body[: max(0, budget - used)]
+            hits.append({"ord": order, "text": body})
+            used += len(body)
             if len(hits) >= max(1, int(limit)):
                 break
         return hits
+
+    @staticmethod
+    def _entry_tail(
+        items: list[tuple[int, str]],
+        order: int,
+        marker: tuple[str, str],
+        room: int,
+    ) -> str:
+        """从某个条目标题之后继续取原文，直到遇到下一个条目。"""
+        kind, name = marker
+        index = None
+        for position, (item_order, _text) in enumerate(items):
+            if item_order == order:
+                index = position
+                break
+        if index is None:
+            return ""
+        seed = items[index][1]
+        head = 0
+        cut = 0
+        for match in _SECTION_MARKER.finditer(seed):
+            if match.group(1) == kind and match.group(2).strip() == name:
+                head = match.start()
+                cut = match.end()
+        buffer = seed
+        scan_from = len(seed)
+        window = (cut - head) + room
+        for _next_order, text in items[index + 1 :]:
+            buffer = _append_overlap(buffer, text)
+            other = _next_other_marker(buffer[scan_from:], kind, name)
+            if other is not None:
+                return buffer[head : scan_from + other.start()][:window]
+            scan_from = len(buffer)
+            if len(buffer) - head >= window:
+                break
+        return buffer[head:][:window]
+
+    def read_source(
+        self,
+        document_id: int,
+        target: str,
+        *,
+        offset: int = 0,
+        limit: int = 14000,
+    ) -> dict[str, Any] | None:
+        """按文件名或类名取回某个条目的完整正文，可分段读取。"""
+        needle = str(target or "").replace("\\", "/").strip()
+        if not needle:
+            return None
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT ord, text FROM chunks WHERE document_id=? ORDER BY ord",
+                (int(document_id),),
+            ).fetchall()
+        items = [(int(row["ord"]), str(row["text"])) for row in rows]
+        matches: list[tuple[int, str, str]] = []
+        for position, (_order, text) in enumerate(items):
+            for match in _SECTION_MARKER.finditer(text):
+                kind, name = match.group(1), match.group(2).strip()
+                if _entry_matches(name, needle):
+                    matches.append((position, kind, name))
+        if not matches:
+            return None
+        chosen = next((item for item in matches if item[1] == "源码"), matches[0])
+        position, kind, name = chosen
+        body = self._entry_body(items, position, (kind, name))
+        if body is None:
+            return None
+        start = max(0, int(offset))
+        end = start + max(200, int(limit))
+        return {
+            "kind": kind,
+            "name": name,
+            "text": body[start:end],
+            "total": len(body),
+            "offset": start,
+            "next": end if end < len(body) else None,
+        }
+
+    @staticmethod
+    def _entry_body(
+        items: list[tuple[int, str]],
+        position: int,
+        marker: tuple[str, str],
+    ) -> str | None:
+        kind, name = marker
+        joined = ""
+        body_start = -1
+        scan_from = 0
+        for index in range(position, len(items)):
+            _order, text = items[index]
+            joined = _append_overlap(joined, text)
+            if body_start < 0:
+                found = None
+                for match in _SECTION_MARKER.finditer(joined):
+                    if match.group(1) == kind and match.group(2).strip() == name:
+                        found = match
+                if found is None:
+                    continue
+                body_start = found.end()
+                scan_from = body_start
+            other = _next_other_marker(joined[scan_from:], kind, name)
+            if other is not None:
+                return joined[body_start : scan_from + other.start()].strip("\n")
+            scan_from = len(joined)
+            if len(joined) > MAX_DOC_CHARS:
+                break
+        if body_start < 0:
+            return None
+        return joined[body_start:].strip("\n")
+
+    def source_entries(self, document_id: int, *, limit: int = 80) -> list[str]:
+        """列出资料里的反编译源码文件，供找不到目标时提示。"""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT text FROM chunks WHERE document_id=? AND text LIKE '%## 源码：%' "
+                "ORDER BY ord",
+                (int(document_id),),
+            ).fetchall()
+        found: list[str] = []
+        for row in rows:
+            for kind, name in _SECTION_MARKER.findall(str(row["text"])):
+                if kind != "源码":
+                    continue
+                name = name.strip()
+                if name and name not in found:
+                    found.append(name)
+                    if len(found) >= max(1, int(limit)):
+                        return found
+        return found
 
     def count(self) -> int:
         with self._lock:

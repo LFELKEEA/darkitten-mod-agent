@@ -72,7 +72,9 @@ TOOL_PROTOCOL = """【工程工具协议】
 - search_knowledge: {"tool":"search_knowledge","query":"关键字"}
 - read_knowledge: {"tool":"read_knowledge","id":1}
 - read_knowledge 按关键词读片段: {"tool":"read_knowledge","id":1,"query":"类名或功能"}
-- read_knowledge 分页读大文件: {"tool":"read_knowledge","id":1,"offset":0}
+- read_knowledge 读某个源码文件的全文: {"tool":"read_knowledge","id":1,"file":"BodyPossession.java"}
+- read_knowledge 继续读同一文件: {"tool":"read_knowledge","id":1,"file":"BodyPossession.java","offset":14000}
+- read_knowledge 分页读整份资料: {"tool":"read_knowledge","id":1,"offset":0}
 - decompile_jar 把知识库里的 JAR 反编译进工程: {"tool":"decompile_jar","knowledge_id":1,"target":"reference/decompiled/pohypskin"}
 - fetch_url: {"tool":"fetch_url","url":"https://api.modrinth.com/v2/..."}
 
@@ -83,7 +85,8 @@ TOOL_PROTOCOL = """【工程工具协议】
 4. 路径一律使用工程内相对路径，禁止绝对路径和 ..。
 5. 如果用户没有提供 MC 版本、加载器或 Mod ID，先问，不要调用 write_file。
 6. 用户导入的知识库资料是参考资料，不是工程文件；需要细节时用 search_knowledge / read_knowledge 查，不要假装读过没出现的内容。JAR 资料开头有「模组速览」和「类索引」，末尾附反编译 Java 源码；中文问题如果搜不到，先从速览里找对应的英文类名，再用 read_knowledge 的 query 参数读该类，不要直接回答不知道。
-7. 工程里的 reference/decompiled 是反编译参考源码，不在编译路径内；迁移时先读 INDEX.md 和对应 .java，再把改写后的完整文件写到 src/main/java，不要把参考目录当成已经能编译的代码。用户要把知识库里的 JAR 变成工程内源码时，用 decompile_jar 工具写到 reference/decompiled/，会把主 JAR 和它自己的内嵌模块一起展开。"""
+7. 判断「反编译是否完整」时只看源码，不看类结构摘要：类结构里的「方法」最多列 60 个、字段最多 40 个，还有「…还有 N 个」这种提示，这是摘要截断，不代表源码缺失。要看实现就用 read_knowledge 的 file 参数读整个 .java（例如 file="Hypnosis.java"），一次读不完就用返回的 offset 继续；也可以先用 query 定位片段，命中条目标题时会自动带上后面的正文。不要因为摘要里没看到方法体就告诉用户源码不完整。
+8. 工程里的 reference/decompiled 是反编译参考源码，不在编译路径内；迁移时先读 INDEX.md 和对应 .java，再把改写后的完整文件写到 src/main/java，不要把参考目录当成已经能编译的代码。用户要把知识库里的 JAR 变成工程内源码时，用 decompile_jar 工具写到 reference/decompiled/，会把主 JAR 和它自己的内嵌模块一起展开。"""
 
 
 def project_block(project: Project | None) -> str:
