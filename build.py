@@ -21,12 +21,12 @@ BUILD = ROOT / "build"
 APP_DIST = DIST / "DarkittenModAgent"
 ZIP_NAME = f"DarkittenModAgent-{APP_VERSION}.zip"
 NOTES = [
-    "编译前自动整理本地依赖：读取 build.gradle 里的 libs/*.jar，从下载目录、桌面、其它盘符的「下载」文件夹和知识库来源目录找出同名文件，复制进工程并自动创建 libs/。",
-    "带中文前缀的 jar 也能匹配，例如「[凡家物语：重生] mca-neoforge-7.7.36-beta.3+1.21.1.jar」会自动放进 libs/mca-neoforge-7.7.36-beta.3+1.21.1.jar；-sources / -javadoc 不会被误认成主 jar。",
-    "按构建脚本自动选择 Gradle 版本：识别到 ModDevGradle / NeoGradle 时把 Wrapper 切到 Gradle 8.10.2，不再给只支持 8.x 的工程套 9.8.2。",
-    "gradle-wrapper.properties 损坏（只剩一行路径、缺少 distributionUrl）时会自动重写成完整配置。",
-    "编译报缺少 libs/*.jar 时自动补文件并重试一次；实在找不到才提示缺哪个文件、搜索过哪些位置。",
-    "对话里新增 fix_build_setup 工具，助手可以直接补齐 Wrapper 和本地 jar，不再把手工步骤留给用户。",
+    "编译前先探测 maven.neoforged.net：返回 502、连接被拒、DNS 污染或证书失败时自动在本机起 Maven 代理，用 Gradle init script 换掉仓库地址并重试，不用手动改 hosts 或配镜像源。",
+    "代理依次尝试 bmclapi、南邮、Gradle 插件门户、Stellar、明坤等源，边下边转给 Gradle，文件缓存在 data/mirrors/repo/；慢速源会限流并自动重试，临时超时返回 503 而不是 404。",
+    "net.neoforged:minecraft-dependencies 在镜像上不存在，按 Mojang 版本清单现场合成；neoform-runtime 的 -all.jar 用内置的 282KB 主 jar 在运行时合并依赖，不用下载完整的合并包。",
+    "neoform-runtime 依赖的 fabric-loom-native 在所有公开镜像上都取不到，内置一个空壳 jar 合并进 -all.jar，避免首次构建卡在 NoClassDefFoundError。",
+    "Gradle 用 HEAD 探测 POM 时不再一律当成不存在；只有所有源都明确 404 才记为缺失。",
+    "编译失败后如果日志里出现 502 / Connection refused / PKIX 等关键字，会自动启用代理并重试一次。",
 ]
 
 

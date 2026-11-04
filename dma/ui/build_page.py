@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .. import deps, envcheck, gradle, toolchain, wrapper
+from .. import deps, envcheck, gradle, mirrors, toolchain, wrapper
 from . import theme
 from .prep_worker import PrepareWorker
 from .widgets import card, tiny
@@ -48,6 +48,20 @@ class _JavaProbe(QObject):
         self.done.emit(item)
 
 
+class _MirrorProbe(QObject):
+    done = Signal(bool)
+
+    def start(self) -> None:
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def _run(self) -> None:
+        try:
+            reachable = mirrors.neoforged_reachable()
+        except Exception:  # noqa: BLE001 - 探测失败按不可达处理
+            reachable = False
+        self.done.emit(reachable)
+
+
 class BuildPage(QWidget):
     def __init__(self, main, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -72,6 +86,8 @@ class BuildPage(QWidget):
         self._auto_upgraded = False
         self._network_retries = 0
         self._jar_retried = False
+        self._mirror_active = False
+        self._mirror_attempted = False
         self._timer = QTimer(self)
         self._timer.setInterval(1000)
         self._timer.timeout.connect(self._tick)
@@ -83,6 +99,9 @@ class BuildPage(QWidget):
         self._probe = _JavaProbe(tools)
         self._probe.done.connect(self._on_java)
         self._probe.start()
+        self._mirror_probe = _MirrorProbe()
+        self._mirror_probe.done.connect(self._on_mirror_probe)
+        self._mirror_probe.start()
 
     # ------------------------------------------------------------------
     def _build(self) -> None:
@@ -272,6 +291,39 @@ class BuildPage(QWidget):
             self.java_hint.setStyleSheet(f"color: {theme.COLORS['ok']};")
             self.java_hint.show()
 
+    # -- 镜像 -----------------------------------------------------------
+    def _on_mirror_probe(self, reachable: bool) -> None:
+        if reachable:
+            return
+        self._enable_mirror("启动检测到 maven.neoforged.net 直连不通")
+
+    def _enable_mirror(self, reason: str) -> None:
+        if self._mirror_active:
+            return
+        try:
+            script = mirrors.service(self._signals.line.emit).init_script()
+        except Exception as exc:  # noqa: BLE001 - 代理起不来就退回直连
+            self._append(f"[镜像] 本地代理启动失败：{exc}")
+            return
+        self._mirror_active = True
+        self._append(f"=== 已切换到镜像模式：{reason} ===")
+        self._append(
+            "[镜像] NeoForged 的仓库会改走本机代理，代理从国内镜像取包并缓存；"
+            "ModDevGradle、NeoForge、NeoFormRuntime 都走这条路。"
+        )
+        self._append(f"[镜像] init script：{script}")
+        self._append(f"[镜像] 代理地址：{mirrors.service().base_url}")
+
+    def _mirror_script(self):
+        if not self._mirror_active:
+            return None
+        try:
+            return mirrors.service(self._signals.line.emit).init_script()
+        except Exception as exc:  # noqa: BLE001
+            self._append(f"[镜像] 初始化失败，改为直连：{exc}")
+            self._mirror_active = False
+            return None
+
     # ------------------------------------------------------------------
     def _run(self, task: str, label: str, retry: bool = False) -> None:
         if self.runner.running or self._preparing:
@@ -418,7 +470,7 @@ class BuildPage(QWidget):
             )
             return
         try:
-            launch = gradle.resolve_launch(root, task)
+            launch = gradle.resolve_launch(root, task, init_script=self._mirror_script())
         except gradle.GradleError as exc:
             self._status(str(exc), theme.COLORS["danger"])
             return
@@ -436,7 +488,7 @@ class BuildPage(QWidget):
         self._timer.start()
         self._refresh_buttons()
         self.main.status(f"正在{label}：{project.label()}")
-        env = gradle.build_env(self.cert_box.isChecked())
+        env = gradle.build_env(self.cert_box.isChecked(), slow=self._mirror_active)
         if self._prepared is not None and self._prepared.java_home:
             env = toolchain.with_java_home(env, self._prepared.java_home)
         try:
@@ -479,6 +531,28 @@ class BuildPage(QWidget):
             self._append(f"=== {self._task}完成（退出码 0）===")
             self.main.status(f"{self._task}完成")
         else:
+            log_text = "\n".join(self._output)
+            if (
+                not self._mirror_active
+                and not self._mirror_attempted
+                and self._last_run is not None
+                and mirrors.needs_mirror(log_text)
+            ):
+                task, label = self._last_run
+                self._mirror_attempted = True
+                self._append("=== 直连 NeoForged 仓库失败 ===")
+                self._append(
+                    "报错指向 maven.neoforged.net，常见原因是 DNS 污染、加速器劫持或对方临时故障"
+                    "（502 / 连接被拒 / 证书链异常）。文件本身没问题，换个入口取包就能继续。"
+                )
+                self._enable_mirror("依赖下载命中 maven.neoforged.net 但连不通")
+                if self._mirror_active:
+                    self._network_retries = 0
+                    self._cert_error = False
+                    self._task = ""
+                    self._status("已切换镜像，正在重试…", theme.COLORS["warn"])
+                    QTimer.singleShot(400, lambda: self._run(task, label, retry=True))
+                    return
             if self._cert_error and self._last_run and not self.cert_box.isChecked():
                 task, label = self._last_run
                 self._append("=== 证书链校验失败 ===")
@@ -494,7 +568,6 @@ class BuildPage(QWidget):
                 QTimer.singleShot(400, lambda: self._run(task, label, retry=True))
                 return
             self._status(f"{self._task}失败（退出码 {code}）", theme.COLORS["danger"])
-            log_text = "\n".join(self._output)
             if (
                 deps.is_missing_jar_error(log_text)
                 and not self._jar_retried
@@ -726,6 +799,10 @@ class BuildPage(QWidget):
     def shutdown(self) -> None:
         if self.runner.running:
             self.runner.stop()
+        try:
+            mirrors.shutdown()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def scaffold_request(project) -> str:

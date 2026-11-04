@@ -2,7 +2,7 @@
 
 只写 Minecraft Java 模组的独立桌面 Agent。基于 PySide6，自带对话工作台、技能、连接器和知识库，可从下载站、GitHub 与 Darkitten 启动器获取，并支持自动更新。
 
-当前版本：`0.3.7`
+当前版本：`0.3.8`
 
 ## 功能
 
@@ -15,6 +15,7 @@
 - **一键准备**：自动挑 JDK（优先 21，缺了就下载 Temurin 21）、补齐 Wrapper、从中科大 / 华为云镜像装好 Gradle 发行包，不用手动配环境变量。
 - **本地依赖自动整理**：`build.gradle` 里写 `files('libs/xxx.jar')` 后，点「编译」或「一键准备」会自动从下载目录、桌面、其它盘符的「下载」文件夹和知识库来源目录找出同名 jar（带中文前缀也认），复制进工程并创建 `libs/`；找不到时才会提示缺哪个文件。
 - **Gradle 版本自适应**：识别到 ModDevGradle / NeoGradle 时自动把 Wrapper 切到 Gradle 8.10.2，其它工程默认 9.8.2；`gradle-wrapper.properties` 损坏会自动重写，编译报 `requires at least Gradle X` 时也会自动升级重试。
+- **NeoForge 依赖自动兜底**：`maven.neoforged.net` 返回 502、连接被拒、被 DNS 污染或证书校验失败时，自动启动本机 Maven 代理并重试；代理按需从国内镜像取文件并缓存，缺的 `neoform-runtime` 和 `minecraft-dependencies` 会在本机合成，不需要手动改 hosts 或配镜像源。
 - **删除工程**：对话页右上角的「删除工程」先把工程目录移到 Windows 回收站，再从最近列表里移除并清掉会话记录；有生成任务或 Gradle 任务在跑时会先拦住。
 - **环境自检**：检查 Java、JAVA_HOME、Gradle、Git、目录写入、资料源连通性和模型通道，给出缺失项与修复建议，可复制报告。
 - **编译运行**：点任务按钮时先自动准备环境，再执行 `gradlew build` / `runClient` / `runServer` / `runDatagen`；日志实时回显，可停止、复制日志、打开 `build/libs`。
@@ -131,6 +132,21 @@ API Key 只保存在本机 `data/config.json`，不会上传到本项目服务�
 - 检测到上述错误时，自动勾选「使用 Windows 证书库」并重试一次，通过 `JAVA_OPTS=-Djavax.net.ssl.trustStoreType=Windows-ROOT` 让 JVM 改用系统证书库。
 - 这个开关也可以在编译运行页手动勾选，设置会保存到 `config.json` 的 `gradle_windows_certs`，之后所有 Gradle 任务都生效。
 - 仍然失败时，先关掉加速器的 GitHub 加速，或把它的根证书导入 JDK 的 `lib/security/cacerts`。急着编译也可以手动下载对应 Gradle 发行包，解压后把 `bin` 目录临时加入 PATH，让工坊走系统 Gradle。
+
+### NeoForge 依赖镜像
+
+NeoForge 的 ModDevGradle 会从 `maven.neoforged.net` 拉 `neoform-runtime` 和一批构建工具。这个域名在国内经常出现 502、连接被拒或 DNS 污染，表现为编译到 `:createMinecraftArtifacts` 时失败。
+
+工坊的处理方式：
+
+- 启动编译前先探测 `maven.neoforged.net`；连不上时不打扰你，直接在本机 `127.0.0.1` 起一个 Maven 代理，用 Gradle init script 把 `maven.neoforged.net` 的仓库地址换到代理。
+- 代理依次尝试 bmclapi、南邮、Gradle 插件门户、Stellar、明坤等镜像，边下边转给 Gradle，文件缓存在 `data/mirrors/repo/`，下次编译直接命中。
+- `net.neoforged:minecraft-dependencies` 在镜像上不存在，按 Mojang 的版本清单现场生成；`neoform-runtime` 的 `-all.jar` 用内置的 282KB 主 jar 合并依赖得到，不需要下载完整的合并包。
+- `neoform-runtime` 运行时依赖 `fabric-loom-native`，这个工件在所有公开镜像上都取不到。程序内置一个只实现 `LoomNativePlatform` 三个静态方法的空壳 jar，合并进 `-all.jar`；它只在 NeoFormRuntime 排查文件锁时被调用，不加载本地库。
+- 慢速源会限流并自动重试；临时超时返回 503 让 Gradle 重试，只有确认 404 才会记成“不存在”。
+- 编译失败且日志里出现 `502 Bad Gateway`、`Connection refused`、`PKIX path building failed` 等关键字时，会自动启用代理并重试一次。
+
+代理只监听本机回环地址，不对外提供访问；缓存的都是公开的 Maven 构件。
 
 ## 工具轮数
 

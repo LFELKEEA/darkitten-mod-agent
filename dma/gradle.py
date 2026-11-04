@@ -27,6 +27,11 @@ HTTP_TIMEOUT_OPTS = (
     "-Dorg.gradle.internal.http.socketTimeout=60000",
 )
 
+SLOW_HTTP_TIMEOUT_OPTS = (
+    "-Dorg.gradle.internal.http.connectionTimeout=120000",
+    "-Dorg.gradle.internal.http.socketTimeout=300000",
+)
+
 CERT_ERROR_MARKERS = (
     "PKIX path building failed",
     "unable to find valid certification path",
@@ -86,19 +91,22 @@ def build_env(
     windows_trust: bool = False,
     base: dict | None = None,
     java_home: str | Path | None = None,
+    slow: bool = False,
 ) -> dict[str, str]:
     """给 Gradle / Wrapper 准备环境变量。
 
     - java_home：指定构建用的 JDK，gradlew.bat 会优先用它。
     - 拉依赖时把超时放宽到 60 秒，慢速 Maven 源不至于直接断掉。
+    - slow：走镜像代理时，代理可能要等上游把大文件慢慢吐完，超时放宽到 5 分钟。
     - windows_trust：加速器和公司代理常用自己的根证书做 HTTPS 拦截，JDK 自带的
       cacerts 不认，会出现 PKIX path building failed。Windows 证书库里一般已经装了
       这张根证书，所以这里通过 JAVA_OPTS 让 JVM 改用 Windows 证书库。
     """
     env = dict(os.environ if base is None else base)
 
+    options = SLOW_HTTP_TIMEOUT_OPTS if slow else HTTP_TIMEOUT_OPTS
     opts = env.get("GRADLE_OPTS", "").strip()
-    for option in HTTP_TIMEOUT_OPTS:
+    for option in options:
         if option not in opts:
             opts = f"{opts} {option}".strip()
     env["GRADLE_OPTS"] = opts
@@ -151,22 +159,31 @@ def has_gradle_files(project_root: Path | None) -> bool:
     return any((root / name).is_file() for name in BUILD_FILES)
 
 
-def resolve_launch(project_root: Path, task: str, *, system: str | None = None) -> Launch:
+def resolve_launch(
+    project_root: Path,
+    task: str,
+    *,
+    system: str | None = None,
+    init_script: Path | None = None,
+) -> Launch:
     if task not in GRADLE_TASKS:
         raise GradleError(f"不支持的任务：{task}")
     root = Path(project_root)
     if not root.is_dir():
         raise GradleError(f"工程目录不存在：{root}")
+    extra: list[str] = []
+    if init_script is not None:
+        extra = ["--init-script", str(init_script)]
     wrapper = find_wrapper(root)
     if wrapper is not None:
         if os.name == "nt":
-            argv = ["cmd", "/c", str(wrapper), task]
+            argv = ["cmd", "/c", str(wrapper), *extra, task]
         else:
-            argv = [str(wrapper), task]
+            argv = [str(wrapper), *extra, task]
         return Launch(argv=argv, cwd=root, task=task, source="wrapper")
     exe = (shutil.which("gradle") or "") if system is None else system
     if exe:
-        return Launch(argv=[exe, task], cwd=root, task=task, source="system")
+        return Launch(argv=[exe, *extra, task], cwd=root, task=task, source="system")
     raise GradleError(
         "工程里没有 gradlew，系统 PATH 里也没有 gradle。"
         "点「生成 Wrapper」补齐 Wrapper，或安装 Gradle 8.x 并加入 PATH。"
