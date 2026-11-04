@@ -31,6 +31,7 @@ class UiSmokeTests(TempDataCase):
         self.assertFalse(window.build_page.stop_btn.isEnabled())
         self.assertFalse(window.build_page.assist_btn.isEnabled())
         self.assertFalse(window.build_page.wrapper_btn.isEnabled())
+        self.assertFalse(window.build_page.cert_box.isChecked())
         for index in range(window.stack.count()):
             window.stack.setCurrentIndex(index)
             self.app.processEvents()

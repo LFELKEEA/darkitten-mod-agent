@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sys
 import threading
 import unittest
@@ -59,6 +60,32 @@ class GradleResolveTests(TempDataCase):
         self.assertEqual(gradle.decode_line("中文输出".encode("gbk")), "中文输出")
         self.assertEqual(gradle.decode_line("中文输出".encode("utf-8")), "中文输出")
 
+    def test_cert_error_detection(self) -> None:
+        self.assertTrue(
+            gradle.is_cert_error(
+                "Exception in thread \"main\" javax.net.ssl.SSLHandshakeException: "
+                "(certificate_unknown) PKIX path building failed: "
+                "sun.security.provider.certpath.SunCertPathBuilderException: "
+                "unable to find valid certification path to requested target"
+            )
+        )
+        self.assertFalse(gradle.is_cert_error("BUILD SUCCESSFUL in 12s"))
+        self.assertFalse(gradle.is_cert_error(""))
+
+    def test_build_env_windows_trust(self) -> None:
+        base = {"JAVA_OPTS": "-Xmx2g"}
+        off = gradle.build_env(False, base=base)
+        self.assertEqual(off["JAVA_OPTS"], "-Xmx2g")
+        if sys.platform == "win32":
+            env = gradle.build_env(True, base=base)
+            self.assertIn(gradle.WINDOWS_TRUST_OPTION, env["JAVA_OPTS"])
+            self.assertTrue(env["JAVA_OPTS"].startswith("-Xmx2g"))
+            again = gradle.build_env(True, base=env)
+            self.assertEqual(again["JAVA_OPTS"].count(gradle.WINDOWS_TRUST_OPTION), 1)
+        else:
+            env = gradle.build_env(True, base=base)
+            self.assertEqual(env["JAVA_OPTS"], "-Xmx2g")
+
 
 class GradleRunnerTests(TempDataCase):
     def test_collects_output_and_exit_code(self) -> None:
@@ -82,6 +109,23 @@ class GradleRunnerTests(TempDataCase):
         self.assertIn("line-1", lines)
         self.assertIn("line-2", lines)
         self.assertFalse(runner.running)
+
+    def test_passes_environment(self) -> None:
+        lines: list[str] = []
+        done = threading.Event()
+
+        def finished(code: int, message: str) -> None:
+            done.set()
+
+        runner = gradle.GradleRunner(lines.append, finished)
+        script = "import os; print('PROBE=' + os.environ.get('DMA_PROBE', ''))"
+        env = dict(os.environ, DMA_PROBE="trust-me")
+        runner.start(
+            gradle.Launch([sys.executable, "-c", script], Path.cwd(), "build", "system"),
+            env,
+        )
+        self.assertTrue(done.wait(20), "runner 没有在 20 秒内结束")
+        self.assertTrue(any("PROBE=trust-me" in line for line in lines))
 
 
 if __name__ == "__main__":

@@ -8,6 +8,7 @@ from PySide6.QtCore import QObject, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QFont
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -58,6 +59,8 @@ class BuildPage(QWidget):
         self._started_at = 0.0
         self._task = ""
         self._stopping = False
+        self._cert_error = False
+        self._last_run: tuple[str, str] | None = None
         self._timer = QTimer(self)
         self._timer.setInterval(1000)
         self._timer.timeout.connect(self._tick)
@@ -152,6 +155,17 @@ class BuildPage(QWidget):
         self.wrapper_btn.clicked.connect(self._make_wrapper)
         actions.addWidget(self.assist_btn)
         actions.addWidget(self.wrapper_btn)
+        self.cert_box = QCheckBox("使用 Windows 证书库")
+        self.cert_box.setToolTip(
+            "浏览器能打开、Gradle 却报 PKIX path building failed 时勾选。"
+            "加速器、公司代理和部分杀毒软件会用 Windows 里的根证书拦截 HTTPS，"
+            "JDK 自带的证书库不认它们；勾选后 Gradle 改用 Windows 证书库。"
+        )
+        self.cert_box.setChecked(
+            bool(getattr(getattr(self.main, "config", None), "gradle_windows_certs", False))
+        )
+        self.cert_box.toggled.connect(self._on_cert_toggle)
+        actions.addWidget(self.cert_box)
         actions.addStretch(1)
         bar.addLayout(actions)
 
@@ -228,7 +242,7 @@ class BuildPage(QWidget):
             self.java_hint.show()
 
     # ------------------------------------------------------------------
-    def _run(self, task: str, label: str) -> None:
+    def _run(self, task: str, label: str, retry: bool = False) -> None:
         if self.runner.running:
             self._status("已有任务在运行，先等它结束或点「停止」。", theme.COLORS["warn"])
             return
@@ -253,13 +267,17 @@ class BuildPage(QWidget):
         self._append(" ".join(launch.argv))
         self._task = label
         self._stopping = False
+        if not retry:
+            self._cert_error = False
+        self._last_run = (task, label)
         self._started_at = time.monotonic()
         self._status(f"正在{label}…", theme.COLORS["accent"])
         self._timer.start()
         self._refresh_buttons()
         self.main.status(f"正在{label}：{project.label()}")
+        env = gradle.build_env(self.cert_box.isChecked())
         try:
-            self.runner.start(launch)
+            self.runner.start(launch, env)
         except gradle.GradleError as exc:
             self._timer.stop()
             self._status(str(exc), theme.COLORS["danger"])
@@ -297,8 +315,28 @@ class BuildPage(QWidget):
             self._append(f"=== {self._task}完成（退出码 0）===")
             self.main.status(f"{self._task}完成")
         else:
+            if self._cert_error and self._last_run and not self.cert_box.isChecked():
+                task, label = self._last_run
+                self._append("=== 证书链校验失败 ===")
+                self._append(
+                    "原因：本机有程序在拦截 HTTPS（常见于 Watt Toolkit / SteamTools 的 GitHub 加速、"
+                    "公司代理或杀毒软件），JDK 自带证书库不认它的根证书。"
+                )
+                self._append("已自动勾选「使用 Windows 证书库」，正在重试…")
+                self._status("证书链校验失败，改用 Windows 证书库重试", theme.COLORS["warn"])
+                self._task = ""
+                self._cert_error = False
+                self.cert_box.setChecked(True)
+                QTimer.singleShot(400, lambda: self._run(task, label, retry=True))
+                return
             self._status(f"{self._task}失败（退出码 {code}）", theme.COLORS["danger"])
-            self.detail.setText("把上面的日志复制回对话页，任务类型选「修复崩溃 / 编译报错」，助手会按报错改文件。")
+            if self._cert_error:
+                self.detail.setText(
+                    "证书链校验仍然失败：先在加速器里关掉 GitHub 加速，或把它的根证书导入 JDK 的 cacerts。"
+                    "急着编译可以在有网的环境手动下载 Gradle 发行包，解开后把 bin 目录临时加入 PATH。"
+                )
+            else:
+                self.detail.setText("把上面的日志复制回对话页，任务类型选「修复崩溃 / 编译报错」，助手会按报错改文件。")
             self._append(f"=== {self._task}失败（退出码 {code}）===")
             self.main.status(f"{self._task}失败，退出码 {code}")
         self._task = ""
@@ -315,10 +353,21 @@ class BuildPage(QWidget):
         self.status.setStyleSheet(f"color: {color};")
 
     def _append(self, line: str) -> None:
+        if gradle.is_cert_error(line):
+            self._cert_error = True
         self.log.appendPlainText(line)
         bar = self.log.verticalScrollBar()
         bar.setValue(bar.maximum())
         self.copy_btn.setEnabled(bool(self.log.toPlainText().strip()))
+
+    def _on_cert_toggle(self, checked: bool) -> None:
+        config = getattr(self.main, "config", None)
+        if config is None:
+            return
+        if bool(getattr(config, "gradle_windows_certs", False)) == bool(checked):
+            return
+        config.gradle_windows_certs = bool(checked)
+        self.main.save_config()
 
     def _clear_log(self) -> None:
         self.log.clear()

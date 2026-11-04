@@ -72,6 +72,7 @@ class Config:
     window_width: int = 1320
     window_height: int = 860
     font_size: int = 14
+    gradle_windows_certs: bool = False
 
     def normalized(self) -> "Config":
         root = self.project_root.strip()
@@ -100,6 +101,7 @@ class Config:
             window_width=max(980, int(self.window_width or 1320)),
             window_height=max(680, int(self.window_height or 860)),
             font_size=max(11, min(20, int(self.font_size or 14))),
+            gradle_windows_certs=bool(self.gradle_windows_certs),
         )
 
 

@@ -19,6 +19,36 @@ CREATE_NO_WINDOW = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
 
 BUILD_FILES = ("build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts")
 
+WINDOWS_TRUST_OPTION = "-Djavax.net.ssl.trustStoreType=Windows-ROOT"
+
+CERT_ERROR_MARKERS = (
+    "PKIX path building failed",
+    "unable to find valid certification path",
+    "SSLHandshakeException",
+)
+
+
+def is_cert_error(text: str) -> bool:
+    lowered = (text or "").lower()
+    return any(marker.lower() in lowered for marker in CERT_ERROR_MARKERS)
+
+
+def build_env(windows_trust: bool = False, base: dict | None = None) -> dict[str, str]:
+    """给 Gradle / Wrapper 准备环境变量。
+
+    加速器和公司代理常用自己的根证书做 HTTPS 拦截，JDK 自带的 cacerts 不认，
+    会出现 PKIX path building failed。Windows 证书库里一般已经装了这张根证书，
+    所以这里可以通过 JAVA_OPTS 让 JVM 改用 Windows 证书库。
+    """
+    env = dict(os.environ if base is None else base)
+    if not windows_trust or os.name != "nt":
+        return env
+    current = env.get("JAVA_OPTS", "").strip()
+    if WINDOWS_TRUST_OPTION in current:
+        return env
+    env["JAVA_OPTS"] = f"{current} {WINDOWS_TRUST_OPTION}".strip()
+    return env
+
 
 class GradleError(Exception):
     pass
@@ -94,18 +124,19 @@ class GradleRunner:
     def running(self) -> bool:
         return self._thread is not None and self._thread.is_alive()
 
-    def start(self, launch: Launch) -> None:
+    def start(self, launch: Launch, env: dict[str, str] | None = None) -> None:
         if self.running:
             raise GradleError("已有 Gradle 任务在运行。")
         self._cancel.clear()
-        self._thread = threading.Thread(target=self._pump, args=(launch,), daemon=True)
+        self._thread = threading.Thread(target=self._pump, args=(launch, env), daemon=True)
         self._thread.start()
 
-    def _pump(self, launch: Launch) -> None:
+    def _pump(self, launch: Launch, env: dict[str, str] | None = None) -> None:
         try:
             proc = subprocess.Popen(
                 launch.argv,
                 cwd=str(launch.cwd),
+                env=env,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,

@@ -2,7 +2,7 @@
 
 只写 Minecraft Java 模组的独立桌面 Agent。基于 PySide6，自带对话工作台、技能、连接器和记忆库，可从下载站、GitHub 与 Darkitten 启动器获取，并支持自动更新。
 
-当前版本：`0.1.5`
+当前版本：`0.1.6`
 
 ## 功能
 
@@ -77,6 +77,16 @@ API Key 只保存在本机 `data/config.json`，不会上传到本项目服务�
 - **生成 Wrapper**：把内置的 Gradle 8.10.2 Wrapper 文件（`gradlew`、`gradlew.bat`、`gradle-wrapper.jar`、`gradle-wrapper.properties`）写进工程，本机不装 Gradle 也能编译；首次编译时 Wrapper 会自行下载 Gradle 发行包。已有 Wrapper 时会先问是否覆盖。
 
 `assets/wrapper/` 里的 Wrapper 文件来自 [gradle/gradle v8.10.2](https://github.com/gradle/gradle/tree/v8.10.2)，遵循 Apache-2.0，出处与许可见该目录下的 `NOTICE.txt`。
+
+### 证书与代理
+
+第一次用 Wrapper 时会下载 Gradle 发行包。如果日志里出现 `PKIX path building failed` / `unable to find valid certification path`，说明本机有程序在拦截 HTTPS：常见于 Watt Toolkit（SteamTools）的 GitHub 加速、公司代理，以及带 HTTPS 扫描的杀毒软件。它们会用自己的根证书重签流量，JDK 自带证书库不认，而 Windows 证书库里通常已经装了这张根证书。
+
+工坊的处理方式：
+
+- 检测到上述错误时，自动勾选「使用 Windows 证书库」并重试一次，通过 `JAVA_OPTS=-Djavax.net.ssl.trustStoreType=Windows-ROOT` 让 JVM 改用系统证书库。
+- 这个开关也可以在编译运行页手动勾选，设置会保存到 `config.json` 的 `gradle_windows_certs`，之后所有 Gradle 任务都生效。
+- 仍然失败时，先关掉加速器的 GitHub 加速，或把它的根证书导入 JDK 的 `lib/security/cacerts`。急着编译也可以手动下载对应 Gradle 发行包，解压后把 `bin` 目录临时加入 PATH，让工坊走系统 Gradle。
 
 ## 工具轮数
 
