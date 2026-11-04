@@ -61,6 +61,7 @@ class BuildPage(QWidget):
         self._stopping = False
         self._cert_error = False
         self._last_run: tuple[str, str] | None = None
+        self._output: list[str] = []
         self._timer = QTimer(self)
         self._timer.setInterval(1000)
         self._timer.timeout.connect(self._tick)
@@ -263,6 +264,7 @@ class BuildPage(QWidget):
             self._status(str(exc), theme.COLORS["danger"])
             return
         source = "工程 Wrapper" if launch.source == "wrapper" else "系统 Gradle"
+        self._output = []
         self._append(f"=== {label}（{source}）{time.strftime('%H:%M:%S')} ===")
         self._append(" ".join(launch.argv))
         self._task = label
@@ -330,7 +332,24 @@ class BuildPage(QWidget):
                 QTimer.singleShot(400, lambda: self._run(task, label, retry=True))
                 return
             self._status(f"{self._task}失败（退出码 {code}）", theme.COLORS["danger"])
-            if self._cert_error:
+            required = gradle.required_gradle("\n".join(self._output))
+            if required:
+                project = getattr(self.main, "active_project", None)
+                current = wrapper.current_distribution(Path(project.root)) if project else ""
+                if gradle.version_tuple(required) <= gradle.version_tuple(wrapper.DEFAULT_DISTRIBUTION):
+                    self.detail.setText(
+                        f"构建脚本要求 Gradle {required}，工程当前是 {current or '未知版本'}。"
+                        f"点「生成 Wrapper」写入 {wrapper.DEFAULT_DISTRIBUTION}，再重新编译。"
+                    )
+                else:
+                    self.detail.setText(
+                        f"构建脚本要求 Gradle {required}，高于内置的 {wrapper.DEFAULT_DISTRIBUTION}。"
+                        "让助手把插件降到兼容版本，或手动把 Wrapper 升到该版本。"
+                    )
+                self._append(
+                    f"=== 版本不匹配：需要 Gradle {required}，当前 {current or '未知'} ==="
+                )
+            elif self._cert_error:
                 self.detail.setText(
                     "证书链校验仍然失败：先在加速器里关掉 GitHub 加速，或把它的根证书导入 JDK 的 cacerts。"
                     "急着编译可以在有网的环境手动下载 Gradle 发行包，解开后把 bin 目录临时加入 PATH。"
@@ -355,6 +374,7 @@ class BuildPage(QWidget):
     def _append(self, line: str) -> None:
         if gradle.is_cert_error(line):
             self._cert_error = True
+        self._output.append(line)
         self.log.appendPlainText(line)
         bar = self.log.verticalScrollBar()
         bar.setValue(bar.maximum())
@@ -442,7 +462,7 @@ class BuildPage(QWidget):
             answer = QMessageBox.question(
                 self,
                 "覆盖 Wrapper",
-                "工程里已经有 gradlew。要覆盖为 Gradle 8.10.2 的 Wrapper 吗？",
+                f"工程里已经有 gradlew。要覆盖为 Gradle {wrapper.DEFAULT_DISTRIBUTION} 的 Wrapper 吗？",
             )
             if answer != QMessageBox.Yes:
                 return
@@ -457,7 +477,7 @@ class BuildPage(QWidget):
         self._status("Wrapper 已生成", theme.COLORS["ok"])
         if gradle.has_gradle_files(root):
             self.detail.setText(
-                "已写入 gradlew 和 gradle-wrapper.properties。点「编译」会先下载 Gradle 8.10.2。"
+                f"已写入 gradlew 和 gradle-wrapper.properties。点「编译」会先下载 Gradle {wrapper.DEFAULT_DISTRIBUTION}。"
             )
         else:
             self.detail.setText("Wrapper 已就绪；还缺 build.gradle，点「让助手补全配置」后再编译。")
@@ -488,6 +508,8 @@ def scaffold_request(project) -> str:
     lines.extend(
         [
             "所有版本号先查 Fabric Meta / NeoForged 官方仓库确认，不要猜；查不到就写明需要用户确认，不要编造。",
+            f"当前「生成 Wrapper」写入的是 Gradle {wrapper.DEFAULT_DISTRIBUTION}，插件版本必须兼容它；"
+            "如果选的 loom / NeoGradle 要求更高版本的 Gradle，要么改用兼容版本，要么在回复里明确说明需要升级 Wrapper。",
             "gradlew 和 gradle-wrapper.jar 不用生成，页面上有「生成 Wrapper」按钮。",
             "按工程相对路径输出完整文件内容，文件进入待写入列表，等用户确认后再写入。",
         ]

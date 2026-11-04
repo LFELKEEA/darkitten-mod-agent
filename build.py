@@ -21,10 +21,10 @@ BUILD = ROOT / "build"
 APP_DIST = DIST / "DarkittenModAgent"
 ZIP_NAME = f"DarkittenModAgent-{APP_VERSION}.zip"
 NOTES = [
-    "修复加速器 / 代理环境下 Gradle 下载失败：遇到 PKIX path building failed 时自动改用 Windows 证书库重试，不再卡在「Downloading gradle-x.y-bin.zip」。",
-    "编译运行页新增「使用 Windows 证书库」开关，手动勾选后所有 Gradle 任务都用系统证书库，设置会记住。",
-    "证书错误会在日志里说明原因（Watt Toolkit / SteamTools 加速、公司代理、杀毒软件 HTTPS 扫描），并给出仍然失败时的处理办法。",
-    "编译运行页新增「让助手补全配置」与「生成 Wrapper」：按版本和加载器生成构建脚本，或写入内置 Gradle 8.10.2 Wrapper。",
+    "内置 Wrapper 升级到 Gradle 9.8.2，和当前 Fabric loom 的要求对齐；「生成 Wrapper」不再生成过旧的 8.10.2。",
+    "编译失败时识别「requires at least Gradle X」/「Minimum supported Gradle version」，直接提示差了哪个版本、该点哪个按钮。",
+    "「让助手补全配置」的请求里补上 Gradle 版本约束，要求插件版本与内置 Wrapper 兼容，避免再出现 loom 要 9.8、Wrapper 却是 8.x 的情况。",
+    "修复加速器 / 代理环境下 Gradle 下载报 PKIX 证书错误：自动改用 Windows 证书库重试，并提供手动开关。",
     "编译运行页：一键执行 gradlew build / runClient / runServer / runDatagen，日志实时显示，可停止、复制日志、打开 build/libs。",
 ]
 

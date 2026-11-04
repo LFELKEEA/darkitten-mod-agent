@@ -34,8 +34,12 @@ class WrapperTests(TempDataCase):
         props = (project.root / "gradle" / "wrapper" / "gradle-wrapper.properties").read_text(
             encoding="utf-8"
         )
-        self.assertIn("gradle-8.10.2-bin.zip", props)
+        self.assertIn(f"gradle-{wrapper.DEFAULT_DISTRIBUTION}-bin.zip", props)
         self.assertIn("services.gradle.org", props)
+        self.assertEqual(wrapper.current_distribution(project.root), wrapper.DEFAULT_DISTRIBUTION)
+
+    def test_current_distribution_missing(self) -> None:
+        self.assertEqual(wrapper.current_distribution(self.tmp), "")
 
     def test_missing_project(self) -> None:
         with self.assertRaises(wrapper.WrapperError):
@@ -60,6 +64,7 @@ class ScaffoldRequestTests(TempDataCase):
         self.assertIn("settings.gradle", text)
         self.assertIn("build.gradle", text)
         self.assertIn("不要猜", text)
+        self.assertIn(wrapper.DEFAULT_DISTRIBUTION, text)
 
     def test_neoforge_request(self) -> None:
         text = scaffold_request(self.project("NeoForge"))

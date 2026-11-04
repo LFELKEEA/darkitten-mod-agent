@@ -7,7 +7,7 @@ from pathlib import Path
 
 from . import paths
 
-DEFAULT_DISTRIBUTION = "8.10.2"
+DEFAULT_DISTRIBUTION = "9.8.2"
 
 PROPERTIES = """distributionBase=GRADLE_USER_HOME
 distributionPath=wrapper/dists
@@ -32,6 +32,27 @@ def has_wrapper(project_root: Path | None) -> bool:
         return False
     root = Path(project_root)
     return (root / "gradlew.bat").is_file() or (root / "gradlew").is_file()
+
+
+def current_distribution(project_root: Path | None) -> str:
+    """读取工程 Wrapper 里配置的 Gradle 版本，读不到就返回空字符串。"""
+    if project_root is None:
+        return ""
+    properties = Path(project_root) / "gradle" / "wrapper" / "gradle-wrapper.properties"
+    try:
+        text = properties.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    for line in text.splitlines():
+        if line.strip().startswith("distributionUrl="):
+            value = line.split("=", 1)[1].strip()
+            name = value.rsplit("/", 1)[-1]
+            if name.startswith("gradle-"):
+                name = name[len("gradle-"):]
+            if name.endswith("-bin.zip") or name.endswith("-all.zip"):
+                name = name.rsplit("-", 1)[0]
+            return name
+    return ""
 
 
 def ensure_wrapper(project_root: Path, version: str = DEFAULT_DISTRIBUTION) -> list[str]:

@@ -2,7 +2,7 @@
 
 只写 Minecraft Java 模组的独立桌面 Agent。基于 PySide6，自带对话工作台、技能、连接器和记忆库，可从下载站、GitHub 与 Darkitten 启动器获取，并支持自动更新。
 
-当前版本：`0.1.6`
+当前版本：`0.1.7`
 
 ## 功能
 
@@ -74,9 +74,11 @@ API Key 只保存在本机 `data/config.json`，不会上传到本项目服务�
 页面底部有两个补配置的按钮：
 
 - **让助手补全配置**：工程里没有 `build.gradle` / `settings.gradle` 时，自动切到对话页并发出构建脚本请求，按工程记录的 MC 版本、加载器和 mod id 生成这三个文件（`gradle.properties` 一并给出），加载器分别用 Fabric Loom、NeoGradle / ModDevGradle 或 Architectury 多模块写法。
-- **生成 Wrapper**：把内置的 Gradle 8.10.2 Wrapper 文件（`gradlew`、`gradlew.bat`、`gradle-wrapper.jar`、`gradle-wrapper.properties`）写进工程，本机不装 Gradle 也能编译；首次编译时 Wrapper 会自行下载 Gradle 发行包。已有 Wrapper 时会先问是否覆盖。
+- **生成 Wrapper**：把内置的 Gradle 9.8.2 Wrapper 文件（`gradlew`、`gradlew.bat`、`gradle-wrapper.jar`、`gradle-wrapper.properties`）写进工程，本机不装 Gradle 也能编译；首次编译时 Wrapper 会自行下载 Gradle 发行包。已有 Wrapper 时会先问是否覆盖。
 
-`assets/wrapper/` 里的 Wrapper 文件来自 [gradle/gradle v8.10.2](https://github.com/gradle/gradle/tree/v8.10.2)，遵循 Apache-2.0，出处与许可见该目录下的 `NOTICE.txt`。
+版本匹配：Fabric 的 `fabric-loom` 1.19.x 要求 Gradle 9.8.0 及以上，所以内置 Wrapper 用 9.8.2。工程里已有更旧的 Wrapper 时，编译会报 `requires at least Gradle X` / `Minimum supported Gradle version is X`，页面会显示当前版本和需要升级到哪个版本。
+
+`assets/wrapper/` 里的 Wrapper 文件来自 [gradle/gradle v9.8.2](https://github.com/gradle/gradle/tree/v9.8.2)，遵循 Apache-2.0，出处与许可见该目录下的 `NOTICE.txt`。
 
 ### 证书与代理
 

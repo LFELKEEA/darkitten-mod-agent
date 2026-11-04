@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import threading
@@ -31,6 +32,31 @@ CERT_ERROR_MARKERS = (
 def is_cert_error(text: str) -> bool:
     lowered = (text or "").lower()
     return any(marker.lower() in lowered for marker in CERT_ERROR_MARKERS)
+
+
+_GRADLE_REQUIRED = (
+    re.compile(r"requires at least Gradle (\d+(?:\.\d+){0,2})", re.IGNORECASE),
+    re.compile(r"Minimum supported Gradle version is (\d+(?:\.\d+){0,2})", re.IGNORECASE),
+)
+
+
+def required_gradle(text: str) -> str:
+    """从报错里取出插件要求的 Gradle 版本，取不到返回空字符串。"""
+    for pattern in _GRADLE_REQUIRED:
+        match = pattern.search(text or "")
+        if match:
+            return match.group(1)
+    return ""
+
+
+def version_tuple(value: str) -> tuple[int, ...]:
+    parts: list[int] = []
+    for item in (value or "").split("."):
+        try:
+            parts.append(int(item))
+        except ValueError:
+            break
+    return tuple(parts)
 
 
 def build_env(windows_trust: bool = False, base: dict | None = None) -> dict[str, str]:

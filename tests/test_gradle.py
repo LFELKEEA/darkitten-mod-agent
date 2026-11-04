@@ -86,6 +86,19 @@ class GradleResolveTests(TempDataCase):
             env = gradle.build_env(True, base=base)
             self.assertEqual(env["JAVA_OPTS"], "-Xmx2g")
 
+    def test_required_gradle(self) -> None:
+        text = (
+            "Plugin net.fabricmc:fabric-loom:1.19.3 requires at least Gradle 9.8.0. "
+            "This build uses Gradle 8.14."
+        )
+        self.assertEqual(gradle.required_gradle(text), "9.8.0")
+        self.assertEqual(
+            gradle.required_gradle("Minimum supported Gradle version is 8.5."), "8.5"
+        )
+        self.assertEqual(gradle.required_gradle("BUILD SUCCESSFUL"), "")
+        self.assertTrue(gradle.version_tuple("9.8.2") > gradle.version_tuple("8.14"))
+        self.assertEqual(gradle.version_tuple("9.8"), (9, 8))
+
 
 class GradleRunnerTests(TempDataCase):
     def test_collects_output_and_exit_code(self) -> None:
