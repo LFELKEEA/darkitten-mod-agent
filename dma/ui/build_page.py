@@ -477,7 +477,7 @@ class BuildPage(QWidget):
         source = "工程 Wrapper" if launch.source == "wrapper" else "系统 Gradle"
         self._output = []
         self._append(f"=== {label}（{source}）{time.strftime('%H:%M:%S')} ===")
-        self._append(" ".join(launch.argv))
+        self._append(launch.command or " ".join(launch.argv))
         self._task = label
         self._stopping = False
         if not retry:

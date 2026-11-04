@@ -2,7 +2,7 @@
 
 只写 Minecraft Java 模组的独立桌面 Agent。基于 PySide6，自带对话工作台、技能、连接器和知识库，可从下载站、GitHub 与 Darkitten 启动器获取，并支持自动更新。
 
-当前版本：`0.3.10`
+当前版本：`0.3.11`
 
 ## 功能
 
@@ -109,7 +109,7 @@ JDK 和 Gradle 发行包这类大文件（≥ 8 MB）默认开 6 条连接分段
 
 点任何一个任务按钮，工坊会先自动跑一遍「一键准备」：挑 JDK、补 Wrapper、装 Gradle，然后再执行任务。环境刚准备过（120 秒内、同一个工程）会直接启动，不重复扫描。准备过程写在运行日志里，和 Gradle 输出连在一起。
 
-优先使用工程自带的 `gradlew` / `gradlew.bat`，没有则回退到系统 PATH 里的 `gradle`。构建会把选中的 JDK 放进 `JAVA_HOME` 和 `PATH`，并用 `GRADLE_OPTS` 把 HTTP 超时放宽到 60 秒。依赖下载遇到 `Connection reset` / `Read timed out` / `Could not download` 时，会自动重试最多两次，已经下完的依赖会保留。
+优先使用工程自带的 `gradlew` / `gradlew.bat`，没有则回退到系统 PATH 里的 `gradle`。构建会把选中的 JDK 放进 `JAVA_HOME` 和 `PATH`，并用 `GRADLE_OPTS` 把 HTTP 超时放宽到 60 秒。程序装在带空格的目录（例如 `D:\Darkitten Launcher\...`）时也能正常启动 Wrapper，运行日志里显示的是实际执行的完整命令。依赖下载遇到 `Connection reset` / `Read timed out` / `Could not download` 时，会自动重试最多两次，已经下完的依赖会保留。
 
 日志逐行实时显示，可以停止任务、复制日志贴回对话页，或直接打开 `build/libs`。关闭工坊会结束正在运行的 Gradle 任务。首次运行仍要下载 Minecraft 和 Fabric / NeoForge 依赖，这部分速度取决于你的网络和源站；Fabric 的 `maven.fabricmc.net` 目前没有可用的国内镜像，工坊无法替它加速。
 

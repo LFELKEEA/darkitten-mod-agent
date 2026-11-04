@@ -140,6 +140,7 @@ class Launch:
     cwd: Path
     task: str
     source: str
+    command: str | None = None
 
 
 def find_wrapper(project_root: Path | None) -> Path | None:
@@ -177,9 +178,19 @@ def resolve_launch(
     wrapper = find_wrapper(root)
     if wrapper is not None:
         if os.name == "nt":
-            argv = ["cmd", "/c", str(wrapper), *extra, task]
-        else:
-            argv = [str(wrapper), *extra, task]
+            # cmd /c 遇到多个带引号的参数时会把第一个引号当成命令边界，
+            # 路径里有空格就会报「'D:\Darkitten' 不是内部或外部命令」。
+            # 用 /s 加一层外层引号，把完整命令行原样交给 cmd。
+            inner = subprocess.list2cmdline([str(wrapper), *extra, task])
+            argv = ["cmd", "/d", "/s", "/c", str(wrapper), *extra, task]
+            return Launch(
+                argv=argv,
+                cwd=root,
+                task=task,
+                source="wrapper",
+                command=f'cmd /d /s /c "{inner}"',
+            )
+        argv = [str(wrapper), *extra, task]
         return Launch(argv=argv, cwd=root, task=task, source="wrapper")
     exe = (shutil.which("gradle") or "") if system is None else system
     if exe:
@@ -223,7 +234,7 @@ class GradleRunner:
     def _pump(self, launch: Launch, env: dict[str, str] | None = None) -> None:
         try:
             proc = subprocess.Popen(
-                launch.argv,
+                launch.command or launch.argv,
                 cwd=str(launch.cwd),
                 env=env,
                 stdin=subprocess.DEVNULL,

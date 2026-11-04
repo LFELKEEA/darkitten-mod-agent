@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 import threading
 import unittest
@@ -36,6 +37,28 @@ class GradleResolveTests(TempDataCase):
         launch = gradle.resolve_launch(root, "runClient", system="C:/fake/gradle")
         self.assertEqual(launch.source, "system")
         self.assertEqual(launch.argv, ["C:/fake/gradle", "runClient"])
+
+    @unittest.skipUnless(os.name == "nt", "只有 Windows 需要经过 cmd")
+    def test_wrapper_path_with_spaces(self) -> None:
+        root = self.tmp / "mod with space"
+        root.mkdir()
+        wrapper = root / "gradlew.bat"
+        wrapper.write_text("@echo off\r\necho WRAPPER_OK %*\r\n", encoding="utf-8")
+        init = self.tmp / "mirror with space" / "mirror.gradle"
+        init.parent.mkdir()
+        init.write_text("", encoding="utf-8")
+        launch = gradle.resolve_launch(root, "build", init_script=init)
+        self.assertIsNotNone(launch.command)
+        result = subprocess.run(
+            launch.command,
+            cwd=str(root),
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+        )
+        output = gradle.decode_line(result.stdout)
+        self.assertEqual(result.returncode, 0, output)
+        self.assertIn("WRAPPER_OK", output)
+        self.assertIn("build", output)
 
     def test_missing_gradle(self) -> None:
         root = self.tmp / "mod"
