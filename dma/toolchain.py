@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from . import envcheck, gradle, paths, wrapper
+from . import deps, envcheck, gradle, paths, wrapper
 
 USER_AGENT = "DarkittenModAgent/0.1 (+https://lfelkeea.github.io/darkitten-launcher/)"
 DOWNLOAD_TIMEOUT = 30
@@ -545,13 +545,14 @@ def wrapper_ready(project_root: Path) -> bool:
     return (
         wrapper.has_wrapper(root)
         and (wrapper_dir / "gradle-wrapper.jar").is_file()
-        and (wrapper_dir / "gradle-wrapper.properties").is_file()
+        and wrapper.properties_valid(root)
     )
 
 
-def ensure_wrapper_files(project_root: Path) -> list[str]:
-    """只补缺失的 Wrapper 文件，不覆盖工程里已有的版本配置。"""
+def ensure_wrapper_files(project_root: Path, version: str | None = None) -> list[str]:
+    """补齐缺失的 Wrapper 文件；配置损坏时重写，版本正常时不覆盖。"""
     root = Path(project_root)
+    target_version = version or wrapper.compatible_version(root)[0] or wrapper.DEFAULT_DISTRIBUTION
     source = wrapper.assets_dir()
     required = ("gradlew", "gradlew.bat", "gradle-wrapper.jar")
     missing = [name for name in required if not (source / name).is_file()]
@@ -572,9 +573,9 @@ def ensure_wrapper_files(project_root: Path) -> list[str]:
         written.append("gradle/wrapper/gradle-wrapper.jar")
 
     props = wrapper_dir / "gradle-wrapper.properties"
-    if not props.is_file():
+    if not props.is_file() or not wrapper.properties_valid(root):
         props.write_text(
-            wrapper.PROPERTIES.format(version=wrapper.DEFAULT_DISTRIBUTION),
+            wrapper.PROPERTIES.format(version=target_version),
             encoding="utf-8",
         )
         written.append("gradle/wrapper/gradle-wrapper.properties")
@@ -596,11 +597,25 @@ def prepare(
     *,
     log: Log | None = None,
     allow_download: bool = True,
+    extra_jar_dirs: list[Path] | None = None,
 ) -> Prepared:
     root = Path(project_root)
     if not root.is_dir():
         raise ToolchainError(f"工程目录不存在：{root}")
     result = Prepared()
+
+    try:
+        jars = deps.ensure_local_jars(
+            root, log=log, extra_dirs=extra_jar_dirs or ()
+        )
+        if jars.missing:
+            result.notes.append(
+                "缺少本地 jar 依赖："
+                + "、".join(jars.missing)
+                + "。把文件放进下载文件夹或工程的 libs/ 后重新点「一键准备」。"
+            )
+    except Exception as exc:  # noqa: BLE001 - 本地依赖不阻塞构建
+        result.notes.append(f"自动整理 libs 失败：{exc}")
 
     install = ensure_java(log=log, allow_download=allow_download)
     if install is not None:
@@ -624,6 +639,13 @@ def prepare(
             result.notes.append(f"写入 Wrapper 失败：{exc}")
     else:
         _log(log, "[准备] Gradle Wrapper 已存在")
+
+    try:
+        changed, _before, after, _reason = wrapper.ensure_compatible(root, log=log)
+        if changed:
+            result.notes.append(f"已自动把 Wrapper 调整为 Gradle {after}")
+    except Exception as exc:  # noqa: BLE001 - 版本修正失败时保留原配置
+        result.notes.append(f"自动调整 Wrapper 版本失败：{exc}")
 
     dist = ensure_distribution(root, log=log, allow_download=allow_download)
     if dist is not None:

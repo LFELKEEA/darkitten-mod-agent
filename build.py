@@ -21,12 +21,12 @@ BUILD = ROOT / "build"
 APP_DIST = DIST / "DarkittenModAgent"
 ZIP_NAME = f"DarkittenModAgent-{APP_VERSION}.zip"
 NOTES = [
-    "知识库检索改为按整份源码文件返回：命中方法名时直接给出包含该方法的完整 ## 源码：路径 条目，不再只给 1200 字符的代码片段。",
-    "同一文件的多个命中会合并，按类名、文件名和方法出现次数排序；问 VillagerEntityMCA、BodyPossession、Hypnosis 时会把这些文件排在最前面。",
-    "read_knowledge 的 file 参数一次返回整个 .java（单文件十几万字符也不截断），只有超过工具上限才分页。",
-    "工具结果上限从 1.4 万字符提高到 20 万字符，知识库检索预算提高到 20 万字符；输入不再被人为截小。",
-    "单份资料上限提高到 3000 万字符，类结构 5000 个、反编译源码 3000 万字符，MCA 这类大包不会再被切掉后半段。",
-    "类结构摘要的方法上限从 60 提高到 300、字段 150，并明确说明摘要截断不等于源码缺失。",
+    "编译前自动整理本地依赖：读取 build.gradle 里的 libs/*.jar，从下载目录、桌面、其它盘符的「下载」文件夹和知识库来源目录找出同名文件，复制进工程并自动创建 libs/。",
+    "带中文前缀的 jar 也能匹配，例如「[凡家物语：重生] mca-neoforge-7.7.36-beta.3+1.21.1.jar」会自动放进 libs/mca-neoforge-7.7.36-beta.3+1.21.1.jar；-sources / -javadoc 不会被误认成主 jar。",
+    "按构建脚本自动选择 Gradle 版本：识别到 ModDevGradle / NeoGradle 时把 Wrapper 切到 Gradle 8.10.2，不再给只支持 8.x 的工程套 9.8.2。",
+    "gradle-wrapper.properties 损坏（只剩一行路径、缺少 distributionUrl）时会自动重写成完整配置。",
+    "编译报缺少 libs/*.jar 时自动补文件并重试一次；实在找不到才提示缺哪个文件、搜索过哪些位置。",
+    "对话里新增 fix_build_setup 工具，助手可以直接补齐 Wrapper 和本地 jar，不再把手工步骤留给用户。",
 ]
 
 

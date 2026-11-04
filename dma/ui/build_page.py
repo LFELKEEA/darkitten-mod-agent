@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .. import envcheck, gradle, toolchain, wrapper
+from .. import deps, envcheck, gradle, toolchain, wrapper
 from . import theme
 from .prep_worker import PrepareWorker
 from .widgets import card, tiny
@@ -71,6 +71,7 @@ class BuildPage(QWidget):
         self._pending_after_prepare: tuple[str, str] | None = None
         self._auto_upgraded = False
         self._network_retries = 0
+        self._jar_retried = False
         self._timer = QTimer(self)
         self._timer.setInterval(1000)
         self._timer.timeout.connect(self._tick)
@@ -99,8 +100,9 @@ class BuildPage(QWidget):
         box.addWidget(title)
         box.addWidget(
             tiny(
-                "点任务按钮会先自动准备环境：挑一个合适的 JDK、补齐 Wrapper、从国内镜像装好 Gradle，"
-                "然后直接执行。编译产物在 build/libs，游戏目录是工程下的 run/。"
+                "点任务按钮会先自动准备环境：挑一个合适的 JDK、补齐 Wrapper、按插件要求选 Gradle 版本，"
+                "把 build.gradle 引用的 libs/*.jar 自动找出来放进工程，然后直接执行。"
+                "编译产物在 build/libs，游戏目录是工程下的 run/。"
                 "首次编译仍要下载 Minecraft 依赖，时间取决于网络。关闭工坊会结束正在运行的任务。"
             )
         )
@@ -162,14 +164,19 @@ class BuildPage(QWidget):
         self.prepare_btn.setObjectName("Primary")
         self.prepare_btn.setToolTip(
             "自动检测并配置构建环境：优先选 Java 21，缺 JDK 就下载 Temurin 21；"
-            "缺 Wrapper 就写入；再从中科大 / 华为云镜像装好 Gradle 发行包。已就绪的步骤会跳过。"
+            "缺 Wrapper 就写入，ModDevGradle / NeoGradle 工程自动切到兼容的 Gradle 8.x；"
+            "build.gradle 里引用的 libs/*.jar 会从下载目录、桌面和知识库来源目录自动找出来复制进工程；"
+            "再从中科大 / 华为云镜像装好 Gradle 发行包。已就绪的步骤会跳过。"
         )
         self.prepare_btn.clicked.connect(self._prepare_clicked)
         self.assist_btn = QPushButton("让助手补全配置")
         self.assist_btn.setToolTip("切到对话页，让助手按当前 MC 版本和加载器生成 build.gradle / settings.gradle / gradle.properties")
         self.assist_btn.clicked.connect(self._assist_config)
         self.wrapper_btn = QPushButton("生成 Wrapper")
-        self.wrapper_btn.setToolTip("把 gradlew、gradlew.bat 和 gradle-wrapper.jar 写入工程，不需要本机安装 Gradle")
+        self.wrapper_btn.setToolTip(
+            "把 gradlew、gradlew.bat 和 gradle-wrapper.jar 写入工程，并按构建脚本选择兼容的 Gradle 版本，"
+            "不需要本机安装 Gradle"
+        )
         self.wrapper_btn.clicked.connect(self._make_wrapper)
         actions.addWidget(self.prepare_btn)
         actions.addWidget(self.assist_btn)
@@ -286,6 +293,7 @@ class BuildPage(QWidget):
             self._launch(task, label, retry=True)
             return
         self._network_retries = 0
+        self._jar_retried = False
         fresh = (
             self._prepared is not None
             and self._prepared_root == str(root)
@@ -295,6 +303,35 @@ class BuildPage(QWidget):
             self._launch(task, label)
             return
         self._start_prepare((task, label), reset_upgrade=True)
+
+    def _known_jar_dirs(self) -> list[Path]:
+        """知识库里导入过的 JAR 所在目录，自动找 libs/ 依赖时优先看这些地方。"""
+        store = getattr(self.main, "knowledge", None)
+        if store is None:
+            return []
+        try:
+            documents = store.list_documents(limit=500)
+        except Exception:  # noqa: BLE001 - 读不到知识库不影响构建
+            return []
+        dirs: list[Path] = []
+        seen: set[str] = set()
+        for item in documents:
+            source = str(item.get("source") or "").strip()
+            if not source:
+                continue
+            path = Path(source)
+            try:
+                if not path.is_file():
+                    continue
+                folder = path.parent
+                key = str(folder.resolve()).lower()
+            except OSError:
+                continue
+            if key in seen:
+                continue
+            seen.add(key)
+            dirs.append(folder)
+        return dirs
 
     def _prepare_clicked(self) -> None:
         project = getattr(self.main, "active_project", None)
@@ -320,7 +357,7 @@ class BuildPage(QWidget):
         self._append(f"=== 一键准备环境 {time.strftime('%H:%M:%S')} ===")
         self._status("正在检查并准备 JDK、Gradle…", theme.COLORS["accent"])
         self._refresh_buttons()
-        worker = PrepareWorker(Path(project.root))
+        worker = PrepareWorker(Path(project.root), extra_jar_dirs=self._known_jar_dirs())
         worker.signals.line.connect(self._append)
         worker.signals.done.connect(self._on_prepare_done)
         worker.signals.failed.connect(self._on_prepare_failed)
@@ -457,7 +494,30 @@ class BuildPage(QWidget):
                 QTimer.singleShot(400, lambda: self._run(task, label, retry=True))
                 return
             self._status(f"{self._task}失败（退出码 {code}）", theme.COLORS["danger"])
-            required = gradle.required_gradle("\n".join(self._output))
+            log_text = "\n".join(self._output)
+            if (
+                deps.is_missing_jar_error(log_text)
+                and not self._jar_retried
+                and self._last_run is not None
+            ):
+                project = getattr(self.main, "active_project", None)
+                if project is not None:
+                    task, label = self._last_run
+                    jars = deps.ensure_local_jars(
+                        Path(project.root),
+                        log=self._append,
+                        extra_dirs=self._known_jar_dirs(),
+                    )
+                    if jars.changed:
+                        self._jar_retried = True
+                        self._append("=== 缺少本地依赖，已自动补进 libs/ ===")
+                        self._status("已自动补上本地 jar，正在重试…", theme.COLORS["warn"])
+                        self._task = ""
+                        QTimer.singleShot(400, lambda: self._launch(task, label, retry=True))
+                        return
+                    if jars.missing:
+                        self.detail.setText(jars.summary())
+            required = gradle.required_gradle(log_text)
             if required:
                 project = getattr(self.main, "active_project", None)
                 current = wrapper.current_distribution(Path(project.root)) if project else ""
@@ -499,7 +559,7 @@ class BuildPage(QWidget):
                 ):
                     self.detail.setText(
                         f"构建脚本要求 Gradle {required}，工程当前是 {current or '未知版本'}。"
-                        f"点「生成 Wrapper」写入 {wrapper.DEFAULT_DISTRIBUTION}，再重新编译。"
+                        "重新点「编译」，程序会自动把 Wrapper 调到兼容版本再试。"
                     )
                 else:
                     self.detail.setText(
@@ -637,10 +697,11 @@ class BuildPage(QWidget):
             return
         root = Path(project.root)
         if wrapper.has_wrapper(root):
+            target = wrapper.compatible_version(root)[0] or wrapper.DEFAULT_DISTRIBUTION
             answer = QMessageBox.question(
                 self,
                 "覆盖 Wrapper",
-                f"工程里已经有 gradlew。要覆盖为 Gradle {wrapper.DEFAULT_DISTRIBUTION} 的 Wrapper 吗？",
+                f"工程里已经有 gradlew。要按构建脚本覆盖为 Gradle {target} 的 Wrapper 吗？",
             )
             if answer != QMessageBox.Yes:
                 return
@@ -654,8 +715,9 @@ class BuildPage(QWidget):
             self._append(f"写入 {item}")
         self._status("Wrapper 已生成", theme.COLORS["ok"])
         if gradle.has_gradle_files(root):
+            current = wrapper.current_distribution(root) or wrapper.DEFAULT_DISTRIBUTION
             self.detail.setText(
-                f"已写入 gradlew 和 gradle-wrapper.properties。点「编译」会先下载 Gradle {wrapper.DEFAULT_DISTRIBUTION}。"
+                f"已写入 gradlew 和 gradle-wrapper.properties（Gradle {current}）。点「编译」会自动准备。"
             )
         else:
             self.detail.setText("Wrapper 已就绪；还缺 build.gradle，点「让助手补全配置」后再编译。")
@@ -686,8 +748,9 @@ def scaffold_request(project) -> str:
     lines.extend(
         [
             "所有版本号先查 Fabric Meta / NeoForged 官方仓库确认，不要猜；查不到就写明需要用户确认，不要编造。",
-            f"当前「生成 Wrapper」写入的是 Gradle {wrapper.DEFAULT_DISTRIBUTION}，插件版本必须兼容它；"
-            "如果选的 loom / NeoGradle 要求更高版本的 Gradle，要么改用兼容版本，要么在回复里明确说明需要升级 Wrapper。",
+            "「生成 Wrapper」和「一键准备」会按插件自动选 Gradle 版本："
+            f"ModDevGradle / NeoGradle 用 {wrapper.MODDEV_DISTRIBUTION}，其它默认 "
+            f"{wrapper.DEFAULT_DISTRIBUTION}；如果要用的插件需要更高的 Gradle，在回复里明确说明。",
             "gradlew 和 gradle-wrapper.jar 不用生成；页面上有「生成 Wrapper」按钮，"
             "环境依赖点「一键准备」会自动下载并配置。",
             "按工程相对路径输出完整文件内容，文件进入待写入列表，等用户确认后再写入。",

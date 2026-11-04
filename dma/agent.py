@@ -10,7 +10,7 @@ from typing import Any, Callable
 
 from PySide6.QtCore import QObject, Signal
 
-from . import ai, connectors, project as project_mod
+from . import ai, connectors, deps, project as project_mod, toolchain, wrapper
 from .config import Config
 from .knowledge import (
     KnowledgeStore,
@@ -601,6 +601,33 @@ class AgentWorker(QObject):
                     "这些文件不在编译路径里，只作为迁移参考；"
                     "需要迁移时按文件读取，再把改写后的完整文件写到 src/main/java。"
                 )[:MAX_TOOL_RESULT]
+            if name == "fix_build_setup":
+                root = self.project.root
+                report: list[str] = []
+                try:
+                    written = toolchain.ensure_wrapper_files(root)
+                    if written:
+                        report.append("补齐 Wrapper 文件：" + "、".join(written))
+                except Exception as exc:  # noqa: BLE001 - 逐项报告
+                    report.append(f"补齐 Wrapper 失败：{exc}")
+                try:
+                    changed, before, after, reason = wrapper.ensure_compatible(root)
+                    if changed:
+                        report.append(
+                            f"Gradle Wrapper：{before or '缺失/损坏'} → {after}（{reason}）"
+                        )
+                    else:
+                        report.append(
+                            f"Gradle Wrapper 保持 {after or before or '当前配置'}，无需调整"
+                        )
+                except Exception as exc:  # noqa: BLE001 - 逐项报告
+                    report.append(f"调整 Gradle 版本失败：{exc}")
+                try:
+                    jars = deps.ensure_local_jars(root)
+                    report.append(jars.summary())
+                except Exception as exc:  # noqa: BLE001 - 逐项报告
+                    report.append(f"整理本地 jar 失败：{exc}")
+                return "\n".join(report)
             if name == "fetch_url":
                 url = str(args.get("url") or "").strip()
                 if not url:
@@ -609,7 +636,7 @@ class AgentWorker(QObject):
             return (
                 f"未知工具：{name}。可用工具：list_files、read_file、search_text、write_file、"
                 "read_skill、remember、recall、search_knowledge、read_knowledge、"
-                "decompile_jar、fetch_url。"
+                "decompile_jar、fix_build_setup、fetch_url。"
             )
         except Exception as exc:
             return f"工具执行失败：{exc}"

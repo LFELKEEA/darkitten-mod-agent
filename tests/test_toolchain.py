@@ -183,6 +183,43 @@ class PrepareTests(TempDataCase):
         props = project.root / "gradle" / "wrapper" / "gradle-wrapper.properties"
         self.assertIn("gradle-8.14-bin.zip", props.read_text(encoding="utf-8"))
 
+    def test_prepare_fixes_wrapper_and_local_jars(self) -> None:
+        project = create_project(
+            self.tmp / "projects",
+            name="MCA",
+            mod_id="mca_test",
+            mc_version="1.21.1",
+            loader="NeoForge",
+        )
+        name = "mca-neoforge-7.7.36-beta.3+1.21.1.jar"
+        (project.root / "build.gradle").write_text(
+            "plugins { id 'net.neoforged.moddev' version '2.0.115' }\n"
+            f"dependencies {{ compileOnly files('libs/{name}') }}\n",
+            encoding="utf-8",
+        )
+        wrapper.ensure_wrapper(project.root, "9.8.2")
+        downloads = self.tmp / "downloads"
+        downloads.mkdir()
+        source = downloads / ("[凡家物语：重生] " + name)
+        source.write_bytes(b"jar-bytes")
+
+        java_home = make_jdk(self.tmp / "jdks", "21.0.9")
+        install = toolchain.JavaInstall(home=java_home, version="21.0.9", major=21)
+        with mock.patch.object(toolchain, "ensure_java", return_value=install), mock.patch.object(
+            toolchain, "ensure_distribution", return_value=None
+        ):
+            prepared = toolchain.prepare(
+                project.root,
+                allow_download=False,
+                extra_jar_dirs=[downloads],
+            )
+
+        self.assertTrue((project.root / "libs" / name).is_file())
+        self.assertEqual(
+            wrapper.current_distribution(project.root), wrapper.MODDEV_DISTRIBUTION
+        )
+        self.assertTrue(any("Gradle" in note for note in prepared.notes))
+
     def test_scaffold_request_mentions_one_click(self) -> None:
         project = create_project(
             self.tmp / "projects",

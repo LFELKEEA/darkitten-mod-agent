@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import stat
 from pathlib import Path
+from typing import Callable
 
 from . import paths
 
 DEFAULT_DISTRIBUTION = "9.8.2"
+
+# ModDevGradle 2.x 官方只声明兼容 Gradle 8.x，9.x 还没验证。
+MODDEV_DISTRIBUTION = "8.10.2"
 
 PROPERTIES = """distributionBase=GRADLE_USER_HOME
 distributionPath=wrapper/dists
@@ -17,6 +22,16 @@ validateDistributionUrl=true
 zipStoreBase=GRADLE_USER_HOME
 zipStorePath=wrapper/dists
 """
+
+BUILD_FILES = ("build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts")
+
+_PLUGIN_PATTERNS = {
+    "moddev": re.compile(r"net\.neoforged\.moddev"),
+    "neogradle": re.compile(r"net\.neoforged\.gradle(?:\.userdev)?"),
+    "loom": re.compile(r"fabric-loom"),
+}
+
+Log = Callable[[str], None]
 
 
 class WrapperError(Exception):
@@ -55,10 +70,124 @@ def current_distribution(project_root: Path | None) -> str:
     return ""
 
 
-def ensure_wrapper(project_root: Path, version: str = DEFAULT_DISTRIBUTION) -> list[str]:
+def properties_valid(project_root: Path | None) -> bool:
+    return bool(current_distribution(project_root))
+
+
+def build_stack(project_root: Path | None) -> dict[str, str]:
+    """识别构建脚本用了哪些 Gradle 插件，返回 {插件类型: 版本或空字符串}。"""
+    if project_root is None:
+        return {}
+    root = Path(project_root)
+    texts: list[str] = []
+    for name in BUILD_FILES:
+        path = root / name
+        try:
+            texts.append(path.read_text(encoding="utf-8-sig", errors="replace"))
+        except OSError:
+            continue
+    text = "\n".join(texts)
+    if not text:
+        return {}
+    found: dict[str, str] = {}
+    for key, pattern in _PLUGIN_PATTERNS.items():
+        if not pattern.search(text):
+            continue
+        version = ""
+        for match in re.finditer(pattern, text):
+            tail = text[match.end(): match.end() + 80]
+            item = re.search(r"['\"]([0-9][^'\"]*)['\"]", tail)
+            if item:
+                version = item.group(1)
+                break
+        found[key] = version
+    return found
+
+
+def compatible_version(project_root: Path | None) -> tuple[str, str]:
+    """返回 (推荐 Gradle 版本, 原因)。空字符串表示保持工程现有配置。"""
+    current = current_distribution(project_root)
+    stack = build_stack(project_root)
+    if "moddev" in stack:
+        version = stack["moddev"] or "2.x"
+        if not current:
+            return MODDEV_DISTRIBUTION, f"ModDevGradle {version} 只兼容 Gradle 8.x"
+        if current.split(".")[0] != "8":
+            return (
+                MODDEV_DISTRIBUTION,
+                f"ModDevGradle {version} 只兼容 Gradle 8.x，当前是 {current}",
+            )
+        return "", ""
+    if "neogradle" in stack:
+        version = stack["neogradle"] or "7.x"
+        if not current:
+            return MODDEV_DISTRIBUTION, f"NeoGradle {version} 建议使用 Gradle 8.x"
+        if current.split(".")[0] != "8":
+            return (
+                MODDEV_DISTRIBUTION,
+                f"NeoGradle {version} 建议使用 Gradle 8.x，当前是 {current}",
+            )
+        return "", ""
+    if not current:
+        return DEFAULT_DISTRIBUTION, "Wrapper 版本缺失或配置损坏"
+    return "", ""
+
+
+def set_distribution(project_root: Path, version: str) -> list[str]:
+    """只改 gradle-wrapper.properties 里的发行版，不动 gradlew 和 jar。"""
+    folder = Path(project_root) / "gradle" / "wrapper"
+    folder.mkdir(parents=True, exist_ok=True)
+    props = folder / "gradle-wrapper.properties"
+    try:
+        text = props.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        text = ""
+    url = (
+        "https\\://services.gradle.org/distributions/"
+        f"gradle-{version}-bin.zip"
+    )
+    if "distributionUrl=" not in text:
+        props.write_text(PROPERTIES.format(version=version), encoding="utf-8")
+        return ["gradle/wrapper/gradle-wrapper.properties"]
+    lines: list[str] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("distributionUrl="):
+            lines.append(f"distributionUrl={url}")
+        elif stripped.startswith("distributionSha256Sum="):
+            continue
+        else:
+            lines.append(line)
+    props.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+    return ["gradle/wrapper/gradle-wrapper.properties"]
+
+
+def ensure_compatible(
+    project_root: Path, *, log: Log | None = None
+) -> tuple[bool, str, str, str]:
+    """让 Wrapper 版本与构建脚本匹配，返回 (是否改动, 原版本, 新版本, 原因)。"""
+    current = current_distribution(project_root)
+    target, reason = compatible_version(project_root)
+    if not target or target == current:
+        return False, current, current, ""
+    set_distribution(project_root, target)
+    if log is not None:
+        try:
+            log(
+                f"[准备] Gradle Wrapper：{current or '缺失/损坏'} → {target}"
+                f"（{reason}）"
+            )
+        except Exception:
+            pass
+    return True, current, target, reason
+
+
+def ensure_wrapper(project_root: Path, version: str | None = None) -> list[str]:
     root = Path(project_root)
     if not root.is_dir():
         raise WrapperError(f"工程目录不存在：{root}")
+    if not version:
+        version = compatible_version(root)[0] or DEFAULT_DISTRIBUTION
     source = assets_dir()
     required = ("gradlew", "gradlew.bat", "gradle-wrapper.jar")
     missing = [name for name in required if not (source / name).is_file()]
