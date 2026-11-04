@@ -6,6 +6,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import zipfile
 from datetime import date
 from pathlib import Path
@@ -21,8 +22,8 @@ BUILD = ROOT / "build"
 APP_DIST = DIST / "DarkittenModAgent"
 ZIP_NAME = f"DarkittenModAgent-{APP_VERSION}.zip"
 NOTES = [
-    "修掉安装目录或工程路径带空格时无法编译的问题：之前 Windows 下用 cmd /c 拼命令，路径里的空格会被 cmd 当成命令边界，报「'D:\\Darkitten' 不是内部或外部命令」。现在改用 cmd /d /s /c 并给整条命令行加外层引号，Wrapper 和 init script 路径含空格也能正常启动。",
-    "运行日志里直接显示实际执行的完整命令，路径有空格时能看出引号位置，方便排查。",
+    "安装包里开始自带 version.json（位于 _internal 目录），启动器可以直接读到工坊的真实版本。以前启动器只认自己安装时写的 state.json，工坊在程序内更新或手动覆盖后，启动器仍会显示旧版本。",
+    "程序内更新会连同 _internal 一起替换，所以 version.json 会跟着实际文件走，不需要再手动刷新启动器记录。",
 ]
 
 
@@ -40,36 +41,49 @@ def run_pyinstaller() -> None:
         subprocess.run(
             [sys.executable, str(ROOT / "tools" / "make_icon.py")], check=True
         )
-    command = [
-        sys.executable,
-        "-m",
-        "PyInstaller",
-        "--noconfirm",
-        "--clean",
-        "--windowed",
-        "--onedir",
-        "--name",
-        "DarkittenModAgent",
-        "--icon",
-        str(icon),
-        "--add-data",
-        f"{ROOT / 'assets'}{os.pathsep}assets",
-        "--collect-submodules",
-        "pypdf",
-        "--exclude-module",
-        "numpy",
-        "--exclude-module",
-        "PIL",
-        "--distpath",
-        str(DIST),
-        "--workpath",
-        str(BUILD),
-        "--specpath",
-        str(BUILD),
-        str(ROOT / "main.py"),
-    ]
-    print("running:", " ".join(command))
-    subprocess.run(command, check=True, cwd=str(ROOT))
+    # 把版本号打进程序目录。启动器读取的是程序自己的版本文件，
+    # 这样工坊在程序内更新过，启动器也不会再显示安装时写下的旧版本。
+    holder = tempfile.TemporaryDirectory(prefix="dma-version-")
+    version_file = Path(holder.name) / "version.json"
+    version_file.write_text(
+        json.dumps({"version": APP_VERSION}, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    try:
+        command = [
+            sys.executable,
+            "-m",
+            "PyInstaller",
+            "--noconfirm",
+            "--clean",
+            "--windowed",
+            "--onedir",
+            "--name",
+            "DarkittenModAgent",
+            "--icon",
+            str(icon),
+            "--add-data",
+            f"{ROOT / 'assets'}{os.pathsep}assets",
+            "--add-data",
+            f"{version_file}{os.pathsep}.",
+            "--collect-submodules",
+            "pypdf",
+            "--exclude-module",
+            "numpy",
+            "--exclude-module",
+            "PIL",
+            "--distpath",
+            str(DIST),
+            "--workpath",
+            str(BUILD),
+            "--specpath",
+            str(BUILD),
+            str(ROOT / "main.py"),
+        ]
+        print("running:", " ".join(command))
+        subprocess.run(command, check=True, cwd=str(ROOT))
+    finally:
+        holder.cleanup()
 
 
 def make_zip() -> Path:
