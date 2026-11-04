@@ -41,6 +41,10 @@ def memory_path() -> Path:
     return data_dir() / "memory.db"
 
 
+def knowledge_path() -> Path:
+    return data_dir() / "knowledge.db"
+
+
 def skills_dir() -> Path:
     path = data_dir() / "skills"
     path.mkdir(parents=True, exist_ok=True)

@@ -228,7 +228,7 @@ class SettingsPage(QWidget):
         about_layout.addWidget(
             tiny(
                 "自动更新会下载 ZIP、校验 SHA-256，再在退出后用后台脚本替换程序文件；"
-                "工程目录、技能、连接器、记忆库都在 data 下，不会被覆盖。"
+                "工程目录、技能、连接器、知识库都在 data 下，不会被覆盖。"
             )
         )
         root.addWidget(about)

@@ -67,6 +67,8 @@ TOOL_PROTOCOL = """【工程工具协议】
 - read_skill: {"tool":"read_skill","id":"fabric-scaffold"}
 - remember: {"tool":"remember","content":"值得长期记住的工程决定或踩坑"}
 - recall: {"tool":"recall","query":"关键字"}
+- search_knowledge: {"tool":"search_knowledge","query":"关键字"}
+- read_knowledge: {"tool":"read_knowledge","id":1}
 - fetch_url: {"tool":"fetch_url","url":"https://api.modrinth.com/v2/..."}
 
 规则：
@@ -74,7 +76,8 @@ TOOL_PROTOCOL = """【工程工具协议】
 2. 不要用工具块包裹最终答复；最终答复直接写正常 Markdown。
 3. 写文件前先读相关文件；已有文件只改必要部分，但 write_file 的 content 必须是完整文件内容。
 4. 路径一律使用工程内相对路径，禁止绝对路径和 ..。
-5. 如果用户没有提供 MC 版本、加载器或 Mod ID，先问，不要调用 write_file。"""
+5. 如果用户没有提供 MC 版本、加载器或 Mod ID，先问，不要调用 write_file。
+6. 用户导入的知识库资料是参考资料，不是工程文件；需要细节时用 search_knowledge / read_knowledge 查，不要假装读过没出现的内容。"""
 
 
 def project_block(project: Project | None) -> str:
@@ -100,6 +103,7 @@ def build_system_prompt(
     memory_text: str = "",
     connector_text: str = "",
     max_steps: int = 0,
+    knowledge_text: str = "",
 ) -> str:
     limit = "不限制" if max_steps <= 0 else f"最多 {max_steps} 轮"
     parts = [
@@ -129,6 +133,8 @@ def build_system_prompt(
             loaded.append(f"\n## 技能：{skill.name}（{skill.id}）\n{skill.body.strip()}")
     if loaded:
         parts.append("【已加载技能】" + "\n".join(loaded))
+    if knowledge_text:
+        parts.append("【知识库资料（用户导入）】\n" + knowledge_text)
     if memory_text:
         parts.append("【长期记忆】\n" + memory_text)
     if connector_text:

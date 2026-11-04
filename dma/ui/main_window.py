@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
 from .. import config as config_mod
 from .. import paths, shortcut, updater
 from ..connectors import ConnectorStore
+from ..knowledge import KnowledgeStore
 from ..memory import MemoryStore
 from ..skills import SkillStore
 from ..version import APP_NAME_CN, APP_VERSION
@@ -28,7 +29,7 @@ from .build_page import BuildPage
 from .chat_page import ChatPage
 from .connectors_page import ConnectorsPage
 from .environment_page import EnvironmentPage
-from .memory_page import MemoryPage
+from .knowledge_page import KnowledgePage
 from .settings_page import SettingsPage
 from .skills_page import SkillsPage
 from .update_dialog import UpdateDialog
@@ -66,6 +67,7 @@ class MainWindow(QMainWindow):
         self.config = config_mod.load_config()
         self.skill_store = SkillStore()
         self.memory = MemoryStore()
+        self.knowledge = KnowledgeStore()
         self.connector_store = ConnectorStore()
         self.active_project = None
         self._startup_worker = None
@@ -113,7 +115,7 @@ class MainWindow(QMainWindow):
         self.skills_page = SkillsPage(self)
         self.connectors_page = ConnectorsPage(self)
         self.environment_page = EnvironmentPage(self)
-        self.memory_page = MemoryPage(self)
+        self.knowledge_page = KnowledgePage(self)
         self.settings_page = SettingsPage(self)
         pages = [
             ("对话", self.chat_page),
@@ -121,7 +123,7 @@ class MainWindow(QMainWindow):
             ("技能", self.skills_page),
             ("连接器", self.connectors_page),
             ("环境", self.environment_page),
-            ("记忆库", self.memory_page),
+            ("知识库", self.knowledge_page),
             ("设置", self.settings_page),
         ]
         self.group = QButtonGroup(self)
@@ -257,6 +259,10 @@ class MainWindow(QMainWindow):
             pass
         try:
             self.memory.close()
+        except Exception:
+            pass
+        try:
+            self.knowledge.close()
         except Exception:
             pass
         super().closeEvent(event)

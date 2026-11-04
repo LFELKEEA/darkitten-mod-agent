@@ -656,7 +656,7 @@ def run_checks(
                 "data_dir",
                 "数据目录",
                 paths.data_dir(),
-                "技能、连接器、记忆库、备份和会话都保存在这里。",
+                "技能、连接器、知识库、备份和会话都保存在这里。",
             ),
         ),
         ("ai", "模型通道", lambda: check_ai(ai)),

@@ -364,7 +364,7 @@ class ChatPage(QWidget):
         answer = QMessageBox.question(
             self,
             "清空对话",
-            "确定清空当前工程的对话记录？工程文件和记忆库不会受影响。",
+            "确定清空当前工程的对话记录？工程文件、知识库和长期记忆不会受影响。",
         )
         if answer != QMessageBox.Yes:
             return
@@ -416,6 +416,7 @@ class ChatPage(QWidget):
             skill_store=self.main.skill_store,
             memory=self.main.memory,
             connector_store=self.main.connector_store,
+            knowledge=self.main.knowledge,
         )
         self._worker = worker
         worker.status.connect(self.main.status)

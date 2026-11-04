@@ -21,11 +21,12 @@ BUILD = ROOT / "build"
 APP_DIST = DIST / "DarkittenModAgent"
 ZIP_NAME = f"DarkittenModAgent-{APP_VERSION}.zip"
 NOTES = [
-    "对话页右上角新增「删除工程」：二次确认后把工程目录移到 Windows 回收站，可从回收站还原。",
-    "删除时一并清理最近工程和该工程的对话记录，避免留下打不开的死记录。",
-    "回收站不可用（非 Windows 或系统拒绝）时改移到 data/trash，不做永久删除。",
-    "磁盘根目录、用户主目录、程序目录、数据目录及其上级目录会被拒绝删除；助手生成或 Gradle 任务运行中也不允许删除。",
-    "确认框默认按钮是「取消」，并显示完整工程路径，避免误点。",
+    "「记忆库」页改成「知识库」：可以一次导入多个 txt / md / docx / pdf / 代码和配置文件，自动提取正文并分片。",
+    "导入的资料默认所有工程共用；勾选「导入到当前工程」后只给当前工程检索。重复导入同一个文件会更新，不会产生重复条目。",
+    "每轮对话前自动检索知识库，把最相关的片段放进系统提示；做模组时会先参考导入的规范、笔记和文档。",
+    "新增 search_knowledge / read_knowledge 工具，助手需要细节时可以按关键词查，或按编号读取整份资料。",
+    "知识库页支持搜索、查看提取正文、删除条目；删除只清知识库副本，不动原始文件。",
+    "PDF 解析需要 pypdf，已随安装包一起打包；扫描版 PDF 没有文字层，会提示无法提取。",
 ]
 
 
@@ -57,6 +58,12 @@ def run_pyinstaller() -> None:
         str(icon),
         "--add-data",
         f"{ROOT / 'assets'}{os.pathsep}assets",
+        "--collect-submodules",
+        "pypdf",
+        "--exclude-module",
+        "numpy",
+        "--exclude-module",
+        "PIL",
         "--distpath",
         str(DIST),
         "--workpath",

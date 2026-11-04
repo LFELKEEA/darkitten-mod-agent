@@ -12,6 +12,7 @@ from PySide6.QtCore import QObject, Signal
 
 from . import ai, connectors, project as project_mod
 from .config import Config
+from .knowledge import KnowledgeStore, knowledge_context
 from .memory import MemoryStore, memory_context
 from .prompt import build_system_prompt
 from .skills import SkillStore
@@ -197,6 +198,7 @@ class AgentWorker(QObject):
         skill_store: SkillStore,
         memory: MemoryStore,
         connector_store: connectors.ConnectorStore,
+        knowledge: KnowledgeStore | None = None,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
@@ -206,6 +208,7 @@ class AgentWorker(QObject):
         self.config = config
         self.skill_store = skill_store
         self.memory = memory
+        self.knowledge = knowledge
         self.connector_store = connector_store
         self.pending: list[PendingFile] = []
         self.applied: list[str] = []
@@ -246,15 +249,22 @@ class AgentWorker(QObject):
 
     def _loop(self) -> AgentRun:
         project = self.project
+        project_key = str(project.root) if project is not None else ""
         memory_items = []
         if project is not None:
-            memory_items = self.memory.recall(str(project.root), self.user_text, limit=6)
+            memory_items = self.memory.recall(project_key, self.user_text, limit=6)
+        knowledge_hits = []
+        if self.knowledge is not None:
+            knowledge_hits = self.knowledge.search(
+                self.user_text, project=project_key, limit=4, budget=6000
+            )
         system = build_system_prompt(
             project,
             self.skill_store,
             memory_context(memory_items),
             self.connector_store.catalog_text(),
             max_steps=self.config.max_steps,
+            knowledge_text=knowledge_context(knowledge_hits),
         )
         messages: list[dict[str, Any]] = [{"role": "system", "content": system}]
         messages.extend(self.history[-self.config.context_turns * 2:])
@@ -336,7 +346,15 @@ class AgentWorker(QObject):
     def _execute(self, call: ToolCall, run: AgentRun) -> str:
         name = call.name.strip().lower()
         args = call.args
-        if self.project is None and name not in {"read_skill", "remember", "recall", "fetch_url"}:
+        allowed_without_project = {
+            "read_skill",
+            "remember",
+            "recall",
+            "fetch_url",
+            "search_knowledge",
+            "read_knowledge",
+        }
+        if self.project is None and name not in allowed_without_project:
             return "当前没有打开工程，无法执行文件操作。请先在界面创建或打开工程。"
         try:
             if name == "list_files":
@@ -399,12 +417,48 @@ class AgentWorker(QObject):
                     limit=int(args.get("limit") or 8),
                 )
                 return memory_context(items) or "没有找到相关记忆。"
+            if name == "search_knowledge":
+                if self.knowledge is None:
+                    return "知识库不可用。"
+                project_key = str(self.project.root) if self.project else ""
+                hits = self.knowledge.search(
+                    str(args.get("query") or ""),
+                    project=project_key,
+                    limit=int(args.get("limit") or 5),
+                    budget=int(args.get("budget") or 6000),
+                )
+                if not hits:
+                    return "知识库里没有找到相关内容。可以换个关键词，或让用户先在「知识库」页导入资料。"
+                return knowledge_context(hits)[:MAX_TOOL_RESULT]
+            if name == "read_knowledge":
+                if self.knowledge is None:
+                    return "知识库不可用。"
+                project_key = str(self.project.root) if self.project else ""
+                document = None
+                if args.get("id"):
+                    try:
+                        document = self.knowledge.get_document(int(args.get("id")))
+                    except (TypeError, ValueError):
+                        document = None
+                if document is None and args.get("name"):
+                    document = self.knowledge.find_document(
+                        str(args.get("name") or ""), project=project_key
+                    )
+                if document is None:
+                    return "没有找到对应的知识库文件。请先用 search_knowledge 查编号。"
+                return (
+                    f"# {document.get('name')}（编号 {document.get('id')}，"
+                    f"{document.get('chars')} 字符）\n\n{document.get('text') or ''}"
+                )[:MAX_TOOL_RESULT]
             if name == "fetch_url":
                 url = str(args.get("url") or "").strip()
                 if not url:
                     return "fetch_url 缺少 url。"
                 return connectors.fetch_url(url)[:MAX_TOOL_RESULT]
-            return f"未知工具：{name}。可用工具：list_files、read_file、search_text、write_file、read_skill、remember、recall、fetch_url。"
+            return (
+                f"未知工具：{name}。可用工具：list_files、read_file、search_text、write_file、"
+                "read_skill、remember、recall、search_knowledge、read_knowledge、fetch_url。"
+            )
         except Exception as exc:
             return f"工具执行失败：{exc}"
 
@@ -412,8 +466,8 @@ class AgentWorker(QObject):
 def _tool_status(call: ToolCall) -> str:
     if call.name in {"read_file", "write_file"}:
         return f"{call.name} {call.args.get('path', '')}"
-    if call.name == "search_text":
-        return f"search_text {call.args.get('query', '')}"
+    if call.name in {"search_text", "search_knowledge"}:
+        return f"{call.name} {call.args.get('query', '')}"
     if call.name == "fetch_url":
         return f"fetch_url {call.args.get('url', '')}"
     return f"执行 {call.name}…"
