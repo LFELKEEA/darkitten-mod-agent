@@ -258,6 +258,11 @@ class AgentWorker(QObject):
             knowledge_hits = self.knowledge.search(
                 self.user_text, project=project_key, limit=4, budget=6000
             )
+            if not knowledge_hits:
+                # 中文问题常和英文类名对不上，至少把 JAR 的速览/类索引送进上下文。
+                knowledge_hits = self.knowledge.overview_hits(
+                    project=project_key, limit=1
+                )
         system = build_system_prompt(
             project,
             self.skill_store,
@@ -428,6 +433,16 @@ class AgentWorker(QObject):
                     budget=int(args.get("budget") or 6000),
                 )
                 if not hits:
+                    overview = self.knowledge.overview_hits(
+                        project=project_key, limit=2
+                    )
+                    if overview:
+                        return (
+                            f"没有找到完全匹配「{args.get('query') or ''}」的正文。"
+                            "知识库里有这些模组源码资料，先看速览和类索引，"
+                            "再用 read_knowledge 按类名或方法名查具体实现：\n\n"
+                            + knowledge_context(overview)
+                        )[:MAX_TOOL_RESULT]
                     return "知识库里没有找到相关内容。可以换个关键词，或让用户先在「知识库」页导入资料。"
                 return knowledge_context(hits)[:MAX_TOOL_RESULT]
             if name == "read_knowledge":
@@ -457,7 +472,12 @@ class AgentWorker(QObject):
                         int(document["id"]), query, limit=6, budget=10000
                     )
                     if not matches:
-                        return header + f"没有匹配「{query}」的片段。可以换关键词再查。"
+                        return (
+                            header
+                            + f"没有匹配「{query}」的片段。JAR 资料的类名是英文，"
+                            "可以先用 offset=0 读开头的「模组速览 / 类索引」，"
+                            "再用类名或方法名作为 query。"
+                        )
                     joined = "\n\n".join(
                         f"[片段 {item['ord'] + 1}]\n{item['text']}" for item in matches
                     )

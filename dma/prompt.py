@@ -79,7 +79,7 @@ TOOL_PROTOCOL = """【工程工具协议】
 3. 写文件前先读相关文件；已有文件只改必要部分，但 write_file 的 content 必须是完整文件内容。
 4. 路径一律使用工程内相对路径，禁止绝对路径和 ..。
 5. 如果用户没有提供 MC 版本、加载器或 Mod ID，先问，不要调用 write_file。
-6. 用户导入的知识库资料是参考资料，不是工程文件；需要细节时用 search_knowledge / read_knowledge 查，不要假装读过没出现的内容。JAR 资料只有类结构、调用关系和字符串，没有方法体；定位某个类或功能时，用 read_knowledge 的 query 参数按关键词读片段。"""
+6. 用户导入的知识库资料是参考资料，不是工程文件；需要细节时用 search_knowledge / read_knowledge 查，不要假装读过没出现的内容。JAR 资料开头有「模组速览」和「类索引」，末尾附反编译 Java 源码；中文问题如果搜不到，先从速览里找对应的英文类名，再用 read_knowledge 的 query 参数读该类，不要直接回答不知道。"""
 
 
 def project_block(project: Project | None) -> str:

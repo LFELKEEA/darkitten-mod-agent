@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import math
 import os
 import re
@@ -83,6 +84,36 @@ _STOPWORDS = {
     "not", "have", "from", "they", "will", "can", "all", "any", "how", "why",
     "what", "when", "where", "which", "use", "using", "code", "file", "please",
     "into", "your", "our", "its", "his", "her", "them", "than", "then", "there",
+}
+# 中文问题检索英文源码时的常用对照。只补关键词，不改变原文匹配。
+_TERM_HINTS = {
+    "附身": ("possession", "possess", "body"),
+    "催眠": ("hypnosis", "hypnot", "induction"),
+    "皮肤": ("skin",),
+    "模型": ("model",),
+    "渲染": ("render",),
+    "实体": ("entity",),
+    "方块": ("block",),
+    "物品": ("item",),
+    "界面": ("screen", "gui"),
+    "命令": ("command",),
+    "网络": ("packet", "network"),
+    "事件": ("event",),
+    "注册": ("register", "registry"),
+    "配方": ("recipe",),
+    "战利品": ("loot",),
+    "音效": ("sound",),
+    "动画": ("animation", "animate"),
+    "存档": ("save", "storage"),
+    "权限": ("permission",),
+    "配置": ("config",),
+    "攻击": ("attack", "damage"),
+    "治疗": ("heal",),
+    "传送": ("teleport",),
+    "掉落": ("drop",),
+    "交易": ("trade", "market"),
+    "属性": ("attribute",),
+    "粒子": ("particle",),
 }
 
 
@@ -407,6 +438,152 @@ def _class_summary(raw: bytes) -> str:
         return ""
 
 
+def _class_meta(body: str) -> dict[str, Any]:
+    """从 _class_summary 的输出里取类名、方法、中文字符串，用于生成速览。"""
+    lines = body.splitlines()
+    head = lines[0] if lines else ""
+    match = re.search(r"(?:class|interface|enum) ([\w.$]+)", head)
+    if not match:
+        return {}
+    name = match.group(1)
+    package, _, simple = name.rpartition(".")
+    if " interface " in f" {head} ":
+        kind = "interface"
+    elif " enum " in f" {head} ":
+        kind = "enum"
+    else:
+        kind = "class"
+    section = ""
+    methods: list[str] = []
+    fields: list[str] = []
+    chinese: list[str] = []
+    for line in lines[1:]:
+        stripped = line.strip()
+        if stripped in {"字段：", "方法：", "引用的类：", "调用的方法/字段：", "字符串常量："}:
+            section = stripped
+            continue
+        if not line.startswith("  - ") or stripped.startswith("- …"):
+            continue
+        value = line[4:].strip()
+        if section == "方法：":
+            methods.append(value)
+        elif section == "字段：":
+            fields.append(value)
+        elif section == "字符串常量：":
+            for run in _CJK_RUN.findall(value.strip('"')):
+                if run not in chinese:
+                    chinese.append(run)
+    return {
+        "name": name,
+        "simple": simple,
+        "package": package,
+        "kind": kind,
+        "methods": methods,
+        "fields": fields,
+        "chinese": chinese,
+    }
+
+
+def _mod_summary(metadata: dict[str, str]) -> tuple[list[str], list[str]]:
+    lines: list[str] = []
+    entrypoints: list[str] = []
+    fabric = metadata.get("fabric.mod.json")
+    if fabric:
+        try:
+            data = json.loads(fabric)
+        except ValueError:
+            data = None
+        if isinstance(data, dict):
+            ident = str(data.get("id") or "")
+            title = str(data.get("name") or "")
+            version = str(data.get("version") or "")
+            bits = []
+            if ident:
+                bits.append(f"id={ident}")
+            if title:
+                bits.append(f"名称={title}")
+            if version:
+                bits.append(f"版本={version}")
+            if bits:
+                lines.append("Fabric：" + "，".join(bits))
+            entry = data.get("entrypoints")
+            if isinstance(entry, dict):
+                for key in ("main", "client", "server"):
+                    values = entry.get(key)
+                    if not isinstance(values, list):
+                        continue
+                    for item in values[:6]:
+                        if isinstance(item, str):
+                            entrypoints.append(item)
+                        elif isinstance(item, dict) and item.get("value"):
+                            entrypoints.append(str(item["value"]))
+    toml = metadata.get("meta-inf/mods.toml") or metadata.get("meta-inf/neoforge.mods.toml")
+    if toml:
+        ident = re.search(r'modId\s*=\s*"([^"]+)"', toml)
+        title = re.search(r'displayName\s*=\s*"([^"]+)"', toml)
+        version = re.search(r'version\s*=\s*"([^"]+)"', toml)
+        bits = []
+        if ident:
+            bits.append(f"id={ident.group(1)}")
+        if title:
+            bits.append(f"名称={title.group(1)}")
+        if version:
+            bits.append(f"版本={version.group(1)}")
+        if bits:
+            lines.append("NeoForge/Forge：" + "，".join(bits))
+    return lines, list(dict.fromkeys(entrypoints))
+
+
+def _jar_overview(
+    records: list[dict[str, Any]],
+    metadata: dict[str, str],
+) -> str:
+    mod_lines, entrypoints = _mod_summary(metadata)
+    entry_text = " ".join(entrypoints).lower()
+    ranked = sorted(
+        records,
+        key=lambda item: (
+            item["simple"].lower() in entry_text,
+            len(item["chinese"]),
+            len(item["methods"]),
+        ),
+        reverse=True,
+    )
+    lines = ["## 模组速览"]
+    lines.extend(f"- {line}" for line in mod_lines)
+    if entrypoints:
+        names = [item.rsplit(".", 1)[-1] for item in entrypoints]
+        lines.append("- 入口类：" + "、".join(dict.fromkeys(names))[:240])
+    lines.append(f"- 顶层类 {len(records)} 个，下面先列重点类，再列完整类索引。")
+    for item in ranked[:10]:
+        label = item["simple"]
+        bits = [f"{label}（{item['kind']}，{len(item['methods'])} 个方法）"]
+        if item["chinese"]:
+            bits.append("含中文：" + "、".join(item["chinese"][:3]))
+        lines.append("- " + "；".join(bits))
+    if len(ranked) > 10:
+        lines.append(f"- 其余 {len(ranked) - 10} 个类见下方类索引。")
+    lines.append(
+        "- 用法：这是反编译源码资料，先用类名/方法名/字段名做关键词，"
+        "例如 read_knowledge id=1 query=\"BodyPossession\"；不要因为中文问题搜不到英文类名就放弃。"
+    )
+    text = "\n".join(lines)
+    if len(text) > 1000:
+        text = text[:1000].rsplit("\n", 1)[0] + "\n- …（速览已截断）"
+    return text
+
+
+def _jar_class_index(records: list[dict[str, Any]]) -> str:
+    groups: dict[str, list[str]] = {}
+    for item in records:
+        groups.setdefault(item["package"], []).append(item["simple"])
+    lines = [f"## 类索引（共 {len(records)} 个类，按包）"]
+    for package in sorted(groups):
+        names = ", ".join(sorted(set(groups[package])))
+        lines.append(f"{package or '(默认包)'}: {names}")
+    return "\n".join(lines)
+
+
 def _jar_rank(info: zipfile.ZipInfo) -> tuple[int, str]:
     low = info.filename.lower()
     if low in JAR_METADATA:
@@ -555,12 +732,14 @@ def _jar_text(path: Path, progress: Progress | None = None) -> str:
         infos.sort(key=_jar_rank)
         header = (
             f"# 模组 JAR：{path.name}\n"
-            "说明：以下内容由程序自动提取，包括模组元数据、语言与资源文本、"
+            "说明：以下内容由程序自动提取，包括模组速览、类索引、元数据、语言与资源文本、"
             "类结构（字段、方法、引用类、调用关系、字符串常量），"
             "并尝试用内置反编译器生成 Java 源码（需要本机安装 JDK 17 或更高）。"
         )
         parts = [header]
-        used = len(header)
+        used = len(header) + 16000  # 给速览和类索引预留空间
+        metadata: dict[str, str] = {}
+        records: list[dict[str, Any]] = []
         classes = 0
         text_entries = 0
         omitted = 0
@@ -604,6 +783,9 @@ def _jar_text(path: Path, progress: Progress | None = None) -> str:
                     skipped += 1
                     continue
                 classes += 1
+                meta = _class_meta(body)
+                if meta:
+                    records.append(meta)
                 title = f"## 类：{_dot(name[:-6])}"
             else:
                 body = _decode_entry(raw)
@@ -613,6 +795,8 @@ def _jar_text(path: Path, progress: Progress | None = None) -> str:
                 limit = 8_000 if low == "meta-inf/manifest.mf" else MAX_JAR_ENTRY_CHARS
                 if len(body) > limit:
                     body = body[:limit] + "\n…（该文件已截断）"
+                if low in JAR_METADATA:
+                    metadata[low] = body
                 title = f"## 文件：{name}"
             block = title + "\n" + body.strip()
             if used + len(block) + 2 > MAX_DOC_CHARS:
@@ -625,6 +809,11 @@ def _jar_text(path: Path, progress: Progress | None = None) -> str:
             used += len(block) + 2
         if classes == 0 and text_entries == 0:
             raise KnowledgeError("这个 .jar 里没有可提取的文本或类结构，可能只是资源包或空包。")
+        if records:
+            parts[1:1] = [
+                _jar_overview(records, metadata),
+                _jar_class_index(records),
+            ]
         structural = "\n\n".join(parts)
         source_files: list[tuple[str, str]] = []
         source_note = ""
@@ -749,6 +938,9 @@ def split_chunks(text: str) -> list[str]:
 def _tokens(query: str) -> set[str]:
     text = str(query or "").lower()
     tokens: set[str] = {match.group(0) for match in _ASCII_TOKEN.finditer(text)}
+    for chinese, english in _TERM_HINTS.items():
+        if chinese in text:
+            tokens.update(english)
     for match in _CJK_RUN.finditer(text):
         run = match.group(0)
         if len(run) <= 6:
@@ -955,7 +1147,7 @@ class KnowledgeStore:
             return []
         with self._lock:
             rows = self._conn.execute(
-                "SELECT c.text, c.document_id, d.name, d.source, d.project "
+                "SELECT c.text, c.document_id, d.name, d.source, d.project, d.kind "
                 "FROM chunks c JOIN documents d ON d.id=c.document_id "
                 "WHERE d.project='' OR d.project=?",
                 (str(project or ""),),
@@ -972,6 +1164,7 @@ class KnowledgeStore:
                             "name": str(row["name"]),
                             "source": str(row["source"]),
                             "project": str(row["project"]),
+                            "kind": str(row["kind"] or ""),
                             "text": str(row["text"]),
                             "score": value,
                         },
@@ -983,7 +1176,9 @@ class KnowledgeStore:
         used = 0
         for _score_value, hit in scored:
             document_id = hit["document_id"]
-            if per_document.get(document_id, 0) >= 2:
+            # JAR 反编译资料有上千个片段，按关键词查一个类时需要多给几段。
+            allowed = 4 if hit["kind"] == "jar" else 2
+            if per_document.get(document_id, 0) >= allowed:
                 continue
             if used + len(hit["text"]) > budget and hits:
                 continue
@@ -992,6 +1187,81 @@ class KnowledgeStore:
             used += len(hit["text"])
             if len(hits) >= max(1, int(limit)):
                 break
+        return hits
+
+    def overview_hits(
+        self, *, project: str = "", limit: int = 2
+    ) -> list[dict[str, Any]]:
+        """返回 JAR 资料的速览/类索引；关键词没命中时给 Agent 一个入口。"""
+        with self._lock:
+            docs = self._conn.execute(
+                "SELECT id, name, source, project FROM documents "
+                "WHERE (kind='jar' OR name LIKE '%.jar') AND (project='' OR project=?) "
+                "ORDER BY updated_at DESC, id DESC LIMIT ?",
+                (str(project or ""), max(1, min(10, int(limit) * 3))),
+            ).fetchall()
+            hits: list[dict[str, Any]] = []
+            for doc in docs:
+                document_id = int(doc["id"])
+                first = self._conn.execute(
+                    "SELECT text FROM chunks WHERE document_id=? ORDER BY ord LIMIT 1",
+                    (document_id,),
+                ).fetchone()
+                first_text = str(first["text"]) if first else ""
+                if "## 模组速览" in first_text:
+                    text = first_text
+                else:
+                    rows = self._conn.execute(
+                        "SELECT text FROM chunks WHERE document_id=? "
+                        "AND (text LIKE '%## 类：%' OR text LIKE '%## 源码：%') ORDER BY ord",
+                        (document_id,),
+                    ).fetchall()
+                    names: list[str] = []
+                    files: list[str] = []
+                    for row in rows:
+                        value = str(row["text"])
+                        names.extend(re.findall(r"## 类：([\w.$]+)", value))
+                        files.extend(re.findall(r"## 源码：([^\n]+)", value))
+                    names = list(dict.fromkeys(names))[:300]
+                    files = list(dict.fromkeys(files))[:60]
+                    if not names and not files:
+                        continue
+                    groups: dict[str, list[str]] = {}
+                    for name in names:
+                        package, _, simple = name.rpartition(".")
+                        groups.setdefault(package, []).append(simple)
+                    lines = [
+                        f"# {doc['name']}（旧版 JAR 资料速览）",
+                        f"## 类索引（共 {len(names)} 个类）",
+                    ]
+                    for package in sorted(groups):
+                        lines.append(
+                            f"{package or '(默认包)'}: "
+                            + ", ".join(sorted(set(groups[package])))
+                        )
+                    if files:
+                        lines.append(f"## 源码文件（{len(files)} 个）")
+                        lines.extend(f"- {item}" for item in files)
+                    lines.append(
+                        "（这份资料没有模组速览或中文提示，可能由旧版本导入；"
+                        "需要完整反编译源码时，请在知识库页重新导入这个 JAR。）"
+                    )
+                    text = "\n".join(lines)
+                    if len(text) > 9000:
+                        text = text[:9000] + "\n…（速览已截断）"
+                hits.append(
+                    {
+                        "document_id": document_id,
+                        "name": str(doc["name"]),
+                        "source": str(doc["source"]),
+                        "project": str(doc["project"]),
+                        "kind": "jar",
+                        "text": text,
+                        "score": 0.0,
+                    }
+                )
+                if len(hits) >= max(1, int(limit)):
+                    break
         return hits
 
     def document_hits(

@@ -171,6 +171,9 @@ class KnowledgeStoreTests(TempDataCase):
             text, kind = knowledge_mod.extract_text(path)
         self.assertEqual(kind, "jar")
         self.assertIn("模组 JAR：examplemod-1.0.0.jar", text)
+        self.assertIn("## 模组速览", text)
+        self.assertIn("## 类索引", text)
+        self.assertLess(text.index("## 模组速览"), text.index("## 文件：fabric.mod.json"))
         self.assertIn("fabric.mod.json", text)
         self.assertIn('"block.examplemod.ruby"', text)
         self.assertIn("红宝石块", text)
@@ -241,6 +244,42 @@ class KnowledgeStoreTests(TempDataCase):
         self.assertTrue(hits)
         self.assertEqual(hits[0]["name"], "searchmod.jar")
         self.assertEqual(store.list_documents()[0]["kind"], "jar")
+
+    def test_chinese_term_hint_matches_english_identifier(self) -> None:
+        store = self.store()
+        store.add_text(
+            "反编译源码",
+            "class BodyPossession { void startPossession() {} }",
+        )
+        hits = store.search("附身是怎么实现的")
+        self.assertTrue(hits)
+        self.assertIn("BodyPossession", hits[0]["text"])
+
+    def test_jar_overview_returned_when_query_misses(self) -> None:
+        path = self.tmp / "overview.jar"
+        with zipfile.ZipFile(path, "w") as archive:
+            archive.writestr("fabric.mod.json", '{"id":"overviewmod"}')
+            archive.writestr("com/example/ExampleMod.class", make_class())
+        store = self.store()
+        with mock.patch("dma.knowledge._decompile_jar", return_value=([], "")):
+            store.add_file(path)
+        self.assertEqual(store.search("完全无关的量子物理"), [])
+        overview = store.overview_hits()
+        self.assertEqual(len(overview), 1)
+        self.assertIn("## 模组速览", overview[0]["text"])
+
+    def test_legacy_jar_document_gets_synthesized_index(self) -> None:
+        store = self.store()
+        store.add_text(
+            "old.jar",
+            "# 模组 JAR：old.jar\n\n## 类：com.example.OldMod\n方法：\n  - onInitialize()V",
+            kind="jar",
+            source="old.jar",
+        )
+        overview = store.overview_hits()
+        self.assertEqual(len(overview), 1)
+        self.assertIn("## 类索引", overview[0]["text"])
+        self.assertIn("OldMod", overview[0]["text"])
 
     def test_rejects_binary_and_missing(self) -> None:
         binary = self.tmp / "image.bin"
@@ -339,6 +378,22 @@ class KnowledgeAgentTests(TempDataCase):
         )
         self.assertIn("继续读请把 offset", first_page)
         self.assertIn("全文", first_page)
+
+    def test_search_knowledge_falls_back_to_jar_overview(self) -> None:
+        self.knowledge.add_text(
+            "mod.jar",
+            "# 模组 JAR：mod.jar\n\n## 模组速览\n- Fabric：id=testmod\n\n"
+            "## 类索引（共 1 个类）\ncom.example: TestMod",
+            kind="jar",
+            source="mod.jar",
+        )
+        worker = self.worker()
+        result = worker._execute(
+            ToolCall(name="search_knowledge", args={"query": "完全无关的量子物理"}),
+            AgentRun(),
+        )
+        self.assertIn("模组速览", result)
+        self.assertIn("TestMod", result)
 
     def test_prompt_contains_knowledge_section(self) -> None:
         prompt = build_system_prompt(
