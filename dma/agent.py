@@ -35,7 +35,9 @@ PRE_PATH_RE = re.compile(
 INFO_PATH_RE = re.compile(
     rf"^(?:[A-Za-z0-9_+.-]+\s+)?(?:path=|file=)?([A-Za-z0-9_.\-/\\]+\.(?:{PATH_EXT}))\s*$"
 )
-MAX_TOOL_RESULT = 14000
+MAX_TOOL_RESULT = 200_000
+MAX_FETCH_RESULT = 60_000
+MAX_STEP_RESULT = 300_000
 MAX_FENCE_FILES = 40
 
 
@@ -261,7 +263,7 @@ class AgentWorker(QObject):
         knowledge_hits = []
         if self.knowledge is not None:
             knowledge_hits = self.knowledge.search(
-                self.user_text, project=project_key, limit=4, budget=6000
+                self.user_text, project=project_key, limit=6, budget=150_000
             )
             if not knowledge_hits:
                 # 中文问题常和英文类名对不上，至少把 JAR 的速览/类索引送进上下文。
@@ -321,7 +323,7 @@ class AgentWorker(QObject):
             messages.append(
                 {
                     "role": "user",
-                    "content": "\n\n".join(results)[:MAX_TOOL_RESULT * 2],
+                    "content": "\n\n".join(results)[:MAX_STEP_RESULT],
                 }
             )
 
@@ -434,8 +436,8 @@ class AgentWorker(QObject):
                 hits = self.knowledge.search(
                     str(args.get("query") or ""),
                     project=project_key,
-                    limit=int(args.get("limit") or 5),
-                    budget=int(args.get("budget") or 6000),
+                    limit=int(args.get("limit") or 8),
+                    budget=int(args.get("budget") or MAX_TOOL_RESULT),
                 )
                 if not hits:
                     overview = self.knowledge.overview_hits(
@@ -484,29 +486,33 @@ class AgentWorker(QObject):
                         start_at = max(0, int(args.get("offset") or 0))
                     except (TypeError, ValueError):
                         start_at = 0
-                    window = max(400, MAX_TOOL_RESULT - len(header) - 700)
                     item = self.knowledge.read_source(
-                        int(document["id"]), target, offset=start_at, limit=window
+                        int(document["id"]), target, offset=start_at, limit=0
                     )
                     if item is None:
                         available = self.knowledge.source_entries(
-                            int(document["id"]), limit=40
+                            int(document["id"]), limit=400
                         )
                         listing = "、".join(available) if available else "（没有源码条目）"
                         return (
                             header
-                            + f"没有找到「{target}」。可用的源码文件（前 40 个）：\n{listing}\n"
+                            + f"没有找到「{target}」。可用的源码文件（共 {len(available)} 个）：\n"
+                            f"{listing}\n"
                             "可以只写类名，例如 file=\"BodyPossession.java\" 或 file=\"BodyPossession\"。"
-                        )
+                        )[:MAX_TOOL_RESULT]
                     piece = str(item.get("text") or "")
-                    done = item.get("next") is None
+                    room = max(2000, MAX_TOOL_RESULT - len(header) - 900)
+                    next_offset = None
+                    if len(piece) > room:
+                        piece = piece[:room]
+                        next_offset = int(item["offset"]) + len(piece)
                     tail = (
-                        f"\n\n（{item['kind']}：{item['name']}，本段第 {item['offset']}～"
+                        f"\n\n（{item['kind']}：{item['name']}，本次第 {item['offset']}～"
                         f"{item['offset'] + len(piece)} 字符，共 {item['total']} 字符。"
                         + (
                             "已到结尾。）"
-                            if done
-                            else f"继续读请保持 file 不变，offset={item['next']}。）"
+                            if next_offset is None
+                            else f"继续读请保持 file 不变，offset={next_offset}。）"
                         )
                     )
                     return (
@@ -518,7 +524,10 @@ class AgentWorker(QObject):
                 query = str(args.get("query") or "").strip()
                 if query:
                     matches = self.knowledge.document_hits(
-                        int(document["id"]), query, limit=6, budget=10000
+                        int(document["id"]),
+                        query,
+                        limit=8,
+                        budget=max(10000, MAX_TOOL_RESULT - len(header) - 700),
                     )
                     if not matches:
                         return (
@@ -529,7 +538,8 @@ class AgentWorker(QObject):
                             "或者直接用 file=\"类名.java\" 读整个文件。"
                         )
                     joined = "\n\n".join(
-                        f"[片段 {item['ord'] + 1}]\n{item['text']}" for item in matches
+                        f"[条目 {index + 1}]\n{item['text']}"
+                        for index, item in enumerate(matches)
                     )
                     return (header + joined)[:MAX_TOOL_RESULT]
                 try:
@@ -595,7 +605,7 @@ class AgentWorker(QObject):
                 url = str(args.get("url") or "").strip()
                 if not url:
                     return "fetch_url 缺少 url。"
-                return connectors.fetch_url(url)[:MAX_TOOL_RESULT]
+                return connectors.fetch_url(url)[:MAX_FETCH_RESULT]
             return (
                 f"未知工具：{name}。可用工具：list_files、read_file、search_text、write_file、"
                 "read_skill、remember、recall、search_knowledge、read_knowledge、"

@@ -42,7 +42,7 @@ CREATE INDEX IF NOT EXISTS idx_chunks_document ON chunks(document_id);
 
 CHUNK_SIZE = 1200
 CHUNK_OVERLAP = 150
-MAX_DOC_CHARS = 6_000_000
+MAX_DOC_CHARS = 30_000_000
 MAX_XML_BYTES = 40 * 1024 * 1024
 TEXT_SUFFIXES = {
     ".md", ".markdown", ".txt", ".json", ".json5", ".yaml", ".yml", ".toml",
@@ -66,16 +66,16 @@ JAR_METADATA = {
     "meta-inf/neoforge.mods.toml",
     "meta-inf/manifest.mf",
 }
-MAX_JAR_CLASSES = 1_200
-MAX_JAR_TEXT_ENTRIES = 600
+MAX_JAR_CLASSES = 5_000
+MAX_JAR_TEXT_ENTRIES = 2_000
 MAX_JAR_ENTRY_BYTES = 4 * 1024 * 1024
-MAX_JAR_READ_BYTES = 48 * 1024 * 1024
+MAX_JAR_READ_BYTES = 256 * 1024 * 1024
 MAX_JAR_ENTRY_CHARS = 200_000
-MAX_CLASS_CHARS = 6_000
-MAX_DECOMPILE_CHARS = 3_000_000
+MAX_CLASS_CHARS = 12_000
+MAX_DECOMPILE_CHARS = 30_000_000
 MAX_DECOMPILE_FILE_BYTES = 2 * 1024 * 1024
-DECOMPILE_TIMEOUT = 180
-MAX_EXPORT_FILES = 2500
+DECOMPILE_TIMEOUT = 300
+MAX_EXPORT_FILES = 10_000
 MAX_NESTED_JARS = 4
 MAX_NESTED_JAR_BYTES = 12 * 1024 * 1024
 _LIBRARY_PACKAGES = (
@@ -380,19 +380,19 @@ def _class_summary(raw: bytes) -> str:
         lines = [header]
         if fields:
             lines.append("字段：")
-            for flags, field_name, desc in fields[:40]:
+            for flags, field_name, desc in fields[:150]:
                 mods = _flags(flags, _CLASS_MEMBER_FLAGS)
                 lines.append(f"  - {(mods + ' ') if mods else ''}{field_name}: {desc}")
-            if len(fields) > 40:
-                lines.append(f"  - …还有 {len(fields) - 40} 个字段")
+            if len(fields) > 150:
+                lines.append(f"  - …还有 {len(fields) - 150} 个字段")
         if methods:
             lines.append("方法：")
-            for flags, method_name, desc in methods[:60]:
+            for flags, method_name, desc in methods[:300]:
                 mods = _flags(flags, _CLASS_MEMBER_FLAGS)
                 lines.append(f"  - {(mods + ' ') if mods else ''}{method_name}{desc}")
-            if len(methods) > 60:
+            if len(methods) > 300:
                 lines.append(
-                    f"  - …（这里只列出前 60 个方法，另有 {len(methods) - 60} 个；"
+                    f"  - …（这里只列出前 300 个方法，另有 {len(methods) - 300} 个；"
                     "完整实现看反编译源码，不要据此判断源码不完整）"
                 )
         refs: list[str] = []
@@ -402,9 +402,9 @@ def _class_summary(raw: bytes) -> str:
                 refs.append(value)
         if refs:
             lines.append("引用的类：")
-            lines.append("  - " + ", ".join(refs[:40]))
-            if len(refs) > 40:
-                lines.append(f"  - …还有 {len(refs) - 40} 个")
+            lines.append("  - " + ", ".join(refs[:150]))
+            if len(refs) > 150:
+                lines.append(f"  - …还有 {len(refs) - 150} 个")
         calls: list[str] = []
         for owner_index, nat_index in member_refs:
             owner = _dot(class_name(owner_index))
@@ -420,10 +420,10 @@ def _class_summary(raw: bytes) -> str:
                 calls.append(value)
         if calls:
             lines.append("调用的方法/字段：")
-            for item in calls[:60]:
+            for item in calls[:200]:
                 lines.append(f"  - {item}")
-            if len(calls) > 60:
-                lines.append(f"  - …还有 {len(calls) - 60} 个")
+            if len(calls) > 200:
+                lines.append(f"  - …还有 {len(calls) - 200} 个")
         literals: list[str] = []
         for cp_index in string_refs:
             value = utf8.get(cp_index, "")
@@ -440,10 +440,10 @@ def _class_summary(raw: bytes) -> str:
         ]
         if literals:
             lines.append("字符串常量：")
-            for item in literals[:30]:
+            for item in literals[:100]:
                 lines.append(f'  - "{item}"')
-            if len(literals) > 30:
-                lines.append(f"  - …还有 {len(literals) - 30} 个")
+            if len(literals) > 100:
+                lines.append(f"  - …还有 {len(literals) - 100} 个")
         text = "\n".join(lines)
         if len(text) > MAX_CLASS_CHARS:
             text = text[:MAX_CLASS_CHARS] + "\n…（该类结构已截断）"
@@ -1168,6 +1168,123 @@ def _append_overlap(base: str, chunk: str) -> str:
     return base + "\n" + chunk
 
 
+def _entry_points(
+    items: list[tuple[int, str]],
+) -> list[tuple[int, str, str]]:
+    """列出资料里每个条目的起始位置：(分块下标, 类型, 名称)。
+
+    分块重叠会让同一个标题出现两次，这里只保留第一次。
+    """
+    points: list[tuple[int, str, str]] = []
+    last: tuple[int, str, str] | None = None
+    for position, (_order, text) in enumerate(items):
+        for match in _SECTION_MARKER.finditer(text):
+            kind = match.group(1)
+            name = match.group(2).strip()
+            if last is not None and last[1] == kind and last[2] == name:
+                continue
+            last = (position, kind, name)
+            points.append(last)
+    return points
+
+
+def _entry_at(
+    points: list[tuple[int, str, str]], position: int
+) -> tuple[int, str, str] | None:
+    """找到某个分块所属的条目；不在任何条目里时返回 None。"""
+    low = 0
+    high = len(points)
+    while low < high:
+        middle = (low + high) // 2
+        if points[middle][0] <= position:
+            low = middle + 1
+        else:
+            high = middle
+    return points[low - 1] if low else None
+
+
+def _rank_entries(
+    items: list[tuple[int, str]],
+    points: list[tuple[int, str, str]],
+    tokens: set[str],
+    fallback_name: str = "",
+) -> list[tuple[float, str, str, int]]:
+    """按条目（源码文件 / 类结构）给整份资料排序，返回 (分数, 类型, 名称, 起始分块)。
+
+    同一文件的多个分块会合并计数，避免长文件因为分块多而被零散片段挤掉。
+    没有条目标题的普通文档返回一个整份资料的伪条目。
+    """
+    if not points:
+        count = 0.0
+        best = 0.0
+        best_position = 0
+        for position, (_order, text) in enumerate(items):
+            lowered = text.lower()
+            matches = sum(lowered.count(token) for token in tokens)
+            if not matches:
+                continue
+            count += matches
+            value = _score(fallback_name, text, tokens)
+            if value > best:
+                best = value
+                best_position = position
+        if not count:
+            return []
+        return [(math.log1p(count) * 3.0 + best, "", fallback_name, best_position)]
+    stats: dict[tuple[str, str], list[float]] = {}
+    for position, (_order, text) in enumerate(items):
+        markers = list(_SECTION_MARKER.finditer(text))
+        segments: list[tuple[tuple[int, str, str] | None, str]] = []
+        if markers:
+            prefix = text[: markers[0].start()]
+            if prefix.strip():
+                previous = _entry_at(points, position - 1) if position else None
+                segments.append((previous, prefix))
+            for index, match in enumerate(markers):
+                start = match.end()
+                end = (
+                    markers[index + 1].start()
+                    if index + 1 < len(markers)
+                    else len(text)
+                )
+                segments.append(
+                    (
+                        (position, match.group(1), match.group(2).strip()),
+                        text[start:end],
+                    )
+                )
+        else:
+            segments.append((_entry_at(points, position), text))
+        for point, segment in segments:
+            if point is None:
+                continue
+            key = (point[1], point[2])
+            stat = stats.get(key)
+            if stat is None:
+                stat = [0.0, 0.0, float(point[0])]
+                stats[key] = stat
+            matches = sum(segment.lower().count(token) for token in tokens)
+            if matches:
+                stat[0] += matches
+                stat[1] = max(stat[1], _score(point[2], segment, tokens))
+    ranked: list[tuple[float, str, str, int]] = []
+    for (kind, name), (count, best, start) in stats.items():
+        simple = _simple_entry_name(name).lower()
+        name_bonus = 0.0
+        for token in tokens:
+            clean = _simple_entry_name(token).lower()
+            if clean == simple:
+                name_bonus += 40.0
+            elif len(clean) >= 4 and clean in simple:
+                name_bonus += 8.0
+        if count <= 0 and name_bonus <= 0:
+            continue
+        rank = math.log1p(count) * 3.0 + best + name_bonus
+        ranked.append((rank, kind, name, int(start)))
+    ranked.sort(key=lambda item: item[0], reverse=True)
+    return ranked
+
+
 def _next_other_marker(
     text: str, kind: str, name: str
 ) -> re.Match[str] | None:
@@ -1183,6 +1300,16 @@ def _next_other_marker(
         return match
 
 
+def _simple_entry_name(value: str) -> str:
+    """把路径或全限定类名压成最后一段，用于匹配。"""
+    value = str(value or "").replace("\\", "/").rsplit("/", 1)[-1]
+    if value.endswith(".java"):
+        return value[:-5]
+    if "." in value:
+        return value.rsplit(".", 1)[-1]
+    return value
+
+
 def _entry_matches(name: str, needle: str) -> bool:
     left = name.strip().lower()
     right = needle.strip().lower()
@@ -1190,16 +1317,7 @@ def _entry_matches(name: str, needle: str) -> bool:
         return False
     if left == right or left.endswith("/" + right) or left.endswith("." + right):
         return True
-
-    def simple(value: str) -> str:
-        value = value.replace("\\", "/").rsplit("/", 1)[-1]
-        if value.endswith(".java"):
-            return value[:-5]
-        if "." in value:
-            return value.rsplit(".", 1)[-1]
-        return value
-
-    return simple(left) == simple(right)
+    return _simple_entry_name(left).lower() == _simple_entry_name(right).lower()
 
 
 def _tokens(query: str) -> set[str]:
@@ -1409,52 +1527,88 @@ class KnowledgeStore:
         query: str,
         *,
         project: str = "",
-        limit: int = 5,
-        budget: int = 6000,
+        limit: int = 8,
+        budget: int = 200_000,
     ) -> list[dict[str, Any]]:
         tokens = _tokens(query)
         if not tokens:
             return []
         with self._lock:
             rows = self._conn.execute(
-                "SELECT c.text, c.document_id, d.name, d.source, d.project, d.kind "
+                "SELECT c.ord, c.text, c.document_id, d.name, d.source, d.project, d.kind "
                 "FROM chunks c JOIN documents d ON d.id=c.document_id "
-                "WHERE d.project='' OR d.project=?",
+                "WHERE d.project='' OR d.project=? ORDER BY c.document_id, c.ord",
                 (str(project or ""),),
             ).fetchall()
-        scored: list[tuple[float, dict[str, Any]]] = []
+        grouped: dict[int, list[tuple[int, str]]] = {}
+        meta: dict[int, dict[str, Any]] = {}
         for row in rows:
-            value = _score(str(row["name"]), str(row["text"]), tokens)
-            if value > 0:
-                scored.append(
-                    (
-                        value,
-                        {
-                            "document_id": int(row["document_id"]),
-                            "name": str(row["name"]),
-                            "source": str(row["source"]),
-                            "project": str(row["project"]),
-                            "kind": str(row["kind"] or ""),
-                            "text": str(row["text"]),
-                            "score": value,
-                        },
-                    )
-                )
-        scored.sort(key=lambda item: item[0], reverse=True)
+            document_id = int(row["document_id"])
+            grouped.setdefault(document_id, []).append(
+                (int(row["ord"]), str(row["text"]))
+            )
+            meta.setdefault(
+                document_id,
+                {
+                    "document_id": document_id,
+                    "name": str(row["name"]),
+                    "source": str(row["source"]),
+                    "project": str(row["project"]),
+                    "kind": str(row["kind"] or ""),
+                },
+            )
+        ranked: list[tuple[float, int, str, str, int]] = []
+        points: dict[int, list[tuple[int, str, str]]] = {}
+        for document_id, items in grouped.items():
+            doc_points = _entry_points(items)
+            points[document_id] = doc_points
+            info = meta[document_id]
+            for rank, kind, name, start in _rank_entries(
+                items, doc_points, tokens, info["name"]
+            ):
+                ranked.append((rank, document_id, kind, name, start))
+        ranked.sort(key=lambda item: item[0], reverse=True)
         hits: list[dict[str, Any]] = []
+        seen: set[tuple[int, str, str]] = set()
         per_document: dict[int, int] = {}
         used = 0
-        for _score_value, hit in scored:
-            document_id = hit["document_id"]
-            # JAR 反编译资料有上千个片段，按关键词查一个类时需要多给几段。
-            allowed = 4 if hit["kind"] == "jar" else 2
+        for rank, document_id, kind, name, start in ranked:
+            info = meta[document_id]
+            # JAR 反编译资料有上千个文件，按关键词查一个类时需要多给几份源码。
+            allowed = 8 if info["kind"] == "jar" else 2
             if per_document.get(document_id, 0) >= allowed:
                 continue
-            if used + len(hit["text"]) > budget and hits:
+            key = (document_id, kind, name)
+            if key in seen:
                 continue
-            hits.append(hit)
+            items = grouped[document_id]
+            if kind:
+                body = self._entry_body(items, start, (kind, name)) or ""
+                text = f"## {kind}：{name}\n{body}"
+            else:
+                text = items[start][1]
+            if not text.strip():
+                continue
+            if used + len(text) > budget:
+                if hits:
+                    continue
+                text = (
+                    text[:budget]
+                    + "\n…（文件较长，本次只返回开头；需要完整实现请用 "
+                    "read_knowledge 的 file 参数读这个文件。）"
+                )
+            hits.append(
+                {
+                    **info,
+                    "text": text,
+                    "score": rank,
+                    "entry": name if kind else "",
+                    "entry_kind": kind,
+                }
+            )
+            seen.add(key)
             per_document[document_id] = per_document.get(document_id, 0) + 1
-            used += len(hit["text"])
+            used += len(text)
             if len(hits) >= max(1, int(limit)):
                 break
         return hits
@@ -1539,8 +1693,8 @@ class KnowledgeStore:
         document_id: int,
         query: str,
         *,
-        limit: int = 5,
-        budget: int = 10000,
+        limit: int = 8,
+        budget: int = 200_000,
     ) -> list[dict[str, Any]]:
         tokens = _tokens(query)
         if not tokens:
@@ -1551,71 +1705,37 @@ class KnowledgeStore:
                 (int(document_id),),
             ).fetchall()
         items = [(int(row["ord"]), str(row["text"])) for row in rows]
-        scored: list[tuple[float, int, str]] = []
-        for order, text in items:
-            value = _score("", text, tokens)
-            if value > 0:
-                scored.append((value, order, text))
-        scored.sort(key=lambda item: item[0], reverse=True)
+        points = _entry_points(items)
         hits: list[dict[str, Any]] = []
         used = 0
-        for _value, order, text in scored:
-            if used + len(text) > budget and hits:
+        for _rank, kind, name, start in _rank_entries(items, points, tokens):
+            if kind:
+                body = self._entry_body(items, start, (kind, name)) or ""
+                text = f"## {kind}：{name}\n{body}"
+            else:
+                text = items[start][1] if items else ""
+            if not text.strip():
                 continue
-            body = text
-            # 命中的往往只是条目标题（源码开头的 import），把后面的正文一起带上。
-            markers = list(_SECTION_MARKER.finditer(text))
-            if markers:
-                last = markers[-1]
-                marker = (last.group(1), last.group(2).strip())
-                room = max(0, min(4000, budget - used - len(text)))
-                expanded = ""
-                if room > 200:
-                    expanded = self._entry_tail(items, order, marker, room)
-                body = expanded or text[last.start() :]
-            if used + len(body) > budget and hits:
-                body = body[: max(0, budget - used)]
-            hits.append({"ord": order, "text": body})
-            used += len(body)
+            if used + len(text) > budget:
+                if hits:
+                    continue
+                text = (
+                    text[:budget]
+                    + "\n…（文件较长，本次只返回开头；需要完整实现请用 "
+                    "read_knowledge 的 file 参数读这个文件。）"
+                )
+            hits.append(
+                {
+                    "ord": items[start][0] if items else 0,
+                    "text": text,
+                    "kind": kind,
+                    "name": name,
+                }
+            )
+            used += len(text)
             if len(hits) >= max(1, int(limit)):
                 break
         return hits
-
-    @staticmethod
-    def _entry_tail(
-        items: list[tuple[int, str]],
-        order: int,
-        marker: tuple[str, str],
-        room: int,
-    ) -> str:
-        """从某个条目标题之后继续取原文，直到遇到下一个条目。"""
-        kind, name = marker
-        index = None
-        for position, (item_order, _text) in enumerate(items):
-            if item_order == order:
-                index = position
-                break
-        if index is None:
-            return ""
-        seed = items[index][1]
-        head = 0
-        cut = 0
-        for match in _SECTION_MARKER.finditer(seed):
-            if match.group(1) == kind and match.group(2).strip() == name:
-                head = match.start()
-                cut = match.end()
-        buffer = seed
-        scan_from = len(seed)
-        window = (cut - head) + room
-        for _next_order, text in items[index + 1 :]:
-            buffer = _append_overlap(buffer, text)
-            other = _next_other_marker(buffer[scan_from:], kind, name)
-            if other is not None:
-                return buffer[head : scan_from + other.start()][:window]
-            scan_from = len(buffer)
-            if len(buffer) - head >= window:
-                break
-        return buffer[head:][:window]
 
     def read_source(
         self,
@@ -1623,9 +1743,9 @@ class KnowledgeStore:
         target: str,
         *,
         offset: int = 0,
-        limit: int = 14000,
+        limit: int = 0,
     ) -> dict[str, Any] | None:
-        """按文件名或类名取回某个条目的完整正文，可分段读取。"""
+        """按文件名或类名取回某个条目的完整正文；limit=0 表示整份返回。"""
         needle = str(target or "").replace("\\", "/").strip()
         if not needle:
             return None
@@ -1649,7 +1769,10 @@ class KnowledgeStore:
         if body is None:
             return None
         start = max(0, int(offset))
-        end = start + max(200, int(limit))
+        if int(limit) <= 0:
+            end = len(body)
+        else:
+            end = start + max(200, int(limit))
         return {
             "kind": kind,
             "name": name,
@@ -1691,7 +1814,7 @@ class KnowledgeStore:
             return None
         return joined[body_start:].strip("\n")
 
-    def source_entries(self, document_id: int, *, limit: int = 80) -> list[str]:
+    def source_entries(self, document_id: int, *, limit: int = 400) -> list[str]:
         """列出资料里的反编译源码文件，供找不到目标时提示。"""
         with self._lock:
             rows = self._conn.execute(
@@ -1726,12 +1849,17 @@ def knowledge_context(hits: list[dict[str, Any]]) -> str:
     if not hits:
         return ""
     lines = [
-        "以下是用户导入知识库的资料片段，做模组时优先参考；引用时写清文件名。"
-        "资料没写到的内容不要当成事实补全。"
+        "以下是用户导入知识库的资料，做模组时优先参考；引用时写清文件名。"
+        "检索命中的源码条目会整份返回（带 ## 源码：路径 标题），"
+        "不是片段；资料没写到的内容不要当成事实补全。"
     ]
     for hit in hits:
         scope = "当前工程" if hit.get("project") else "全部工程"
         ident = hit.get("document_id")
         suffix = f"｜编号 {ident}" if ident else ""
-        lines.append(f"\n[{hit.get('name')}｜{scope}{suffix}]\n{hit.get('text')}")
+        entry = str(hit.get("entry") or "")
+        where = f"｜{entry}" if entry else ""
+        lines.append(
+            f"\n[{hit.get('name')}{where}｜{scope}{suffix}]\n{hit.get('text')}"
+        )
     return "\n".join(lines)

@@ -423,7 +423,7 @@ class KnowledgeAgentTests(TempDataCase):
         run = AgentRun()
         document = self.knowledge.add_text(
             "大文件",
-            "开头内容。" + ("填充文字。" * 3000) + "\n唯一标记B在这里。",
+            "开头内容。" + ("填充文字。" * 60000) + "\n唯一标记B在这里。",
         )
         matched = worker._execute(
             ToolCall(
@@ -433,7 +433,7 @@ class KnowledgeAgentTests(TempDataCase):
             run,
         )
         self.assertIn("唯一标记B", matched)
-        self.assertIn("[片段", matched)
+        self.assertIn("[条目", matched)
         first_page = worker._execute(
             ToolCall(name="read_knowledge", args={"id": document["id"], "offset": 0}),
             run,
@@ -467,7 +467,7 @@ class KnowledgeAgentTests(TempDataCase):
         self.assertNotIn("class Other", result)
 
     def test_read_knowledge_source_pages_with_offset(self) -> None:
-        methods = "\n".join(f"   public void method{i}() {{}}" for i in range(900))
+        methods = "\n".join(f"   public void method{i}() {{}}" for i in range(12000))
         text = (
             "## 源码：com/example/Big.java\npackage com.example;\n"
             + methods
@@ -486,7 +486,7 @@ class KnowledgeAgentTests(TempDataCase):
         )
         self.assertIn("offset=", first)
         self.assertIn("method0", first)
-        self.assertNotIn("method449", first)
+        self.assertNotIn("method11999", first)
         offset = int(re.findall(r"offset=(\d+)", first)[-1])
         second = worker._execute(
             ToolCall(
@@ -495,7 +495,7 @@ class KnowledgeAgentTests(TempDataCase):
             ),
             AgentRun(),
         )
-        self.assertIn("method449", second)
+        self.assertIn("method11999", second)
 
     def test_read_knowledge_unknown_file_lists_sources(self) -> None:
         document = self.knowledge.add_text(
@@ -560,6 +560,23 @@ class KnowledgeAgentTests(TempDataCase):
         self.assertIn("package com.example;", hits[0]["text"])
         self.assertIn("value139", hits[0]["text"])
         self.assertNotIn("class Beta", hits[0]["text"])
+
+    def test_search_returns_whole_source_file(self) -> None:
+        filler = "\n".join(f"   int value{i} = {i};" for i in range(400))
+        text = (
+            "## 源码：com/example/Big.java\npackage com.example;\nclass Big {\n"
+            + filler
+            + "\n   void start() {}\n}\n\n"
+            "## 源码：com/example/Other.java\npackage com.example;\nclass Other {}\n"
+        )
+        self.knowledge.add_text("mod.jar", text, kind="jar", source="mod.jar")
+        hits = self.knowledge.search("start", project="", limit=4, budget=200_000)
+        self.assertTrue(hits)
+        joined = "\n".join(hit["text"] for hit in hits)
+        self.assertIn("## 源码：com/example/Big.java", joined)
+        self.assertIn("value0", joined)
+        self.assertIn("void start()", joined)
+        self.assertNotIn("class Other", joined)
 
     def test_search_knowledge_falls_back_to_jar_overview(self) -> None:
         self.knowledge.add_text(
