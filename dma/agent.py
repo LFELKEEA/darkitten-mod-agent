@@ -10,7 +10,7 @@ from typing import Any, Callable
 
 from PySide6.QtCore import QObject, Signal
 
-from . import ai, connectors, deps, project as project_mod, toolchain, wrapper
+from . import ai, builder, connectors, deps, project as project_mod, toolchain, wrapper
 from .config import Config
 from .knowledge import (
     KnowledgeStore,
@@ -38,6 +38,8 @@ INFO_PATH_RE = re.compile(
 MAX_TOOL_RESULT = 200_000
 MAX_FETCH_RESULT = 60_000
 MAX_STEP_RESULT = 300_000
+MAX_BUILD_RESULT = 24_000
+MAX_BUILD_SUCCESS = 4_000
 MAX_FENCE_FILES = 40
 
 
@@ -355,6 +357,39 @@ class AgentWorker(QObject):
         run.pending = list(self.pending)
         return True
 
+    def _known_jar_dirs(self) -> list[Path]:
+        """知识库里导入过的 JAR 所在目录，找 libs/ 依赖时优先看这些地方。"""
+        if self.knowledge is None:
+            return []
+        try:
+            documents = self.knowledge.list_documents(limit=500)
+        except Exception:  # noqa: BLE001 - 读不到知识库不影响构建
+            return []
+        dirs: list[Path] = []
+        seen: set[str] = set()
+        for item in documents:
+            source = str(item.get("source") or "").strip()
+            if not source:
+                continue
+            path = Path(source)
+            try:
+                if not path.is_file():
+                    continue
+                folder = path.parent
+                key = str(folder.resolve()).lower()
+            except OSError:
+                continue
+            if key in seen:
+                continue
+            seen.add(key)
+            dirs.append(folder)
+        return dirs
+
+    def _build_log(self, text: str) -> None:
+        line = (text or "").strip()
+        if line:
+            self.status.emit(line[-160:])
+
     def _execute(self, call: ToolCall, run: AgentRun) -> str:
         name = call.name.strip().lower()
         args = call.args
@@ -601,6 +636,25 @@ class AgentWorker(QObject):
                     "这些文件不在编译路径里，只作为迁移参考；"
                     "需要迁移时按文件读取，再把改写后的完整文件写到 src/main/java。"
                 )[:MAX_TOOL_RESULT]
+            if name == "build_project":
+                task = str(args.get("task") or "build").strip()
+                try:
+                    limit = float(args.get("timeout") or 1800)
+                except (TypeError, ValueError):
+                    limit = 1800.0
+                limit = min(max(limit, 60.0), 3600.0)
+                try:
+                    result = builder.build_project(
+                        self.project.root,
+                        task,
+                        extra_jar_dirs=self._known_jar_dirs(),
+                        log=self._build_log,
+                        timeout=limit,
+                        cancel=self._cancel,
+                    )
+                except builder.BuilderError as exc:
+                    return f"编译没有开始：{exc}"
+                return _build_report(result)
             if name == "fix_build_setup":
                 root = self.project.root
                 report: list[str] = []
@@ -636,10 +690,35 @@ class AgentWorker(QObject):
             return (
                 f"未知工具：{name}。可用工具：list_files、read_file、search_text、write_file、"
                 "read_skill、remember、recall、search_knowledge、read_knowledge、"
-                "decompile_jar、fix_build_setup、fetch_url。"
+                "decompile_jar、build_project、fix_build_setup、fetch_url。"
             )
         except Exception as exc:
             return f"工具执行失败：{exc}"
+
+
+def _build_report(result: builder.BuildResult) -> str:
+    if result.ok:
+        head = "编译成功（退出码 0）。"
+    else:
+        head = f"编译失败（退出码 {result.code}）。"
+    parts = [head]
+    if result.jars:
+        listing = "\n".join(
+            f"- {name}（{size} 字节）" for name, size in result.jars
+        )
+        parts.append("产物：\n" + listing)
+    elif result.ok:
+        parts.append("没有在 build/libs 里找到 jar；如果这是数据生成或运行任务，可以忽略。")
+    output = (result.output or "").strip()
+    if output:
+        limit = MAX_BUILD_RESULT if not result.ok else MAX_BUILD_SUCCESS
+        tail = output[-limit:]
+        if len(output) > len(tail):
+            tail = "（日志较长，只保留末尾部分）\n" + tail
+        parts.append(f"Gradle 日志：\n{tail}")
+    if result.message:
+        parts.append(f"启动信息：{result.message}")
+    return "\n\n".join(parts)[:MAX_TOOL_RESULT]
 
 
 def _tool_status(call: ToolCall) -> str:
@@ -649,6 +728,9 @@ def _tool_status(call: ToolCall) -> str:
         return f"{call.name} {call.args.get('query', '')}"
     if call.name == "fetch_url":
         return f"fetch_url {call.args.get('url', '')}"
+    if call.name == "build_project":
+        task = str(call.args.get("task") or "build")
+        return f"正在执行 Gradle {task}…"
     return f"执行 {call.name}…"
 
 

@@ -22,10 +22,10 @@ BUILD = ROOT / "build"
 APP_DIST = DIST / "DarkittenModAgent"
 ZIP_NAME = f"DarkittenModAgent-{APP_VERSION}.zip"
 NOTES = [
-    "修复编译时反复卡在插件解析的问题。本地 Maven 代理遇到超长插件坐标时，Windows 路径长度限制会让文件写入失败，Gradle 只看到“响应头发出后断开”，于是一次次重试；现在超长路径会自动换成短哈希文件名。",
-    "插件门户坐标优先走 plugins.gradle.org；其它源明确返回 404 时不再误判成“上游不可用”，Gradle 可以立刻换下一个仓库，不会再空等半分钟。",
-    "本地代理端口固定不变，同一工程第二次构建实测从一分多钟降到 6 秒，仍然能正常产出模组 JAR。",
-    "编译前新增源码预检，自动清掉模型写文件时带进来的 Markdown 代码围栏，避免 javac 报“非法字符”。",
+    "对话里的助手现在可以自己编译：新增 build_project 工具，直接执行 build / runClient / runServer / runDatagen，并把 Gradle 日志和产物大小回传给模型，不再要求用户手动运行 gradlew 或粘贴日志。",
+    "编译前自动准备 JDK、Wrapper、libs 本地依赖和 Maven 镜像代理；缺少本地 jar 或 Gradle 版本不够时，会自动补齐并重试一次。",
+    "助手根据失败日志继续改代码并再次编译，失败信息会保留末尾关键日志，方便定位到具体文件和行。",
+    "状态栏会显示正在执行的 Gradle 任务，长时间构建可以随时取消。",
 ]
 
 
