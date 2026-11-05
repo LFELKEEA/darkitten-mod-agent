@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import threading
 
-from PySide6.QtCore import QObject, Qt, QTimer, Signal
-from PySide6.QtGui import QIcon
+from PySide6.QtCore import QObject, Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import QDesktopServices, QIcon
 from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
@@ -32,6 +32,7 @@ from .environment_page import EnvironmentPage
 from .knowledge_page import KnowledgePage
 from .settings_page import SettingsPage
 from .skills_page import SkillsPage
+from .tutorial_page import TutorialPage
 from .update_dialog import UpdateDialog
 from .widgets import tiny
 
@@ -111,6 +112,7 @@ class MainWindow(QMainWindow):
 
         self.stack = QStackedWidget()
         self.chat_page = ChatPage(self)
+        self.tutorial_page = TutorialPage(self)
         self.build_page = BuildPage(self)
         self.skills_page = SkillsPage(self)
         self.connectors_page = ConnectorsPage(self)
@@ -119,6 +121,7 @@ class MainWindow(QMainWindow):
         self.settings_page = SettingsPage(self)
         pages = [
             ("对话", self.chat_page),
+            ("教程", self.tutorial_page),
             ("编译运行", self.build_page),
             ("技能", self.skills_page),
             ("连接器", self.connectors_page),
@@ -158,6 +161,20 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     def status(self, text: str) -> None:
         self.statusBar().showMessage(str(text), 12000)
+
+    def go_to(self, page: QWidget) -> None:
+        index = self.stack.indexOf(page)
+        if index < 0:
+            return
+        self.stack.setCurrentIndex(index)
+        button = self.group.button(index)
+        if button is not None:
+            button.setChecked(True)
+
+    def open_folder(self, path) -> None:
+        target = str(path)
+        if not QDesktopServices.openUrl(QUrl.fromLocalFile(target)):
+            self.status(f"无法打开目录：{target}")
 
     def save_config(self) -> None:
         try:

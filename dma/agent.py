@@ -42,6 +42,20 @@ MAX_STEP_RESULT = 300_000
 MAX_BUILD_RESULT = 24_000
 MAX_BUILD_SUCCESS = 4_000
 MAX_FENCE_FILES = 40
+BUILD_TRIGGER_EXTS = {
+    ".java", ".kt", ".kts", ".gradle", ".properties", ".json", ".json5",
+    ".toml", ".xml", ".mcmeta", ".lang", ".yml", ".yaml", ".glsl", ".fsh",
+    ".vsh", ".cfg", ".conf",
+}
+
+
+def _needs_build(paths: list[str]) -> bool:
+    """只改文档和图片时不必跑 Gradle。"""
+    for path in paths:
+        suffix = Path(str(path)).suffix.lower()
+        if not suffix or suffix in BUILD_TRIGGER_EXTS:
+            return True
+    return False
 
 
 class AgentError(Exception):
@@ -162,13 +176,61 @@ INTENT_MARKER_RE = re.compile(
 
 
 def _looks_like_action_intent(text: str) -> bool:
-    """识别“我先读 / 让我看看 / 接下来检查”这类只写计划、没有工具调用的回复。"""
+    """识别“我先读 / 让我看看 / 接下来检查”这类只写计划、没有工具调用的回复。
+
+    只看最后一段，不再限制整条回复的长度：模型经常先列三五个问题，
+    最后用一句“先读二个文件”收尾，然后整轮就停住了。
+    """
     body = (text or "").strip()
-    if not body or len(body) > 200:
+    if not body:
         return False
-    if re.search(r"已经|已读取|已查看|已完成|已修改|已修复|总结如下|结论如下", body):
+    tail = body[-240:]
+    if re.search(r"已经|已读取|已查看|已完成|已修改|已修复|总结如下|结论如下", tail):
         return False
-    return bool(INTENT_MARKER_RE.search(body))
+    return bool(INTENT_MARKER_RE.search(tail))
+
+
+HISTORY_CHAR_BUDGET = 120_000
+MESSAGE_CHAR_BUDGET = 480_000
+
+
+def _history_window(history: list[dict[str, str]], turns: int) -> list[dict[str, str]]:
+    """按轮数和字符预算截取历史，长对话不会把上下文塞爆。"""
+    items = list(history[-max(1, turns) * 2:])
+    kept: list[dict[str, str]] = []
+    total = 0
+    for item in reversed(items):
+        length = len(str(item.get("content") or ""))
+        if kept and total + length > HISTORY_CHAR_BUDGET:
+            break
+        kept.append(item)
+        total += length
+    kept.reverse()
+    return kept
+
+
+def _compact_messages(messages: list[dict[str, Any]]) -> None:
+    """把本轮较早的大块工具结果折叠掉，保留最近几轮完整内容。
+
+    单次工具结果可以有 20 万字符，多轮读写堆起来会超过模型上下文。
+    这里只压缩旧的工具结果，不动系统提示和最近的对话。
+    """
+    total = sum(len(str(item.get("content") or "")) for item in messages)
+    if total <= MESSAGE_CHAR_BUDGET:
+        return
+    limit = max(0, len(messages) - 1)
+    for index in range(2, limit):
+        if total <= MESSAGE_CHAR_BUDGET:
+            break
+        item = messages[index]
+        content = str(item.get("content") or "")
+        if item.get("role") != "user" or not content.startswith("[工具结果："):
+            continue
+        if len(content) <= 1800:
+            continue
+        shortened = content[:1500] + "\n…（较早的工具结果已折叠）"
+        item["content"] = shortened
+        total -= len(content) - len(shortened)
 
 
 def _parse_call_payload(raw: str) -> list[ToolCall]:
@@ -378,7 +440,7 @@ class AgentWorker(QObject):
             knowledge_text=knowledge_context(knowledge_hits),
         )
         messages: list[dict[str, Any]] = [{"role": "system", "content": system}]
-        messages.extend(self.history[-self.config.context_turns * 2:])
+        messages.extend(_history_window(self.history, self.config.context_turns))
         messages.append({"role": "user", "content": self.user_text})
         final_text = ""
         run = AgentRun()
@@ -386,6 +448,10 @@ class AgentWorker(QObject):
         step = 0
         broken_tool_retries = 0
         intent_retries = 0
+        auto_builds = 0
+        applied_mark = 0
+        pending_fix = False
+        last_build_report = ""
 
         while True:
             if limit > 0 and step >= limit:
@@ -442,7 +508,43 @@ class AgentWorker(QObject):
                         }
                     )
                     continue
+                if auto_builds < 2 and self._should_auto_build(run, applied_mark):
+                    auto_builds += 1
+                    applied_mark = len(run.applied)
+                    ok, report = self._auto_build()
+                    base = (visible or reply.strip()).strip()
+                    if ok:
+                        final_text = (base + "\n\n自动编译通过。\n" + report).strip()
+                        run.text = final_text
+                        return run
+                    if auto_builds >= 2:
+                        final_text = (
+                            base + "\n\n自动编译失败，已停止自动修复。\n\n" + report
+                        ).strip()
+                        run.text = final_text
+                        return run
+                    pending_fix = True
+                    last_build_report = report
+                    messages.append({"role": "assistant", "content": reply})
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": (
+                                "宿主已经自动执行 build，编译失败。请根据下面的日志修复代码，"
+                                "修好后会再自动编译一次。不要只描述计划，"
+                                "直接调用 write_file 或 edit_file。\n\n"
+                                + report[:MAX_BUILD_RESULT]
+                            ),
+                        }
+                    )
+                    continue
                 final_text = visible or reply.strip()
+                if pending_fix and len(run.applied) <= applied_mark:
+                    final_text = (
+                        final_text
+                        + "\n\n自动编译失败，而且这一轮没有检测到代码改动。\n\n"
+                        + last_build_report
+                    ).strip()
                 if intent_retries >= 2 and _looks_like_action_intent(final_text):
                     final_text += "\n\n（这次没有实际执行工具调用。再发送「继续」我会接着执行。）"
                 run.text = final_text
@@ -465,6 +567,7 @@ class AgentWorker(QObject):
                     "content": "\n\n".join(results)[:MAX_STEP_RESULT],
                 }
             )
+            _compact_messages(messages)
 
         final_text = final_text or "已达到工具调用轮数上限。请继续发送消息，让我接着完成剩余部分。"
         run.text = final_text
@@ -531,6 +634,33 @@ class AgentWorker(QObject):
         if line:
             self.status.emit(line[-160:])
 
+    def _should_auto_build(self, run: AgentRun, applied_mark: int) -> bool:
+        if not self.config.auto_build or not self.config.auto_apply:
+            return False
+        if self.project is None or len(run.applied) <= applied_mark:
+            return False
+        if not _needs_build(run.applied[applied_mark:]):
+            return False
+        root = self.project.root
+        return (root / "build.gradle").is_file() or (root / "settings.gradle").is_file()
+
+    def _auto_build(self) -> tuple[bool, str]:
+        self.status.emit("文件已写入，正在自动编译…")
+        try:
+            result = builder.build_project(
+                self.project.root,
+                "build",
+                extra_jar_dirs=self._known_jar_dirs(),
+                log=self._build_log,
+                timeout=900,
+                cancel=self._cancel,
+            )
+        except builder.BuilderError as exc:
+            return False, f"自动编译没有开始：{exc}"
+        except Exception as exc:  # noqa: BLE001 - 自动编译失败不应吞掉本轮结果
+            return False, f"自动编译出错：{exc}"
+        return result.ok, _build_report(result)
+
     def _execute(self, call: ToolCall, run: AgentRun) -> str:
         name = call.name.strip().lower()
         args = call.args
@@ -553,11 +683,24 @@ class AgentWorker(QObject):
                     int(args.get("depth") or 2),
                 )
             if name == "read_file":
+                try:
+                    offset = max(0, int(args.get("offset") or 0))
+                except (TypeError, ValueError):
+                    offset = 0
+                try:
+                    window = int(args.get("max_chars") or 14000)
+                except (TypeError, ValueError):
+                    window = 14000
+                window = max(1000, min(MAX_TOOL_RESULT, window))
                 text = project_mod.read_text(
                     self.project.root,
                     str(args.get("path") or ""),
-                    max_chars=int(args.get("max_chars") or 14000),
+                    max_chars=min(MAX_TOOL_RESULT, offset + window),
                 )
+                if offset:
+                    if offset >= len(text):
+                        return f"offset={offset} 超过可读长度（{len(text)} 字符）。"
+                    text = text[offset:]
                 return text[:MAX_TOOL_RESULT]
             if name == "search_text":
                 hits = project_mod.search_text(
@@ -591,6 +734,42 @@ class AgentWorker(QObject):
                 )
                 state = "已自动写入" if written else "已加入待写入列表"
                 return f"{state}：{item.path}（{len(item.content)} 字符）"
+            if name in {"edit_file", "replace_in_file", "apply_patch"}:
+                relative = str(args.get("path") or "").strip()
+                old = str(args.get("old") or args.get("find") or "")
+                if args.get("new") is not None:
+                    new = str(args.get("new"))
+                else:
+                    new = str(args.get("replacement") or "")
+                if not relative:
+                    return "edit_file 缺少 path。"
+                if not old:
+                    return "edit_file 缺少 old（要替换的原文）。"
+                try:
+                    current = project_mod.read_text(
+                        self.project.root, relative, max_chars=2 * 1024 * 1024
+                    )
+                except Exception as exc:  # noqa: BLE001 - 文件不存在或太大
+                    return f"读取失败：{exc}"
+                if "…（已截断" in current:
+                    return "文件太大，edit_file 需要完整内容，请改用 write_file 重写整份文件。"
+                if old not in current:
+                    return (
+                        f"没有在 {relative} 里找到要替换的原文。"
+                        "请先用 read_file 确认内容，old 必须和文件里的字符完全一致。"
+                    )
+                updated = current.replace(old, new, 1)
+                item = PendingFile(path=relative, content=updated, reason="edit")
+                if not self._stage_file(item, run):
+                    return f"修改失败：路径不合法（{relative}）。"
+                written = any(
+                    entry.applied
+                    for entry in self.pending
+                    if entry.path == item.path.replace("\\", "/")
+                )
+                state = "已自动写入" if written else "已加入待写入列表"
+                delta = len(updated) - len(current)
+                return f"{state}：{relative}（替换 1 处，{delta:+d} 字符）"
             if name == "read_skill":
                 skill = self.skill_store.get(str(args.get("id") or ""))
                 if skill is None:

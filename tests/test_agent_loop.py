@@ -3,6 +3,8 @@ from __future__ import annotations
 import unittest
 from unittest import mock
 
+from dma import agent as agent_mod
+from dma import builder
 from dma.agent import AgentWorker, PendingFile, apply_pending
 from dma.config import Config
 from dma.connectors import ConnectorStore
@@ -155,6 +157,38 @@ class AgentLoopTests(TempDataCase):
         self.assertIn("没有真正调用工具", messages[1][-1]["content"])
         self.assertIn("plugins {}", messages[2][-1]["content"])
 
+    def test_long_plan_ending_with_read_requests_tool(self) -> None:
+        project = make_project(self)
+        (project.root / "build.gradle").write_text("plugins {}", encoding="utf-8")
+        worker = self.worker(project)
+        plan = (
+            "三个问题，我逐个定位。先读现有代码确认现状，不凭记忆改。\n\n"
+            "问题 1：婚姻关系没保留——上一轮我加了 copyRelationsBack，"
+            "但日志显示你结婚后解除附身，关系没写回。需要确认 copyRelationsBack "
+            "是否真的被调用、CURRENT_TARGET_KEY 是否还在。\n"
+            "问题 2：皮化村民复原时名字变成职业名——这是 FamilyTreeNode 的 name "
+            "字段被职业覆盖，或者重建村民时 readAdditionalSaveData 读错了键。"
+            "需要看 SkinBladeItem 存 NBT 和 PlayerSkinItem 重建村民的代码。\n"
+            "问题 3：脱皮应该用皮化之刃——这是交互设计变更，需要改 PlayerSkinItem "
+            "的脱皮触发条件。\n"
+            "先读二个文件。"
+        )
+        replies = [
+            plan,
+            '```tool\n{"tool":"read_file","path":"build.gradle"}\n```',
+            "读完了。",
+        ]
+        calls: list[int] = []
+
+        def fake(ai, items):
+            calls.append(1)
+            return replies.pop(0)
+
+        with mock.patch("dma.agent.ai.request_chat", side_effect=fake):
+            run = worker._loop()
+        self.assertEqual(run.text, "读完了。")
+        self.assertEqual(len(calls), 3)
+
     def test_plan_only_reply_retry_is_limited(self) -> None:
         project = make_project(self)
         worker = self.worker(project)
@@ -258,6 +292,190 @@ class AgentLoopTests(TempDataCase):
             run = worker._loop()
         self.assertEqual(run.steps, 26)
         self.assertEqual(run.text, "大工程完成。")
+
+    def test_read_file_offset(self) -> None:
+        project = make_project(self)
+        (project.root / "note.txt").write_text("0123456789abcdef", encoding="utf-8")
+        worker = self.worker(project)
+        messages: list[list[dict]] = []
+
+        def fake(ai, items):
+            messages.append(list(items))
+            if len(messages) == 1:
+                return (
+                    '```tool\n{"tool":"read_file","path":"note.txt",'
+                    '"offset":10,"max_chars":6}\n```'
+                )
+            return "读到了。"
+
+        with mock.patch("dma.agent.ai.request_chat", side_effect=fake):
+            run = worker._loop()
+        self.assertIn("abcdef", messages[1][-1]["content"])
+        self.assertNotIn("0123456789", messages[1][-1]["content"].split("abcdef")[0][-20:])
+        self.assertEqual(run.text, "读到了。")
+
+    def test_edit_file_replaces_and_auto_applies(self) -> None:
+        project = make_project(self)
+        (project.root / "note.txt").write_text("hello mod", encoding="utf-8")
+        worker = self.worker(project, auto_apply=True)
+        reply = (
+            '```tool\n{"tool":"edit_file","path":"note.txt",'
+            '"old":"hello","new":"hi"}\n```'
+        )
+        messages: list[list[dict]] = []
+
+        def fake(ai, items):
+            messages.append(list(items))
+            return reply if len(messages) == 1 else "改好了。"
+
+        with mock.patch("dma.agent.ai.request_chat", side_effect=fake):
+            run = worker._loop()
+        self.assertEqual((project.root / "note.txt").read_text(encoding="utf-8"), "hi mod")
+        self.assertIn("已自动写入", messages[1][-1]["content"])
+        self.assertEqual(run.pending[0].reason, "edit")
+        self.assertTrue(run.pending[0].applied)
+
+    def test_edit_file_missing_text_guides_read(self) -> None:
+        project = make_project(self)
+        (project.root / "note.txt").write_text("hello mod", encoding="utf-8")
+        worker = self.worker(project)
+        reply = (
+            '```tool\n{"tool":"edit_file","path":"note.txt",'
+            '"old":"absent","new":"x"}\n```'
+        )
+        messages: list[list[dict]] = []
+
+        def fake(ai, items):
+            messages.append(list(items))
+            return reply if len(messages) == 1 else "先读一下。"
+
+        with mock.patch("dma.agent.ai.request_chat", side_effect=fake):
+            run = worker._loop()
+        self.assertEqual(run.pending, [])
+        self.assertIn("没有在 note.txt 里找到", messages[1][-1]["content"])
+
+    def test_auto_build_after_write(self) -> None:
+        project = make_project(self)
+        (project.root / "build.gradle").write_text("plugins {}", encoding="utf-8")
+        worker = self.worker(project, auto_apply=True)
+        replies = [
+            '```tool\n{"tool":"write_file","path":"src/main/java/A.java",'
+            '"content":"package a;\\npublic class A {}\\n"}\n```',
+            "已经写好入口类。",
+        ]
+        result = builder.BuildResult(ok=True, code=0, jars=[("test_mod.jar", 1024)])
+        with mock.patch("dma.agent.ai.request_chat", side_effect=replies), mock.patch(
+            "dma.agent.builder.build_project", return_value=result
+        ) as build:
+            run = worker._loop()
+        self.assertEqual(build.call_count, 1)
+        self.assertIn("自动编译通过", run.text)
+        self.assertIn("test_mod.jar", run.text)
+
+    def test_auto_build_failure_then_fix_builds_again(self) -> None:
+        project = make_project(self)
+        (project.root / "build.gradle").write_text("plugins {}", encoding="utf-8")
+        worker = self.worker(project, auto_apply=True)
+        replies = [
+            '```tool\n{"tool":"write_file","path":"src/main/java/A.java",'
+            '"content":"package a;\\npublic class A {}\\n"}\n```',
+            "已经写好入口类。",
+            '```tool\n{"tool":"edit_file","path":"src/main/java/A.java",'
+            '"old":"class A {}","new":"class A { /* fixed */ }"}\n```',
+            "修好了。",
+        ]
+        results = [
+            builder.BuildResult(ok=False, code=1, output="error: boom"),
+            builder.BuildResult(ok=True, code=0, jars=[("test_mod.jar", 2048)]),
+        ]
+        seen: list[list[dict]] = []
+
+        def fake(ai, items):
+            seen.append(list(items))
+            return replies.pop(0)
+
+        with mock.patch("dma.agent.ai.request_chat", side_effect=fake), mock.patch(
+            "dma.agent.builder.build_project", side_effect=results
+        ) as build:
+            run = worker._loop()
+        self.assertEqual(build.call_count, 2)
+        self.assertIn("error: boom", seen[2][-1]["content"])
+        self.assertIn("自动编译通过", run.text)
+        self.assertIn("test_mod.jar", run.text)
+
+    def test_auto_build_failure_without_changes_reports_log(self) -> None:
+        project = make_project(self)
+        (project.root / "build.gradle").write_text("plugins {}", encoding="utf-8")
+        worker = self.worker(project, auto_apply=True)
+        replies = [
+            '```tool\n{"tool":"write_file","path":"src/main/java/A.java",'
+            '"content":"package a;\\npublic class A {}\\n"}\n```',
+            "已经写好。",
+            "已经修复了。",
+        ]
+        result = builder.BuildResult(ok=False, code=1, output="error: still broken")
+        with mock.patch("dma.agent.ai.request_chat", side_effect=replies), mock.patch(
+            "dma.agent.builder.build_project", return_value=result
+        ) as build:
+            run = worker._loop()
+        self.assertEqual(build.call_count, 1)
+        self.assertIn("没有检测到代码改动", run.text)
+        self.assertIn("still broken", run.text)
+
+    def test_auto_build_skipped_when_disabled(self) -> None:
+        project = make_project(self)
+        (project.root / "build.gradle").write_text("plugins {}", encoding="utf-8")
+        worker = self.worker(project, auto_apply=True)
+        worker.config.auto_build = False
+        replies = [
+            '```tool\n{"tool":"write_file","path":"A.java","content":"class A {}"}\n```',
+            "写完了。",
+        ]
+        with mock.patch("dma.agent.ai.request_chat", side_effect=replies), mock.patch(
+            "dma.agent.builder.build_project"
+        ) as build:
+            run = worker._loop()
+        build.assert_not_called()
+        self.assertEqual(run.text, "写完了。")
+
+    def test_auto_build_skipped_for_docs_only(self) -> None:
+        project = make_project(self)
+        (project.root / "build.gradle").write_text("plugins {}", encoding="utf-8")
+        worker = self.worker(project, auto_apply=True)
+        replies = [
+            '```tool\n{"tool":"write_file","path":"NOTES.md","content":"# 笔记"}\n```',
+            "笔记写好了。",
+        ]
+        with mock.patch("dma.agent.ai.request_chat", side_effect=replies), mock.patch(
+            "dma.agent.builder.build_project"
+        ) as build:
+            run = worker._loop()
+        build.assert_not_called()
+        self.assertEqual(run.text, "笔记写好了。")
+        self.assertTrue(agent_mod._needs_build(["src/main/java/A.java"]))
+        self.assertFalse(agent_mod._needs_build(["README.md", "docs/a.png"]))
+
+    def test_compact_messages_folds_old_tool_results(self) -> None:
+        messages = [
+            {"role": "system", "content": "s"},
+            {"role": "user", "content": "u"},
+        ]
+        for _ in range(6):
+            messages.append({"role": "assistant", "content": "调用工具"})
+            messages.append({"role": "user", "content": "[工具结果：read_file]\n" + "x" * 100_000})
+        with mock.patch("dma.agent.MESSAGE_CHAR_BUDGET", 260_000):
+            agent_mod._compact_messages(messages)
+        total = sum(len(item["content"]) for item in messages)
+        self.assertLessEqual(total, 260_000)
+        self.assertIn("已折叠", messages[3]["content"])
+        self.assertGreater(len(messages[-1]["content"]), 90_000)
+
+    def test_history_window_respects_char_budget(self) -> None:
+        history = [{"role": "user", "content": "x" * 100} for _ in range(10)]
+        with mock.patch("dma.agent.HISTORY_CHAR_BUDGET", 250):
+            window = agent_mod._history_window(history, 12)
+        self.assertEqual(len(window), 2)
+        self.assertEqual(sum(len(item["content"]) for item in window), 200)
 
     def test_memory_tool(self) -> None:
         project = make_project(self)

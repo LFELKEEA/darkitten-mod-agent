@@ -63,9 +63,11 @@ TOOL_PROTOCOL = """【工程工具协议】
 宿主会执行工具，把结果作为下一条消息发给你，然后你继续。工具轮数上限由宿主设置决定，尽量一次把任务做完，不要为了凑轮数重复读取同一文件或反复试探。
 可用工具：
 - list_files: {"tool":"list_files","path":".","depth":2}
-- read_file: {"tool":"read_file","path":"相对路径"}
+- read_file: {"tool":"read_file","path":"相对路径"}  // 默认返回前 14000 字符
+- read_file 分段读大文件: {"tool":"read_file","path":"相对路径","offset":14000,"max_chars":14000}
 - search_text: {"tool":"search_text","query":"关键字"}
-- write_file: {"tool":"write_file","path":"相对路径","content":"完整文件内容"}  // 先进入待写入列表，由用户确认
+- edit_file 精确替换已有文件的一处内容（推荐，省 token）: {"tool":"edit_file","path":"相对路径","old":"原文片段","new":"替换后的内容"}
+- write_file: {"tool":"write_file","path":"相对路径","content":"完整文件内容"}  // 新建文件或整体重写
 - read_skill: {"tool":"read_skill","id":"fabric-scaffold"}
 - remember: {"tool":"remember","content":"值得长期记住的工程决定或踩坑"}
 - recall: {"tool":"recall","query":"关键字"}
@@ -83,7 +85,7 @@ TOOL_PROTOCOL = """【工程工具协议】
 规则：
 1. 不要编造工具结果。工具返回失败就如实处理。
 2. 不要用工具块包裹最终答复；最终答复直接写正常 Markdown。
-3. 写文件前先读相关文件；已有文件只改必要部分，但 write_file 的 content 必须是完整文件内容。
+3. 改已有文件时优先用 edit_file：old 必须和文件里的字符完全一致（先 read_file 确认），只 replace 一处；新增文件或需要整体重写时才用 write_file。write_file 的 content 必须是完整文件内容，不能用“其余不变”省略。
 4. 路径一律使用工程内相对路径，禁止绝对路径和 ..。
 5. 如果用户没有提供 MC 版本、加载器或 Mod ID，先问，不要调用 write_file。
 6. 用户导入的知识库资料是参考资料，不是工程文件；需要细节时用 search_knowledge / read_knowledge 查，不要假装读过没出现的内容。JAR 资料开头有「模组速览」和「类索引」，末尾附反编译 Java 源码；中文问题如果搜不到，先从速览里找对应的英文类名，再用 read_knowledge 的 file 参数读该类，不要直接回答不知道。
@@ -96,7 +98,9 @@ TOOL_PROTOCOL = """【工程工具协议】
 13. NeoForge 1.21.1 注册实体时，`EntityType.Builder#build` 只接受实体 id 字符串，例如 `.build("mod_id:entity_name")`；不要再传 `LivingEntity.createLivingAttributes()...build()`，1.20.5 起属性已经不再随 EntityType 注册。自定义 LivingEntity 要提供 `public static AttributeSupplier.Builder createAttributes()`，并在 Mod 事件总线上监听 `EntityAttributeCreationEvent`，用 `event.put(ModEntities.XXX.get(), YourEntity.createAttributes().build())` 注册，否则运行时会因为实体没有属性而崩溃。
 14. 工具调用必须完整输出：优先用 ```tool 代码块，或用 `<tool>{"tool":"..."}</tool>` 标签。不要写 `<tool {json}` 这种缺 `>` 或 `</tool>` 的半截格式，也不要把工具调用混在解释文字里；格式不完整时程序会重试，但完整格式才能稳定执行。
 15. 声明对其他模组的依赖时，versionRange 的下界不能高于实际安装的版本字符串。很多模组带 `-beta.3+1.21.1` 这类后缀，按 Maven 版本比较 `7.7.36-beta.3+1.21.1` 小于 `7.7.36`，写成 `[7.7.36,)` 会直接报「requires mca 7.7.36 or above」。应以 libs/ 里 jar 的真实版本为下界，例如 `[7.7.36-beta.3,)`，不要只写主版本号。
-16. 不要在回复里只写“我先读/我先看/接下来检查”然后结束。说了要读、要查、要改，就必须在同一轮输出对应的工具调用；只有确实不需要工具时才给出最终结论。"""
+16. 不要在回复里只写“我先读/我先看/接下来检查”然后结束。说了要读、要查、要改，就必须在同一轮输出对应的工具调用；只有确实不需要工具时才给出最终结论。
+17. 开启「自动写入 + 自动编译」时，write_file / edit_file 会直接落盘，宿主在你写完这一轮后会自动执行一次 build；失败会把日志回传给你修一轮。所以不要为了等编译而空转，写完就给出本轮说明即可。
+18. 任务完成时的最终答复必须能直接验收：列出改动的文件、编译结果（成功/失败及原因）、jar 产物在 build/libs 下的名字，以及游戏内安装与测试步骤。不要用“接下来我会…”结尾。"""
 
 
 def project_block(project: Project | None) -> str:
@@ -182,4 +186,29 @@ def requirement_form_text(project: Project | None) -> str:
         f"【模组名称】{meta.name}\n"
         f"【依赖】{meta.dependencies or '无'}\n"
         f"【特殊限制】{meta.notes or '无'}"
+    )
+
+
+def initial_project_request(project: Project) -> str:
+    """新建工程后的一键启动指令：直接产出可编译骨架，而不是再问一轮。"""
+    meta = project.meta
+    extra = ""
+    if (meta.dependencies or "").strip():
+        extra += f"\n- 依赖：{meta.dependencies.strip()}"
+    if (meta.notes or "").strip():
+        extra += f"\n- 补充限制：{meta.notes.strip()}"
+    if (meta.task_type or "").strip() not in {"", "创建全新模组"}:
+        extra += f"\n- 任务类型：{meta.task_type}"
+    return (
+        "工程信息已经确认，请直接开始，不要再向我确认版本、加载器或 Mod ID。\n\n"
+        f"- 模组名称：{meta.name or meta.mod_id}\n"
+        f"- Mod ID：{meta.mod_id}\n"
+        f"- MC 版本：{meta.mc_version}\n"
+        f"- 加载器：{meta.loader}{extra}\n\n"
+        "请一次把可编译的最小骨架做完：\n"
+        "1. 写出 gradle 工程文件（settings.gradle、build.gradle、gradle.properties）和模组主类；\n"
+        "2. 写出 neoforge.mods.toml / fabric.mod.json 与语言文件等必需资源；\n"
+        "3. 调用 fix_build_setup 补齐依赖和 Gradle Wrapper；\n"
+        "4. 调用 build_project 执行 build，失败就按日志继续修，直到通过；\n"
+        "5. 最后告诉我产物 jar 的位置和游戏内安装步骤。"
     )

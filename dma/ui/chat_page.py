@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, Qt, Signal
+from PySide6.QtCore import QEvent, Qt, QTimer, Signal
 from PySide6.QtWidgets import (
+    QCheckBox,
     QFileDialog,
     QHBoxLayout,
     QLabel,
@@ -21,7 +22,7 @@ from PySide6.QtWidgets import (
 from .. import project as project_mod
 from .. import sessions
 from ..agent import AgentWorker, PendingFile, apply_pending
-from ..prompt import requirement_form_text
+from ..prompt import initial_project_request, requirement_form_text
 from .widgets import ChatView, NewProjectDialog, TextPreviewDialog, card, tiny
 
 
@@ -148,12 +149,24 @@ class ChatPage(QWidget):
 
         row = QHBoxLayout()
         row.setSpacing(8)
+        self.auto_apply_box = QCheckBox("自动写入")
+        self.auto_apply_box.setToolTip("生成的文件直接写进工程；覆盖前仍会备份。")
+        self.auto_apply_box.toggled.connect(self._on_auto_apply)
+        self.auto_build_box = QCheckBox("自动编译")
+        self.auto_build_box.setToolTip(
+            "每轮写入后自动执行 Gradle build；失败时让模型按日志修一轮。"
+        )
+        self.auto_build_box.toggled.connect(self._on_auto_build)
         self.form_btn = QPushButton("插入需求单")
         self.form_btn.setObjectName("Ghost")
         self.form_btn.clicked.connect(self._insert_form)
         self.clear_btn = QPushButton("清空对话")
         self.clear_btn.setObjectName("Ghost")
         self.clear_btn.clicked.connect(self._clear_chat)
+        self.continue_btn = QPushButton("继续")
+        self.continue_btn.setObjectName("Ghost")
+        self.continue_btn.setToolTip("上一轮停在半路时，让它接着执行。")
+        self.continue_btn.clicked.connect(self._continue)
         self.stop_btn = QPushButton("停止")
         self.stop_btn.setObjectName("Danger")
         self.stop_btn.setEnabled(False)
@@ -161,15 +174,19 @@ class ChatPage(QWidget):
         self.send_btn = QPushButton("发送")
         self.send_btn.setObjectName("Primary")
         self.send_btn.clicked.connect(self._send)
+        row.addWidget(self.auto_apply_box)
+        row.addWidget(self.auto_build_box)
         row.addWidget(self.form_btn)
         row.addWidget(self.clear_btn)
         row.addStretch(1)
+        row.addWidget(self.continue_btn)
         row.addWidget(self.stop_btn)
         row.addWidget(self.send_btn)
         compose.addLayout(row)
         root.addWidget(composer)
 
         self.input.installEventFilter(self)
+        self._sync_mode_boxes()
 
     # ------------------------------------------------------------------
     def eventFilter(self, obj, event):  # noqa: N802
@@ -181,6 +198,59 @@ class ChatPage(QWidget):
                 self._send()
                 return True
         return super().eventFilter(obj, event)
+
+    def showEvent(self, event):  # noqa: N802
+        super().showEvent(event)
+        self._sync_mode_boxes()
+
+    def _sync_mode_boxes(self) -> None:
+        for box, value in (
+            (self.auto_apply_box, self.main.config.auto_apply),
+            (
+                self.auto_build_box,
+                self.main.config.auto_build and self.main.config.auto_apply,
+            ),
+        ):
+            box.blockSignals(True)
+            box.setChecked(bool(value))
+            box.blockSignals(False)
+        self.auto_build_box.setEnabled(bool(self.main.config.auto_apply))
+
+    def _on_auto_apply(self, checked: bool) -> None:
+        self.main.config.auto_apply = bool(checked)
+        self.main.save_config()
+        self._sync_mode_boxes()
+        self._refresh_pending_hint()
+        self.main.status(
+            "自动写入已开启：文件直接落盘，覆盖前备份。"
+            if checked
+            else "自动写入已关闭：生成的文件会先进入待写入列表。"
+        )
+
+    def _on_auto_build(self, checked: bool) -> None:
+        self.main.config.auto_build = bool(checked)
+        self.main.save_config()
+        self.main.status(
+            "自动编译已开启：每轮写入后自动执行 Gradle build。"
+            if checked
+            else "自动编译已关闭。"
+        )
+
+    def _continue(self) -> None:
+        if self.project is None:
+            QMessageBox.information(self, "还没有工程", "请先新建或打开一个工程。")
+            return
+        self.ask("继续。请接着上一步把没做完的事情执行完；如果已经完成，直接给出最终结论。")
+
+    def _refresh_pending_hint(self) -> None:
+        if not self.pending_tree.topLevelItemCount():
+            self.pending_hint.setText(
+                "助手生成的文件先放在这里，确认后再写入工程；覆盖前会自动备份。"
+                if not self.main.config.auto_apply
+                else "当前是自动写入模式：生成后直接写进工程，并在这里留下记录；覆盖前会自动备份。"
+            )
+            return
+        self._set_pending(self._pending)
 
     # ------------------------------------------------------------------
     def _restore_project(self) -> None:
@@ -251,9 +321,21 @@ class ChatPage(QWidget):
         if dialog.exec() != dialog.DialogCode.Accepted:
             return
         self.main.config.project_root = str(dialog.root.text().strip())
+        auto_start = bool(dialog.auto_start.isChecked())
+        if auto_start:
+            self.main.config.auto_apply = True
+            self.main.config.auto_build = True
+        self.main.save_config()
+        self._sync_mode_boxes()
         self._set_project(dialog.project)
         self.main.status(f"工程已创建：{dialog.project.root}")
-        self.input.setFocus()
+        if not auto_start:
+            self.input.setFocus()
+            return
+        if not self.main.ai_ready():
+            self.main.status("工程已创建。请先在「设置」里配置模型，再点「继续」开始。")
+            return
+        QTimer.singleShot(0, lambda: self.ask(initial_project_request(dialog.project)))
 
     def open_project(self) -> None:
         folder = QFileDialog.getExistingDirectory(
@@ -439,6 +521,9 @@ class ChatPage(QWidget):
         self.open_btn.setEnabled(not running)
         self.recent_btn.setEnabled(not running)
         self.delete_btn.setEnabled(not running and self.project is not None)
+        self.continue_btn.setEnabled(not running)
+        self.auto_apply_box.setEnabled(not running)
+        self.auto_build_box.setEnabled(not running and bool(self.main.config.auto_apply))
         self.send_btn.setText("生成中…" if running else "发送")
 
     def _on_assistant(self, text: str) -> None:

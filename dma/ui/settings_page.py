@@ -177,6 +177,7 @@ class SettingsPage(QWidget):
         root_layout.addWidget(self.project_root, 1)
         root_layout.addWidget(pick)
         self.auto_apply = QCheckBox("生成后不询问，直接写入工程文件（仍会备份）")
+        self.auto_build = QCheckBox("写入后自动执行 Gradle build（失败时把日志交给助手修一轮）")
         self.max_steps = QSpinBox()
         self.max_steps.setRange(0, 999)
         self.max_steps.setSpecialValueText("不限制")
@@ -194,10 +195,17 @@ class SettingsPage(QWidget):
         form2.addRow("界面字号", self.font_size)
         behavior_layout.addLayout(form2)
         behavior_layout.addWidget(self.auto_apply)
+        behavior_layout.addWidget(self.auto_build)
         behavior_layout.addWidget(
             tiny(
                 "默认关闭自动写入：文件先进入右侧待确认列表。"
                 "开启后直接写入工程，并在列表里留下“已自动写入”记录，仍会备份。"
+            )
+        )
+        behavior_layout.addWidget(
+            tiny(
+                "自动编译需要同时开启自动写入；每轮写完执行一次 build，"
+                "失败时自动把日志交回助手修一轮，最多连续编译两次。"
             )
         )
         behavior_layout.addWidget(
@@ -274,6 +282,7 @@ class SettingsPage(QWidget):
         self.timeout.setValue(int(ai_cfg.timeout))
         self.project_root.setText(config.project_root)
         self.auto_apply.setChecked(bool(config.auto_apply))
+        self.auto_build.setChecked(bool(config.auto_build))
         self.max_steps.setValue(int(config.max_steps))
         self.context_turns.setValue(int(config.context_turns))
         self.font_size.setValue(int(config.font_size))
@@ -329,6 +338,7 @@ class SettingsPage(QWidget):
         config.ai = self._collect_ai()
         config.project_root = self.project_root.text().strip() or str(paths.default_project_root())
         config.auto_apply = self.auto_apply.isChecked()
+        config.auto_build = self.auto_build.isChecked()
         config.max_steps = self.max_steps.value()
         config.context_turns = self.context_turns.value()
         config.font_size = self.font_size.value()
