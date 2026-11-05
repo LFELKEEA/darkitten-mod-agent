@@ -22,10 +22,10 @@ BUILD = ROOT / "build"
 APP_DIST = DIST / "DarkittenModAgent"
 ZIP_NAME = f"DarkittenModAgent-{APP_VERSION}.zip"
 NOTES = [
-    "对话里的助手现在可以自己编译：新增 build_project 工具，直接执行 build / runClient / runServer / runDatagen，并把 Gradle 日志和产物大小回传给模型，不再要求用户手动运行 gradlew 或粘贴日志。",
-    "编译前自动准备 JDK、Wrapper、libs 本地依赖和 Maven 镜像代理；缺少本地 jar 或 Gradle 版本不够时，会自动补齐并重试一次。",
-    "助手根据失败日志继续改代码并再次编译，失败信息会保留末尾关键日志，方便定位到具体文件和行。",
-    "状态栏会显示正在执行的 Gradle 任务，长时间构建可以随时取消。",
+    "修复 NeoForge 开发客户端启动失败：编译前自动补上 ModDevGradle 的 mods { sourceSet sourceSets.main }，避免 Mixin 在启动时报找不到类。",
+    "修复数据生成：自动把无效的 clientData() / serverData() 改成 data()，并补上 --mod / --output / --existing 参数，生成结果写入 src/generated/resources。",
+    "数据生成按钮和 build_project 会根据工程声明的 run 自动选择 runData（NeoForge）或 runDatagen（Fabric）。",
+    "ProcessResources 使用 expand 替换中文时自动补 filteringCharset = 'UTF-8'，防止模组显示名乱码。",
 ]
 
 

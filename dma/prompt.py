@@ -77,7 +77,7 @@ TOOL_PROTOCOL = """【工程工具协议】
 - read_knowledge 分页读整份资料: {"tool":"read_knowledge","id":1,"offset":0}
 - decompile_jar 把知识库里的 JAR 反编译进工程: {"tool":"decompile_jar","knowledge_id":1,"target":"reference/decompiled/pohypskin"}
 - fix_build_setup 自动补齐 libs/*.jar 和兼容的 Gradle Wrapper: {"tool":"fix_build_setup"}
-- build_project 自己执行 Gradle 并把日志和产物位置返回给你（task 可选 build / runClient / runServer / runDatagen）: {"tool":"build_project","task":"build"}
+- build_project 自己执行 Gradle 并把日志和产物位置返回给你（task 可选 build / runClient / runServer / runData / runDatagen；数据生成按工程自动选择）: {"tool":"build_project","task":"build"}
 - fetch_url: {"tool":"fetch_url","url":"https://api.modrinth.com/v2/..."}
 
 规则：
@@ -89,7 +89,7 @@ TOOL_PROTOCOL = """【工程工具协议】
 6. 用户导入的知识库资料是参考资料，不是工程文件；需要细节时用 search_knowledge / read_knowledge 查，不要假装读过没出现的内容。JAR 资料开头有「模组速览」和「类索引」，末尾附反编译 Java 源码；中文问题如果搜不到，先从速览里找对应的英文类名，再用 read_knowledge 的 file 参数读该类，不要直接回答不知道。
 7. 知识库现在按整份文件返回源码：search_knowledge 和 read_knowledge 的 query 命中后会给出完整的 ## 源码：路径 条目，read_knowledge 的 file 参数一次返回整个 .java（单文件几万到十几万字符都不会截断）。所以不要因为一次没看到某个方法就说资料不全。找不到某个类时，先 read_knowledge 用 file="类名.java" 读全文，再用返回的源码文件清单核对；只有清单里确实没有这个类，才可以说「这份资料里没有这个类」，不能说「反编译失败」或「源码不完整」。
 8. 判断「反编译是否完整」时只看源码，不看类结构摘要：类结构里的「方法」最多列 300 个、字段最多 150 个，还有「…还有 N 个」这种提示，这是摘要截断，不代表源码缺失。要用 read_knowledge 的 file 参数读整个 .java（例如 file="Hypnosis.java"）来确认实现。不要因为摘要里没看到方法体就告诉用户源码不完整。
-9. 本地 jar 依赖和 Gradle 版本不需要让用户手动操作：build.gradle 里写 `compileOnly files('libs/xxx.jar')` 之后调用 fix_build_setup，程序会从下载目录、桌面、工程目录和知识库来源目录自动找同名或带前缀的 jar 复制进 libs/；ModDevGradle / NeoGradle 工程会把 Wrapper 自动切到兼容的 Gradle 8.x。找不到 jar 时如实说明缺哪个文件、已经搜索过哪些位置，不要编造下载地址，也不要让用户手动改 gradle-wrapper.properties。
+9. 本地 jar 依赖和 Gradle 版本不需要让用户手动操作：build.gradle 里写 `compileOnly files('libs/xxx.jar')` 之后调用 fix_build_setup，程序会从下载目录、桌面、工程目录和知识库来源目录自动找同名或带前缀的 jar 复制进 libs/；ModDevGradle / NeoGradle 工程会把 Wrapper 自动切到兼容的 Gradle 8.x。找不到 jar 时如实说明缺哪个文件、已经搜索过哪些位置，不要编造下载地址，也不要让用户手动改 gradle-wrapper.properties。NeoForge 的 ModDevGradle 工程必须在 `neoForge { }` 里写 `mods { "<mod_id>" { sourceSet sourceSets.main } }`，否则编译能过、开发客户端却会在启动时报「指定的 mixin 未找到」；数据生成运行的类型只能是 `data()`（不要写 `clientData()` / `serverData()`，会报 unknown run），并且要带参数：`programArguments.addAll '--mod', '<mod_id>', '--all', '--output', file('src/generated/resources/').getAbsolutePath(), '--existing', file('src/main/resources/').getAbsolutePath()`；ProcessResources 里用 `expand` 替换中文时要加 `filteringCharset = 'UTF-8'`，避免显示名变成乱码。
 10. 工程里的 reference/decompiled 是反编译参考源码，不在编译路径内；迁移时先读 INDEX.md 和对应 .java，再把改写后的完整文件写到 src/main/java，不要把参考目录当成已经能编译的代码。用户要把知识库里的 JAR 变成工程内源码时，用 decompile_jar 工具写到 reference/decompiled/，会把主 JAR 和它自己的内嵌模块一起展开。
 11. NeoForge 依赖下载失败不需要让用户改 hosts 或配镜像：程序检测到 maven.neoforged.net 连不上（502、连接被拒、DNS 污染、PKIX）会自动启用本机 Maven 代理并重试，日志里会写「已切换到镜像模式」。这类报错直接调用 build_project 重试即可，不要给出改 DNS、挂代理、手动替换仓库地址的方案。
 12. 你具备执行 Gradle 的能力：需要验证代码能不能编译、jar 有没有生成、运行报错是什么时，直接调用 build_project，不要说自己没有执行 Gradle 的工具，也不要让用户手动打开终端执行 gradlew 或把日志贴回来。编译失败就依据返回的日志继续改代码，改完再次调用 build_project，直到编译通过或确认是当前环境无法解决的问题。失败时报错位置和原因要具体到文件和行，不要只说「编译失败」。"""

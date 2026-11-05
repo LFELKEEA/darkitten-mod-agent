@@ -2,7 +2,7 @@
 
 只写 Minecraft Java 模组的独立桌面 Agent。基于 PySide6，自带对话工作台、技能、连接器和知识库，可从下载站、GitHub 与 Darkitten 启动器获取，并支持自动更新。
 
-当前版本：`0.3.14`
+当前版本：`0.3.15`
 
 ## 功能
 
@@ -14,12 +14,13 @@
 - **连接器**：Modrinth、Fabric Meta、GitHub API 开箱可用，支持自定义 HTTP 接口与 `${ENV}` 密钥引用。
 - **一键准备**：自动挑 JDK（优先 21，缺了就下载 Temurin 21）、补齐 Wrapper、从中科大 / 华为云镜像装好 Gradle 发行包，不用手动配环境变量；大文件走多连接分段下载，断线可续传。
 - **本地依赖自动整理**：`build.gradle` 里写 `files('libs/xxx.jar')` 后，点「编译」或「一键准备」会自动从下载目录、桌面、其它盘符的「下载」文件夹和知识库来源目录找出同名 jar（带中文前缀也认），复制进工程并创建 `libs/`；找不到时才会提示缺哪个文件。
-- **助手自己编译**：对话里的助手可以直接调用 `build_project` 执行 `build` / `runClient` / `runServer` / `runDatagen`，自己准备 JDK、Wrapper、本地 jar 和镜像代理，自己读取日志、改代码、再次编译，直到出包；不需要用户手动执行 `gradlew` 或把日志贴回来。
+- **助手自己编译**：对话里的助手可以直接调用 `build_project` 执行 `build` / `runClient` / `runServer` / 数据生成（NeoForge 用 `runData`，Fabric 用 `runDatagen`，按工程自动选择），自己准备 JDK、Wrapper、本地 jar 和镜像代理，自己读取日志、改代码、再次编译，直到出包；不需要用户手动执行 `gradlew` 或把日志贴回来。
+- **开发运行自动修复**：编译前自动补齐 NeoForge ModDevGradle 的 `mods { sourceSet sourceSets.main }`，修掉无效的 `clientData()` 数据生成运行并补上 `--mod / --output / --existing` 参数，避免「开发客户端 Mixin 找不到类」和「unknown run: clientData」；`ProcessResources` 用 `expand` 替换中文时自动加 `filteringCharset = 'UTF-8'`。
 - **Gradle 版本自适应**：识别到 ModDevGradle / NeoGradle 时自动把 Wrapper 切到 Gradle 8.10.2，其它工程默认 9.8.2；`gradle-wrapper.properties` 损坏会自动重写，编译报 `requires at least Gradle X` 时也会自动升级重试。
 - **NeoForge 依赖自动兜底**：`maven.neoforged.net` 返回 502、连接被拒、被 DNS 污染或证书校验失败时，自动启动本机 Maven 代理并重试；代理按需从国内镜像取文件并缓存，缺的 `neoform-runtime` 和 `minecraft-dependencies` 会在本机合成，不需要手动改 hosts 或配镜像源。
 - **删除工程**：对话页右上角的「删除工程」先把工程目录移到 Windows 回收站，再从最近列表里移除并清掉会话记录；有生成任务或 Gradle 任务在跑时会先拦住。
 - **环境自检**：检查 Java、JAVA_HOME、Gradle、Git、目录写入、资料源连通性和模型通道，给出缺失项与修复建议，可复制报告。
-- **编译运行**：点任务按钮时先自动准备环境，再执行 `gradlew build` / `runClient` / `runServer` / `runDatagen`；日志实时回显，可停止、复制日志、打开 `build/libs`。
+- **编译运行**：点任务按钮时先自动准备环境，再执行 `gradlew build` / `runClient` / `runServer` / 数据生成（`runData` / `runDatagen` 按工程自动选择）；日志实时回显，可停止、复制日志、打开 `build/libs`。
 - **工具轮数**：默认 32 轮，可调到 999；填 0 表示不限制，适合大型工程。
 - **知识库**：导入 txt / md / docx / pdf / jar / 代码和配置文件，自动提取正文、分片；每轮对话前检索相关片段，也能让助手用 `search_knowledge` / `read_knowledge` 按需查。列表里点选文件只加载前 4 万字符预览，上千万字的大 JAR 也不会卡住界面。
 - **模组 JAR 分析**：直接导入现成模组，提取 `fabric.mod.json` / `mods.toml`、语言与资源 JSON、类结构，并用内置 Vineflower 反编译出 Java 源码；开头生成「模组速览 + 类索引」，中文问题也能对上英文类名，做兼容、移植或复刻功能时可直接参考实现。

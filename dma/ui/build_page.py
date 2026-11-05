@@ -150,7 +150,7 @@ class BuildPage(QWidget):
             ("build", "编译", "Primary", "gradlew build：编译并生成 build/libs 里的 jar"),
             ("runClient", "开发客户端", "", "gradlew runClient：启动带本模组的开发客户端"),
             ("runServer", "开发服务端", "", "gradlew runServer：启动开发服务端，测服务端逻辑"),
-            ("runDatagen", "数据生成", "", "gradlew runDatagen：生成配方、模型、标签等资源"),
+            ("runDatagen", "数据生成", "", "数据生成：NeoForge 用 runData，Fabric 用 runDatagen，按工程自动选"),
         ]
         for task, label, style, tip in specs:
             button = QPushButton(label)
@@ -358,18 +358,25 @@ class BuildPage(QWidget):
         self._start_prepare((task, label), reset_upgrade=True)
 
     def _repair_fences(self, root: Path) -> None:
-        """编译前清掉模型写文件时可能带进来的 Markdown 围栏。"""
+        """编译前清掉 Markdown 围栏，并补齐 NeoForge 开发运行缺的 mods 声明。"""
         try:
             fixed = project_mod.repair_fences(root)
         except Exception as exc:  # noqa: BLE001 - 修复失败不阻塞编译
             self._append(f"[预检] 代码围栏检查失败：{exc}")
-            return
-        if not fixed:
-            return
-        self._append("=== 编译前预检：已清理源文件里的 Markdown 代码围栏 ===")
-        for item in fixed:
-            self._append(f"[预检] 修正 {item}")
-        self.main.status("已修正代码围栏，开始编译")
+            fixed = []
+        if fixed:
+            self._append("=== 编译前预检：已清理源文件里的 Markdown 代码围栏 ===")
+            for item in fixed:
+                self._append(f"[预检] 修正 {item}")
+        try:
+            scripts = project_mod.repair_build_scripts(root)
+        except Exception as exc:  # noqa: BLE001 - 修复失败不阻塞编译
+            self._append(f"[预检] 构建脚本检查失败：{exc}")
+            scripts = []
+        for item in scripts:
+            self._append(f"[预检] 已修正构建脚本 {item}（补齐开发运行配置）")
+        if fixed or scripts:
+            self.main.status("已修正构建脚本，开始编译")
 
     def _known_jar_dirs(self) -> list[Path]:
         """知识库里导入过的 JAR 所在目录，自动找 libs/ 依赖时优先看这些地方。"""

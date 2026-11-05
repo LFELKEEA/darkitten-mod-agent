@@ -89,6 +89,7 @@ def build_project(
     root = Path(project_root)
     if not root.is_dir():
         raise BuilderError(f"工程目录不存在：{root}")
+    task = gradle.resolve_run_task(root, task)
     if task not in gradle.GRADLE_TASKS:
         raise BuilderError(f"不支持的任务：{task}")
     if not gradle.has_gradle_files(root):
@@ -100,6 +101,8 @@ def build_project(
     fixed = project_mod.repair_fences(root)
     for item in fixed:
         logger(f"[预检] 已清理代码围栏：{item}")
+    for item in project_mod.repair_build_scripts(root):
+        logger(f"[预检] 已修正构建脚本：{item}")
 
     logger("=== 准备构建环境 ===")
     prepared = toolchain.prepare(

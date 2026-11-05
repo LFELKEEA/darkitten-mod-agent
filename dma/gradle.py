@@ -13,8 +13,14 @@ GRADLE_TASKS = {
     "build": "编译",
     "runClient": "开发客户端",
     "runServer": "开发服务端",
+    "runData": "数据生成",
     "runDatagen": "数据生成",
 }
+
+# NeoForge 的 ModDevGradle 把数据生成运行命名为 data（任务 runData），
+# Fabric Loom 用的是 datagen（任务 runDatagen）。界面统一叫「数据生成」，
+# 真正执行前按构建脚本里声明的 run 自动选。
+DATA_RUN_TASKS = ("runData", "runDatagen")
 
 CREATE_NO_WINDOW = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
 
@@ -160,6 +166,39 @@ def has_gradle_files(project_root: Path | None) -> bool:
     return any((root / name).is_file() for name in BUILD_FILES)
 
 
+def _build_script_text(project_root: Path) -> str:
+    parts: list[str] = []
+    for name in BUILD_FILES:
+        path = Path(project_root) / name
+        if not path.is_file():
+            continue
+        try:
+            if path.stat().st_size > 1_000_000:
+                continue
+            parts.append(path.read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            continue
+    return "\n".join(parts)
+
+
+def resolve_run_task(project_root: Path | None, task: str) -> str:
+    """把界面的「数据生成」映射到工程真正声明的 Gradle 任务。"""
+    if task not in DATA_RUN_TASKS or project_root is None:
+        return task
+    text = _build_script_text(Path(project_root))
+    datagen = re.search(r"(?m)^\s*datagen\s*\{", text) is not None
+    data = re.search(r"(?m)^\s*data\s*\{", text) is not None
+    if datagen and not data:
+        return "runDatagen"
+    if data and not datagen:
+        return "runData"
+    # 没写 runs 或两个 run 都在时，按加载器选：Fabric Loom 用 runDatagen，
+    # NeoForge ModDevGradle 用 runData。
+    if "fabric-loom" in text:
+        return "runDatagen"
+    return "runData"
+
+
 def resolve_launch(
     project_root: Path,
     task: str,
@@ -167,11 +206,12 @@ def resolve_launch(
     system: str | None = None,
     init_script: Path | None = None,
 ) -> Launch:
-    if task not in GRADLE_TASKS:
-        raise GradleError(f"不支持的任务：{task}")
     root = Path(project_root)
     if not root.is_dir():
         raise GradleError(f"工程目录不存在：{root}")
+    task = resolve_run_task(root, task)
+    if task not in GRADLE_TASKS:
+        raise GradleError(f"不支持的任务：{task}")
     extra: list[str] = []
     if init_script is not None:
         extra = ["--init-script", str(init_script)]

@@ -372,6 +372,121 @@ def repair_fences(root: Path) -> list[str]:
     return fixed
 
 
+def repair_build_scripts(root: Path) -> list[str]:
+    """修掉能自动补的构建脚本缺陷，返回改动说明。
+
+    NeoForge 的 ModDevGradle 必须用 mods { ... } 声明主源码集，否则编译能过，
+    但开发运行拿不到 modFolders，Mixin 会在启动时报「指定的 mixin 未找到」。
+    这类问题不该让用户自己猜，编译前直接补齐。
+    """
+    base = Path(root).resolve()
+    changed: list[str] = []
+    for name in ("build.gradle", "build.gradle.kts"):
+        path = base / name
+        if not path.is_file():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        original = text
+        if name == "build.gradle":
+            text = _ensure_neoforge_mods(base, text)
+            text = _ensure_data_run(base, text)
+            text = _ensure_filtering_charset(text)
+        if text != original:
+            try:
+                write_text(base, name, text)
+            except (OSError, ProjectError):
+                continue
+            changed.append(name)
+    return changed
+
+
+def _gradle_mod_id(root: Path) -> str:
+    try:
+        text = (root / "gradle.properties").read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        text = ""
+    match = re.search(r"(?m)^\s*mod_id\s*=\s*([A-Za-z0-9_.-]+)", text)
+    if match:
+        return match.group(1).strip()
+    return re.sub(r"[^a-z0-9_]", "_", root.name.lower()) or "mod"
+
+
+def _ensure_neoforge_mods(root: Path, text: str) -> str:
+    if "net.neoforged.moddev" not in text and not re.search(
+        r"(?m)^\s*neoForge\s*\{", text
+    ):
+        return text
+    if re.search(r"(?m)^\s*mods\s*\{", text):
+        return text
+    neo = re.search(r"(?m)^([ \t]*)neoForge\s*\{", text)
+    if neo is None:
+        return text
+    runs = re.search(r"(?m)^([ \t]*)runs\s*\{", text[neo.end():])
+    if runs is None:
+        return text
+    indent = runs.group(1)
+    inner = indent + "    "
+    mod_id = _gradle_mod_id(root)
+    block = (
+        f"{indent}mods {{\n"
+        f'{inner}"{mod_id}" {{\n'
+        f"{inner}    sourceSet sourceSets.main\n"
+        f"{inner}}}\n"
+        f"{indent}}}\n\n"
+    )
+    insert_at = neo.end() + runs.start()
+    return text[:insert_at] + block + text[insert_at:]
+
+
+def _ensure_data_run(root: Path, text: str) -> str:
+    """补齐 NeoForge 数据生成运行。
+
+    ModDevGradle 的运行类型只有 client / server / data / gameTestServer / junit，
+    写成 clientData() 会让 :prepareDataRun 直接失败（Trying to prepare unknown
+    run: clientData）。数据生成还必须带 --mod / --output / --existing，否则
+    即使任务跑起来也不会把文件写到 src/generated/resources。
+    """
+    match = re.search(r"(?ms)^([ \t]*)data\s*\{.*?^\1\}", text)
+    if match is None:
+        return text
+    indent = match.group(1)
+    inner = indent + "    "
+    block = match.group(0)
+    updated = re.sub(r"\b(?:clientData|serverData)\s*\(\s*\)", "data()", block)
+    if not re.search(r"\bdata\s*\(\s*\)", updated) and not re.search(
+        r"\btype\s*=", updated
+    ):
+        updated = updated.replace(f"{indent}}}", f"{inner}data()\n{indent}}}", 1)
+    if "programArguments" not in updated:
+        mod_id = _gradle_mod_id(root)
+        args = (
+            f"{inner}programArguments.addAll '--mod', '{mod_id}', '--all', "
+            f"'--output', file('src/generated/resources/').getAbsolutePath(), "
+            f"'--existing', file('src/main/resources/').getAbsolutePath()\n"
+        )
+        updated = updated.replace(f"{indent}}}", args + f"{indent}}}", 1)
+    if updated == block:
+        return text
+    return text[: match.start()] + updated + text[match.end():]
+
+
+def _ensure_filtering_charset(text: str) -> str:
+    if "ProcessResources" not in text or "expand" not in text:
+        return text
+    if "filteringCharset" in text:
+        return text
+    match = re.search(
+        r"(?m)^([ \t]*)tasks\.withType\(ProcessResources\)[^\n]*\{", text
+    )
+    if match is None:
+        return text
+    indent = match.group(1) + "    "
+    return text[: match.end()] + f"\n{indent}filteringCharset = 'UTF-8'" + text[match.end():]
+
+
 def write_text(root: Path, relative: str, content: str) -> Path:
     content = strip_wrapping_fences(relative, content)
     if len(content) > MAX_WRITE_CHARS:

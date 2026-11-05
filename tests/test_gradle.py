@@ -16,8 +16,40 @@ class GradleResolveTests(TempDataCase):
     def test_tasks(self) -> None:
         self.assertEqual(
             set(gradle.GRADLE_TASKS),
-            {"build", "runClient", "runServer", "runDatagen"},
+            {"build", "runClient", "runServer", "runData", "runDatagen"},
         )
+
+    def test_resolve_data_task_by_declared_run(self) -> None:
+        root = self.tmp / "mod"
+        root.mkdir()
+        (root / "build.gradle").write_text(
+            "neoForge {\n    runs {\n        data { clientData() }\n    }\n}\n",
+            encoding="utf-8",
+        )
+        self.assertEqual(gradle.resolve_run_task(root, "runDatagen"), "runData")
+
+        (root / "build.gradle").write_text(
+            "loom {\n    runs {\n        datagen { inherit client() }\n    }\n}\n",
+            encoding="utf-8",
+        )
+        self.assertEqual(gradle.resolve_run_task(root, "runData"), "runDatagen")
+
+    def test_resolve_data_task_falls_back_to_loader(self) -> None:
+        root = self.tmp / "mod"
+        root.mkdir()
+        (root / "build.gradle").write_text(
+            "plugins { id 'fabric-loom' version '1.9' }\n", encoding="utf-8"
+        )
+        self.assertEqual(gradle.resolve_run_task(root, "runData"), "runDatagen")
+
+        (root / "build.gradle").write_text(
+            "plugins { id 'net.neoforged.moddev' version '2.0' }\n", encoding="utf-8"
+        )
+        self.assertEqual(gradle.resolve_run_task(root, "runDatagen"), "runData")
+
+    def test_resolve_non_data_task_is_untouched(self) -> None:
+        self.assertEqual(gradle.resolve_run_task(None, "build"), "build")
+        self.assertEqual(gradle.resolve_run_task(None, "runClient"), "runClient")
 
     def test_wrapper_preferred(self) -> None:
         root = self.tmp / "mod"

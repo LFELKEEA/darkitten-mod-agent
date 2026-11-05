@@ -109,6 +109,108 @@ class ProjectTests(TempDataCase):
         )
         self.assertEqual(project_mod.repair_fences(project.root), [])
 
+    def test_repair_build_scripts_adds_neoforge_mods(self) -> None:
+        root = self.tmp / "neoforge"
+        root.mkdir()
+        (root / "gradle.properties").write_text(
+            "mod_id=stardust_tools\n", encoding="utf-8"
+        )
+        (root / "build.gradle").write_text(
+            "neoForge {\n"
+            "    version = project.neo_version\n"
+            "    runs {\n"
+            "        client { client() }\n"
+            "    }\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        self.assertEqual(project_mod.repair_build_scripts(root), ["build.gradle"])
+        text = (root / "build.gradle").read_text(encoding="utf-8")
+        self.assertIn('mods {\n        "stardust_tools" {', text)
+        self.assertIn("sourceSet sourceSets.main", text)
+        self.assertLess(text.index("mods {"), text.index("runs {"))
+        self.assertEqual(project_mod.repair_build_scripts(root), [])
+
+    def test_repair_build_scripts_keeps_existing_mods(self) -> None:
+        root = self.tmp / "neoforge"
+        root.mkdir()
+        original = (
+            "neoForge {\n"
+            '    mods {\n        "mine" {\n            sourceSet sourceSets.main\n'
+            "        }\n    }\n"
+            "    runs {\n        client { client() }\n    }\n"
+            "}\n"
+        )
+        (root / "build.gradle").write_text(original, encoding="utf-8")
+        self.assertEqual(project_mod.repair_build_scripts(root), [])
+        self.assertEqual(
+            (root / "build.gradle").read_text(encoding="utf-8"), original
+        )
+
+    def test_repair_build_scripts_fixes_data_run(self) -> None:
+        root = self.tmp / "neoforge"
+        root.mkdir()
+        (root / "gradle.properties").write_text(
+            "mod_id=stardust_tools\n", encoding="utf-8"
+        )
+        (root / "build.gradle").write_text(
+            "neoForge {\n"
+            "    runs {\n"
+            "        data {\n"
+            "            clientData()\n"
+            "        }\n"
+            "    }\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        self.assertEqual(project_mod.repair_build_scripts(root), ["build.gradle"])
+        text = (root / "build.gradle").read_text(encoding="utf-8")
+        self.assertNotIn("clientData", text)
+        self.assertIn("data()", text)
+        self.assertIn("programArguments.addAll '--mod', 'stardust_tools'", text)
+        self.assertIn("src/generated/resources", text)
+        self.assertEqual(project_mod.repair_build_scripts(root), [])
+
+    def test_repair_build_scripts_keeps_valid_data_run(self) -> None:
+        root = self.tmp / "neoforge"
+        root.mkdir()
+        original = (
+            "neoForge {\n"
+            "    mods {\n"
+            '        "mine" {\n'
+            "            sourceSet sourceSets.main\n"
+            "        }\n"
+            "    }\n"
+            "    runs {\n"
+            "        data {\n"
+            "            data()\n"
+            "            programArguments.addAll '--mod', 'mine', '--all'\n"
+            "        }\n"
+            "    }\n"
+            "}\n"
+        )
+        (root / "build.gradle").write_text(original, encoding="utf-8")
+        self.assertEqual(project_mod.repair_build_scripts(root), [])
+        self.assertEqual(
+            (root / "build.gradle").read_text(encoding="utf-8"), original
+        )
+
+    def test_repair_build_scripts_adds_utf8_filtering(self) -> None:
+        root = self.tmp / "neoforge"
+        root.mkdir()
+        (root / "build.gradle").write_text(
+            "tasks.withType(ProcessResources).configureEach {\n"
+            "    filesMatching(['META-INF/neoforge.mods.toml']) {\n"
+            "        expand(version: project.version)\n"
+            "    }\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        self.assertEqual(project_mod.repair_build_scripts(root), ["build.gradle"])
+        text = (root / "build.gradle").read_text(encoding="utf-8")
+        self.assertIn("filteringCharset = 'UTF-8'", text)
+        self.assertEqual(project_mod.repair_build_scripts(root), [])
+
     def test_write_rejects_wrong_type(self) -> None:
         project = self.make()
         (project.root / "folder").mkdir()

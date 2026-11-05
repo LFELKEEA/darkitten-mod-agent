@@ -72,6 +72,7 @@ class BuilderTests(TempDataCase):
             gradle=mock.Mock(
                 GRADLE_TASKS=gradle.GRADLE_TASKS,
                 has_gradle_files=gradle.has_gradle_files,
+                resolve_run_task=gradle.resolve_run_task,
                 resolve_launch=gradle.resolve_launch,
                 build_env=gradle.build_env,
                 GradleRunner=FakeRunner,
@@ -81,7 +82,10 @@ class BuilderTests(TempDataCase):
                 is_missing_jar_error=mock.Mock(return_value=False),
                 ensure_local_jars=mock.Mock(),
             ),
-            project_mod=mock.Mock(repair_fences=mock.Mock(return_value=[])),
+            project_mod=mock.Mock(
+                repair_fences=mock.Mock(return_value=[]),
+                repair_build_scripts=mock.Mock(return_value=[]),
+            ),
             wrapper=mock.Mock(),
         )
         self.patch.start()
@@ -147,13 +151,17 @@ class BuilderTests(TempDataCase):
             gradle=mock.Mock(
                 GRADLE_TASKS=gradle.GRADLE_TASKS,
                 has_gradle_files=gradle.has_gradle_files,
+                resolve_run_task=gradle.resolve_run_task,
                 resolve_launch=gradle.resolve_launch,
                 build_env=gradle.build_env,
                 GradleRunner=SlowRunner,
                 required_gradle=mock.Mock(return_value=""),
             ),
             deps=mock.Mock(is_missing_jar_error=mock.Mock(return_value=False)),
-            project_mod=mock.Mock(repair_fences=mock.Mock(return_value=[])),
+            project_mod=mock.Mock(
+                repair_fences=mock.Mock(return_value=[]),
+                repair_build_scripts=mock.Mock(return_value=[]),
+            ),
             wrapper=mock.Mock(),
         )
         self.patch.start()
@@ -198,6 +206,7 @@ class BuilderTests(TempDataCase):
             gradle=mock.Mock(
                 GRADLE_TASKS=gradle.GRADLE_TASKS,
                 has_gradle_files=gradle.has_gradle_files,
+                resolve_run_task=gradle.resolve_run_task,
                 resolve_launch=gradle.resolve_launch,
                 build_env=gradle.build_env,
                 GradleRunner=FakeRunner,
@@ -207,7 +216,10 @@ class BuilderTests(TempDataCase):
                 is_missing_jar_error=mock.Mock(return_value=True),
                 ensure_local_jars=mock.Mock(return_value=jars),
             ),
-            project_mod=mock.Mock(repair_fences=mock.Mock(return_value=[])),
+            project_mod=mock.Mock(
+                repair_fences=mock.Mock(return_value=[]),
+                repair_build_scripts=mock.Mock(return_value=[]),
+            ),
             wrapper=mock.Mock(),
         )
         self.patch.start()
