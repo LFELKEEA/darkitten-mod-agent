@@ -21,6 +21,14 @@ class ContextTurnsTests(unittest.TestCase):
         self.assertEqual(Config(context_turns=999).normalized().context_turns, 200)
 
 
+class AutoBuildTests(unittest.TestCase):
+    def test_default_is_on(self) -> None:
+        self.assertTrue(Config().normalized().auto_build)
+
+    def test_disabled_is_kept(self) -> None:
+        self.assertFalse(Config(auto_build=False).normalized().auto_build)
+
+
 class MaxStepsTests(unittest.TestCase):
     def test_default(self) -> None:
         self.assertEqual(Config().normalized().max_steps, DEFAULT_MAX_STEPS)

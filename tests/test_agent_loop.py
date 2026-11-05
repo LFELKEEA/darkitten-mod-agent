@@ -253,6 +253,48 @@ class AgentLoopTests(TempDataCase):
         self.assertIn("hello mod", messages[1][-1]["content"])
         self.assertEqual(run.text, "读到了 hello mod。")
 
+    def test_dsml_tool_call_runs_without_visible_markup(self) -> None:
+        project = make_project(self)
+        (project.root / "note.txt").write_text("hello mod", encoding="utf-8")
+        worker = self.worker(project)
+        reply = (
+            '< | DSLM | calls > < | DSLM | invoke name="tool"> '
+            '<tool>{"tool":"read_file","path":"note.txt"} </|DSML|parameter> '
+            "</|DSML|invoke></|DSML|calls>"
+        )
+        messages: list[list[dict]] = []
+        visible: list[str] = []
+
+        def fake(ai, items):
+            messages.append(list(items))
+            return reply if len(messages) == 1 else "读完了。"
+
+        worker.assistant.connect(visible.append)
+        with mock.patch("dma.agent.ai.request_chat", side_effect=fake):
+            run = worker._loop()
+        self.assertEqual(visible, [])
+        self.assertIn("hello mod", messages[1][-1]["content"])
+        self.assertEqual(run.text, "读完了。")
+
+    def test_unparsable_dsml_does_not_show_raw_markup(self) -> None:
+        project = make_project(self)
+        worker = self.worker(project)
+        reply = (
+            '<|DSML|calls><|DSML|invoke name="tool">'
+            '{"tool":"read_file", broken}<|/DSML|invoke><|/DSML|calls>'
+        )
+        calls: list[int] = []
+
+        def fake(ai, items):
+            calls.append(1)
+            return reply
+
+        with mock.patch("dma.agent.ai.request_chat", side_effect=fake):
+            run = worker._loop()
+        self.assertEqual(len(calls), 3)
+        self.assertNotIn("DSML", run.text)
+        self.assertIn("无法解析的工具调用", run.text)
+
     def test_inline_file_block(self) -> None:
         project = make_project(self)
         worker = self.worker(project)

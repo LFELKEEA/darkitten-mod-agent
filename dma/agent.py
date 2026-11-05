@@ -25,6 +25,14 @@ from .skills import SkillStore
 TOOL_FENCE_RE = re.compile(r"```(?:tool|dma-tool)[ \t]*\r?\n(.*?)\r?\n?```", re.S)
 TOOL_TAG_START_RE = re.compile(r"<tool\b", re.I)
 TOOL_CLOSE_RE = re.compile(r"\s*</tool\s*>", re.I)
+# 部分兼容通道会把原生工具调用包成 <|DSML|calls> / <|DSML|invoke> 这类标记，
+# 大小写、空格和字母顺序（DSML / DSLM）都不稳定，这里放宽匹配。
+DSML_TAG_RE = re.compile(
+    r"<\s*(?:/\s*)?\|\s*/?\s*D\s*S\s*(?:M\s*L|L\s*M)\s*\|\s*[^>]*>", re.I
+)
+DSML_INVOKE_RE = re.compile(
+    r"<\s*\|\s*D\s*S\s*(?:M\s*L|L\s*M)\s*\|\s*invoke\b[^>]*>", re.I
+)
 FENCE_RE = re.compile(r"```([^\n`]*)\n(.*?)\n```", re.S)
 PATH_EXT = (
     "java|kt|kts|gradle|properties|json|json5|toml|yml|yaml|md|txt|xml|"
@@ -152,19 +160,41 @@ def _tool_blocks(text: str) -> list[tuple[str, int, int]]:
         if closing:
             end = closing.end()
         blocks.append((payload, match.start(), end))
+    for match in DSML_INVOKE_RE.finditer(source):
+        if any(start <= match.start() < end for _, start, end in blocks):
+            continue
+        brace = source.find("{", match.end(), min(len(source), match.end() + 4000))
+        if brace == -1:
+            continue
+        # 里面已经有 <tool> 标签时交给上面的分支处理，避免重复执行。
+        if "<tool" in source[match.end():brace].lower():
+            continue
+        payload = _balanced_json(source, brace)
+        if payload is None or '"tool"' not in payload:
+            continue
+        blocks.append((payload, match.start(), brace + len(payload)))
     return blocks
 
 
 def parse_tool_calls(text: str) -> list[ToolCall]:
     calls: list[ToolCall] = []
+    seen: set[str] = set()
     for payload, _, _ in _tool_blocks(text):
+        key = payload.strip()
+        if not key or key in seen:
+            continue
+        seen.add(key)
         calls.extend(_parse_call_payload(payload))
     return calls
 
 
 def _looks_like_tool_attempt(text: str) -> bool:
     return bool(
-        re.search(r"<tool\b|```\s*(?:tool|dma-tool)\b", text or "", re.I)
+        re.search(
+            r"<tool\b|```\s*(?:tool|dma-tool)\b|DSML|DSLM",
+            text or "",
+            re.I,
+        )
     )
 
 
@@ -268,6 +298,7 @@ def strip_tool_blocks(text: str) -> str:
             cursor = max(cursor, end)
         pieces.append(source[cursor:])
         source = "".join(pieces)
+    source = DSML_TAG_RE.sub("", source)
     return re.sub(r"\n{3,}", "\n\n", source).strip()
 
 
@@ -539,6 +570,11 @@ class AgentWorker(QObject):
                     )
                     continue
                 final_text = visible or reply.strip()
+                if not visible and _looks_like_tool_attempt(reply):
+                    final_text = (
+                        "模型连续输出了无法解析的工具调用，本轮先停在这里。"
+                        "请再发送「继续」，或检查当前模型通道是否支持工具调用。"
+                    )
                 if pending_fix and len(run.applied) <= applied_mark:
                     final_text = (
                         final_text

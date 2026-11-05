@@ -54,6 +54,25 @@ class AgentParseTests(unittest.TestCase):
         self.assertEqual(_parse_call_payload("[]"), [])
         self.assertEqual(_parse_call_payload('{"args":{}}'), [])
 
+    def test_parse_dsml_wrapped_tool_calls(self) -> None:
+        variants = [
+            # 实际截图里的写法：DSLM、标签里带空格、闭合标签是 </|DSML|...>
+            '< | DSLM | calls > < | DSLM | invoke name="tool"> '
+            '<tool>{"tool":"read_file","path":"src/main/java/A.java",'
+            '"offset":42000,"max_chars":14000} </|DSML|parameter> '
+            "</|DSML|invoke></|DSML|calls>",
+            # 没有 <tool> 外壳，直接是 JSON；闭合标签写成 <|/DSML|...>
+            '<|DSML|calls><|DSML|invoke name="tool">'
+            '{"tool":"read_file","path":"src/main/java/A.java","offset":42000}'
+            "<|/DSML|parameter><|/DSML|invoke><|/DSML|calls>",
+        ]
+        for text in variants:
+            calls = parse_tool_calls(text)
+            self.assertEqual(len(calls), 1, text)
+            self.assertEqual(calls[0].name, "read_file")
+            self.assertEqual(calls[0].args["path"], "src/main/java/A.java")
+            self.assertEqual(strip_tool_blocks(text), "", text)
+
     def test_strip_tool_blocks(self) -> None:
         text = "说明\n\n```tool\n{\"tool\":\"list_files\"}\n```\n\n结束"
         cleaned = strip_tool_blocks(text)
