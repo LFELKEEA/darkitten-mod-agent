@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from unittest import mock
 
-from dma.agent import AgentWorker, apply_pending
+from dma.agent import AgentWorker, PendingFile, apply_pending
 from dma.config import Config
 from dma.connectors import ConnectorStore
 from dma.memory import MemoryStore
@@ -92,9 +92,46 @@ class AgentLoopTests(TempDataCase):
         )
         with mock.patch("dma.agent.ai.request_chat", side_effect=[reply, "完成"]):
             run = worker._loop()
-        self.assertEqual(run.pending, [])
+        self.assertEqual(len(run.pending), 1)
+        self.assertTrue(run.pending[0].applied)
+        self.assertEqual(run.pending[0].path, "README.md")
         self.assertEqual(run.applied, ["README.md"])
         self.assertEqual((project.root / "README.md").read_text(encoding="utf-8"), "# 新内容\n")
+        # 已经自动写入的文件再次点“写入全部”时不会重复写。
+        self.assertEqual(apply_pending(project, run.pending), [])
+
+    def test_apply_pending_skips_auto_written(self) -> None:
+        project = make_project(self)
+        pending = [
+            PendingFile(path="a.txt", content="A", applied=True),
+            PendingFile(path="b.txt", content="B"),
+        ]
+        written = apply_pending(project, pending)
+        self.assertEqual(written, ["b.txt"])
+        self.assertFalse((project.root / "a.txt").exists())
+        self.assertEqual((project.root / "b.txt").read_text(encoding="utf-8"), "B")
+
+    def test_truncated_tool_call_retries(self) -> None:
+        project = make_project(self)
+        (project.root / "build.gradle").write_text("plugins {}", encoding="utf-8")
+        worker = self.worker(project)
+        replies = [
+            '<tool>{"tool":"read_file","path":"build.gradle"',
+            '```tool\n{"tool":"read_file","path":"build.gradle"}\n```',
+            "读完了。",
+        ]
+        messages: list[list[dict]] = []
+
+        def fake(ai, items):
+            messages.append(list(items))
+            return replies.pop(0)
+
+        with mock.patch("dma.agent.ai.request_chat", side_effect=fake):
+            run = worker._loop()
+        self.assertEqual(run.text, "读完了。")
+        self.assertEqual(len(messages), 3)
+        self.assertIn("没有解析成功", messages[1][-1]["content"])
+        self.assertIn("plugins {}", messages[2][-1]["content"])
 
     def test_unsafe_path_refused(self) -> None:
         project = make_project(self)

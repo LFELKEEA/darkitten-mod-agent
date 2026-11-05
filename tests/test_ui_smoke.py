@@ -49,6 +49,33 @@ class UiSmokeTests(TempDataCase):
         window.memory.close()
         self.app.processEvents()
 
+    def test_pending_panel_shows_auto_written_files(self) -> None:
+        from dma.agent import PendingFile
+        from dma.ui import theme
+        from dma.ui.main_window import MainWindow
+
+        theme.apply_theme(self.app, 13)
+        window = MainWindow()
+        window.config.auto_apply = True
+        window.chat_page._set_pending(
+            [
+                PendingFile(
+                    path="src/main/java/A.java",
+                    content="class A {}",
+                    applied=True,
+                )
+            ]
+        )
+        page = window.chat_page
+        self.assertEqual(page.pending_tree.topLevelItemCount(), 1)
+        self.assertEqual(page.pending_tree.topLevelItem(0).text(1), "已自动写入")
+        self.assertFalse(page.apply_btn.isEnabled())
+        self.assertTrue(page.discard_btn.isEnabled())
+        self.assertIn("自动写入", page.pending_hint.text())
+        window.close()
+        window.memory.close()
+        self.app.processEvents()
+
 
 if __name__ == "__main__":
     unittest.main()

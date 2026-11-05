@@ -96,9 +96,10 @@ class ChatPage(QWidget):
         pending_head.addStretch(1)
         pending_head.addWidget(self.pending_count)
         side_layout.addLayout(pending_head)
-        side_layout.addWidget(
-            tiny("助手生成的文件先放在这里，确认后再写入工程；覆盖前会自动备份。")
+        self.pending_hint = tiny(
+            "助手生成的文件先放在这里，确认后再写入工程；覆盖前会自动备份。"
         )
+        side_layout.addWidget(self.pending_hint)
 
         self.pending_tree = QTreeWidget()
         self.pending_tree.setHeaderLabels(["文件", "来源"])
@@ -205,7 +206,7 @@ class ChatPage(QWidget):
             "assistant",
             "我是恶魔小猫工坊，只写 Minecraft Java 模组。\n\n"
             "开始前请先新建一个工程，确认 **MC 版本、加载器、Mod ID** 三项信息。"
-            "之后我会按工程结构生成完整文件，所有写入都会先进入右侧待确认列表。",
+            "之后我会按工程结构生成完整文件；关闭自动写入时，文件会先进入右侧待确认列表。",
         )
         self._set_pending([])
 
@@ -235,8 +236,12 @@ class ChatPage(QWidget):
                 f"工程已就绪：**{meta.name or meta.mod_id}**\n\n"
                 f"- 加载器：{meta.loader}\n- MC 版本：{meta.mc_version}\n"
                 f"- Mod ID：`{meta.mod_id}`\n\n"
-                "把需求写清楚，我会先给你目录树和完整文件。文件会进入右侧待写入列表，"
-                "确认后才会落盘。",
+                "把需求写清楚，我会先给你目录树和完整文件。"
+                + (
+                    "当前是自动写入模式，文件会直接落盘，并在右侧列表留下记录。"
+                    if self.main.config.auto_apply
+                    else "文件会进入右侧待写入列表，确认后才会落盘。"
+                ),
             )
         self._set_pending([])
         self.main.project_changed.emit(project)
@@ -470,11 +475,27 @@ class ChatPage(QWidget):
         self._pending = list(items)
         self.pending_tree.clear()
         for item in self._pending:
-            row = QTreeWidgetItem([item.path, item.reason or "生成"])
+            source = "已自动写入" if item.applied else (item.reason or "生成")
+            row = QTreeWidgetItem([item.path, source])
             row.setToolTip(0, item.path)
+            row.setToolTip(1, source)
             self.pending_tree.addTopLevelItem(row)
-        self.pending_count.setText(f"{len(self._pending)} 个")
-        self.apply_btn.setEnabled(bool(self._pending))
+        unwritten = [item for item in self._pending if not item.applied]
+        if self._pending and len(unwritten) != len(self._pending):
+            self.pending_count.setText(
+                f"{len(self._pending)} 个 · {len(unwritten)} 待写入"
+            )
+        else:
+            self.pending_count.setText(f"{len(self._pending)} 个")
+        if self.main.config.auto_apply:
+            self.pending_hint.setText(
+                "当前是自动写入模式：生成后直接写进工程，并在这里留下记录；覆盖前会自动备份。"
+            )
+        else:
+            self.pending_hint.setText(
+                "助手生成的文件先放在这里，确认后再写入工程；覆盖前会自动备份。"
+            )
+        self.apply_btn.setEnabled(bool(unwritten))
         self.discard_btn.setEnabled(bool(self._pending))
         self.view_btn.setEnabled(bool(self._pending))
         if self._pending:
@@ -505,16 +526,22 @@ class ChatPage(QWidget):
     def _apply_all(self) -> None:
         if self.project is None or not self._pending:
             return
+        unwritten = [item for item in self._pending if not item.applied]
+        if not unwritten:
+            QMessageBox.information(
+                self, "已经写入", "列表里的文件都已自动写入工程，不需要再次写入。"
+            )
+            return
         answer = QMessageBox.question(
             self,
             "写入工程",
-            f"将写入 {len(self._pending)} 个文件到：\n{self.project.root}\n\n"
+            f"将写入 {len(unwritten)} 个文件到：\n{self.project.root}\n\n"
             "已存在的文件会先备份到 data/backups。继续？",
         )
         if answer != QMessageBox.Yes:
             return
         try:
-            written = apply_pending(self.project, self._pending)
+            written = apply_pending(self.project, unwritten)
         except Exception as exc:
             QMessageBox.warning(self, "写入失败", str(exc))
             return
@@ -537,7 +564,11 @@ class ChatPage(QWidget):
     def _discard_pending(self) -> None:
         if not self._pending:
             return
-        answer = QMessageBox.question(self, "清空待写入", "丢弃这些未写入的文件？")
+        if any(item.applied for item in self._pending):
+            message = "清空列表？已自动写入的文件已经落盘，清空不会删除它们。"
+        else:
+            message = "丢弃这些未写入的文件？"
+        answer = QMessageBox.question(self, "清空待写入", message)
         if answer == QMessageBox.Yes:
             self._set_pending([])
             self.main.status("已清空待写入列表")

@@ -66,7 +66,8 @@ class Config:
     last_project: str = ""
     auto_apply: bool = False
     max_steps: int = DEFAULT_MAX_STEPS
-    context_turns: int = 12
+    context_turns: int = 32
+    context_turns_upgraded: bool = False
     shortcut_offered: bool = False
     update_url: str = UPDATE_MANIFEST_URL
     window_width: int = 1320
@@ -75,6 +76,10 @@ class Config:
     gradle_windows_certs: bool = False
 
     def normalized(self) -> "Config":
+        turns = int(self.context_turns or 32)
+        if not self.context_turns_upgraded and turns <= 12:
+            # 0.3.16 之前默认 12 轮，老配置里基本都停在这个值；统一提高到 32。
+            turns = 32
         root = self.project_root.strip()
         if not root:
             root = str(paths.default_project_root())
@@ -95,7 +100,8 @@ class Config:
             last_project=self.last_project.strip(),
             auto_apply=bool(self.auto_apply),
             max_steps=normalize_max_steps(self.max_steps),
-            context_turns=max(2, min(40, int(self.context_turns or 12))),
+            context_turns=max(2, min(200, turns)),
+            context_turns_upgraded=True,
             shortcut_offered=bool(self.shortcut_offered),
             update_url=(self.update_url or UPDATE_MANIFEST_URL).strip(),
             window_width=max(980, int(self.window_width or 1320)),

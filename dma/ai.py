@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import urllib.error
+import urllib.parse
 import urllib.request
 from typing import Any
 
@@ -16,12 +17,37 @@ class AIError(Exception):
 def _endpoint(base_url: str) -> str:
     base = (base_url or "").strip().rstrip("/")
     if not base:
-        raise AIError("接口地址为空，请先在「连接器」里填写。")
+        raise AIError("Base URL 为空，请先在「设置」里填写服务商地址。")
     if base.endswith("/chat/completions"):
         return base
     if not re.search(r"/v\d+(?:beta)?$", base):
         base += "/v1"
     return base + "/chat/completions"
+
+
+def _host(url: str) -> str:
+    try:
+        return urllib.parse.urlsplit(url).netloc or url
+    except ValueError:
+        return url
+
+
+def _connect_error(url: str, reason: object) -> AIError:
+    host = _host(url)
+    text = str(reason or "").strip() or "未知错误"
+    timing_out = isinstance(reason, TimeoutError) or any(
+        token in text.lower()
+        for token in ("10060", "10061", "timed out", "timeout", "超时", "拒绝", "refused")
+    )
+    hint = "请检查网络是否可用、Base URL 是否填写正确，以及系统代理是否生效。"
+    if host.endswith("api.openai.com"):
+        hint += (
+            "国内网络通常无法直连 api.openai.com，请改用服务商提供的 OpenAI 兼容地址"
+            "（例如百炼、千问、DeepSeek 或本地 Ollama）。"
+        )
+    if timing_out:
+        return AIError(f"连接 {host} 超时：{text}。{hint}")
+    return AIError(f"无法连接 {host}：{text}。{hint}")
 
 
 def _http_json(url: str, payload: dict, headers: dict, timeout: int) -> dict:
@@ -36,13 +62,21 @@ def _http_json(url: str, payload: dict, headers: dict, timeout: int) -> dict:
             detail = exc.read().decode("utf-8", "replace")[:600]
         except Exception:
             pass
-        raise AIError(f"接口返回 {exc.code}。{detail}".strip()) from exc
+        hints = {
+            401: "API Key 无效，或 Base URL 与 Key 不属于同一家服务商。",
+            403: "这个 Key 没有访问当前模型或地址的权限。",
+            404: "Base URL 或模型名不正确，有的服务地址需要以 /v1 结尾。",
+            429: "请求太频繁或额度不足，请稍后重试。",
+        }
+        hint = hints.get(exc.code, "")
+        message = f"接口返回 {exc.code}。" + (hint + " " if hint else "") + detail
+        raise AIError(message.strip()) from exc
     except urllib.error.URLError as exc:
-        raise AIError(f"网络连接失败：{exc.reason}") from exc
+        raise _connect_error(url, exc.reason) from exc
     except TimeoutError as exc:
-        raise AIError("连接超时，可以在连接器里把超时时间调大。") from exc
+        raise _connect_error(url, exc) from exc
     except OSError as exc:
-        raise AIError(f"网络错误：{exc}") from exc
+        raise _connect_error(url, exc) from exc
     try:
         data = json.loads(raw.decode("utf-8", "replace"))
     except ValueError as exc:
@@ -107,7 +141,7 @@ def request_chat(ai: AIConfig, messages: list[dict[str, Any]]) -> str:
         }
     else:
         if not cfg.api_key:
-            raise AIError("还没有填写 API Key。打开「连接器」页填写后即可开始。")
+            raise AIError("还没有填写 API Key。打开「设置」页填写后即可开始。")
         url = _endpoint(cfg.base_url or "https://api.openai.com/v1")
         headers["Authorization"] = f"Bearer {cfg.api_key}"
         payload = {

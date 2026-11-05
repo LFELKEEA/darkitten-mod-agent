@@ -119,6 +119,12 @@ class SettingsPage(QWidget):
         for key, label in PROVIDERS.items():
             self.provider.addItem(label, key)
         self.base_url = QLineEdit()
+        self.base_url.setPlaceholderText(
+            "服务商提供的 OpenAI 兼容地址，例如 https://maas.qianwenaiapi.com/compatible-mode/v1"
+        )
+        self.base_url.setToolTip(
+            "填服务商控制台给出的 Base URL。已经填了自定义地址时，切换通道不会改掉它。"
+        )
         self.model = QLineEdit()
         self.api_key = QLineEdit()
         self.api_key.setEchoMode(QLineEdit.Password)
@@ -176,7 +182,10 @@ class SettingsPage(QWidget):
         self.max_steps.setSpecialValueText("不限制")
         self.max_steps.setToolTip("0 表示不限制工具调用轮数；大工程建议 32 以上。")
         self.context_turns = QSpinBox()
-        self.context_turns.setRange(2, 40)
+        self.context_turns.setRange(2, 200)
+        self.context_turns.setToolTip(
+            "助手每轮会带上最近多少轮对话。默认 32，最大 200；调大后更不容易忘事，但请求会更大。"
+        )
         self.font_size = QSpinBox()
         self.font_size.setRange(11, 20)
         form2.addRow("工程根目录", root_row)
@@ -186,7 +195,13 @@ class SettingsPage(QWidget):
         behavior_layout.addLayout(form2)
         behavior_layout.addWidget(self.auto_apply)
         behavior_layout.addWidget(
-            tiny("默认关闭自动写入。关闭时，助手生成的文件先进入右侧待确认列表。")
+            tiny(
+                "默认关闭自动写入：文件先进入右侧待确认列表。"
+                "开启后直接写入工程，并在列表里留下“已自动写入”记录，仍会备份。"
+            )
+        )
+        behavior_layout.addWidget(
+            tiny("上下文轮数默认 32，最多 200；调大后助手更不容易忘事，但单次请求也会更大。")
         )
         behavior_layout.addWidget(
             tiny("工具轮数上限填 0 表示不限制。大工程建议 32～64；不限制时请留意模型费用和输出时间。")
@@ -273,17 +288,22 @@ class SettingsPage(QWidget):
         is_free = provider == "pollinations"
         self.base_url.setEnabled(not is_free)
         self.api_key.setEnabled(provider == "openai")
+        current = self.base_url.text().strip().rstrip("/")
+        is_default_openai = current == "https://api.openai.com/v1"
+        is_local = current.startswith(("http://127.0.0.1", "http://localhost"))
         if is_free:
-            self.base_url.setText("https://api.openai.com/v1")
+            if not current:
+                self.base_url.setText("https://api.openai.com/v1")
             if not self.model.text().strip() or ":" in self.model.text():
                 self.model.setText("openai-fast")
         elif provider == "ollama":
-            if not self.base_url.text().strip() or "api.openai.com" in self.base_url.text():
+            if not current or is_default_openai:
                 self.base_url.setText("http://127.0.0.1:11434/v1")
             if "fast" in self.model.text() or not self.model.text().strip():
                 self.model.setText("qwen2.5-coder:7b")
         else:
-            if "api.openai.com" not in self.base_url.text() or not self.base_url.text().strip():
+            # 自定义中转/兼容地址必须原样保留，否则用户每次打开设置都会被改回官方地址。
+            if not current or is_local:
                 self.base_url.setText("https://api.openai.com/v1")
             if self.model.text().strip() in {"", "openai-fast"} or ":" in self.model.text():
                 self.model.setText("gpt-4o-mini")

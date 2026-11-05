@@ -35,6 +35,20 @@ class AgentParseTests(unittest.TestCase):
         self.assertEqual(calls[0].name, "remember")
         self.assertEqual(calls[0].args["content"], "用 Yarn 映射")
 
+    def test_parse_unclosed_tag_variants(self) -> None:
+        variants = [
+            '<tool {"tool":"read_file","path":"build.gradle"}',
+            '<tool>{"tool":"read_file","path":"build.gradle"}',
+            '<tool {"tool":"read_file","path":"build.gradle"}</tool>',
+            '<tool>\n{"tool":"read_file","path":"build.gradle"}\n</tool>',
+        ]
+        for text in variants:
+            calls = parse_tool_calls(text)
+            self.assertEqual(len(calls), 1, text)
+            self.assertEqual(calls[0].name, "read_file")
+            self.assertEqual(calls[0].args["path"], "build.gradle")
+            self.assertEqual(strip_tool_blocks(text), "", text)
+
     def test_invalid_json_ignored(self) -> None:
         self.assertEqual(parse_tool_calls("```tool\nnot json\n```"), [])
         self.assertEqual(_parse_call_payload("[]"), [])

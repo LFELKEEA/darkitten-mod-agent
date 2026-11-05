@@ -22,10 +22,12 @@ BUILD = ROOT / "build"
 APP_DIST = DIST / "DarkittenModAgent"
 ZIP_NAME = f"DarkittenModAgent-{APP_VERSION}.zip"
 NOTES = [
-    "修复 NeoForge 开发客户端启动失败：编译前自动补上 ModDevGradle 的 mods { sourceSet sourceSets.main }，避免 Mixin 在启动时报找不到类。",
-    "修复数据生成：自动把无效的 clientData() / serverData() 改成 data()，并补上 --mod / --output / --existing 参数，生成结果写入 src/generated/resources。",
-    "数据生成按钮和 build_project 会根据工程声明的 run 自动选择 runData（NeoForge）或 runDatagen（Fabric）。",
-    "ProcessResources 使用 expand 替换中文时自动补 filteringCharset = 'UTF-8'，防止模组显示名乱码。",
+    "修复设置页会覆盖自定义 Base URL 的问题：使用中转/兼容接口时，切换通道或重新打开设置不再把地址改回 api.openai.com。",
+    "连接失败时给出可操作提示：显示具体主机，并区分超时、WinError 10060、401、403、404、429，提示检查 Base URL、网络或代理以及 Key 与服务商是否匹配。",
+    "修复自动写入模式下“待写入文件”一直显示 0 个的问题：自动写入的文件会以“已自动写入”记录出现在列表里，可以预览和查看；“写入全部”只处理尚未写入的文件。",
+    "补充 NeoForge 1.21.1 实体注册规范：EntityType.Builder#build 只接受实体 id，实体属性改用 EntityAttributeCreationEvent 注册，避免生成 1.20 旧写法导致 compileJava 失败。",
+    "修复“运行着运行着突然结束”：兼容 <tool {json} 这类缺少 > 或闭合标签的写法，JSON 不完整时自动要求模型重发，任务不会再因为一次格式错误直接停下。",
+    "上下文轮数默认从 12 提高到 32，设置页可调到 200；老配置会自动升级一次，长任务不容易因为上下文太短而丢线索。",
 ]
 
 

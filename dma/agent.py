@@ -22,8 +22,9 @@ from .memory import MemoryStore, memory_context
 from .prompt import build_system_prompt
 from .skills import SkillStore
 
-TOOL_FENCE_RE = re.compile(r"```(?:tool|dma-tool)[ \t]*\n(.*?)\n```", re.S)
-TOOL_TAG_RE = re.compile(r"<tool>\s*(\{.*?\})\s*</tool>", re.S)
+TOOL_FENCE_RE = re.compile(r"```(?:tool|dma-tool)[ \t]*\r?\n(.*?)\r?\n?```", re.S)
+TOOL_TAG_START_RE = re.compile(r"<tool\b", re.I)
+TOOL_CLOSE_RE = re.compile(r"\s*</tool\s*>", re.I)
 FENCE_RE = re.compile(r"```([^\n`]*)\n(.*?)\n```", re.S)
 PATH_EXT = (
     "java|kt|kts|gradle|properties|json|json5|toml|yml|yaml|md|txt|xml|"
@@ -52,6 +53,7 @@ class PendingFile:
     path: str
     content: str
     reason: str = ""
+    applied: bool = False
 
     def preview(self, limit: int = 160) -> str:
         text = self.content.strip().replace("\n", " ")
@@ -73,14 +75,83 @@ class AgentRun:
     steps: int = 0
 
 
+def _balanced_json(text: str, start: int) -> str | None:
+    """从 start 的 { 开始截取一个配平的 JSON 对象，字符串里的括号不计入。"""
+    depth = 0
+    in_string = False
+    escaped = False
+    for index in range(start, len(text)):
+        char = text[index]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start:index + 1]
+    return None
+
+
+def _tag_payload_start(text: str, position: int) -> int | None:
+    limit = min(len(text), position + 16)
+    cursor = position
+    while cursor < limit and text[cursor] in " \t\r\n:=>":
+        cursor += 1
+    if cursor < len(text) and text[cursor] == "{":
+        return cursor
+    brace = text.find("{", cursor, limit)
+    return brace if brace != -1 else None
+
+
+def _tool_blocks(text: str) -> list[tuple[str, int, int]]:
+    """收集所有工具调用：```tool 代码块，以及 <tool ...> 标签。
+
+    有些兼容接口会把标签写成 `<tool {json}`（缺 `>` 或闭合标签），
+    这里按 JSON 配平截取，避免整轮任务因为格式差一个字符就提前结束。
+    """
+    source = text or ""
+    blocks: list[tuple[str, int, int]] = []
+    fence_spans: list[tuple[int, int]] = []
+    for match in TOOL_FENCE_RE.finditer(source):
+        fence_spans.append((match.start(), match.end()))
+        blocks.append((match.group(1).strip(), match.start(), match.end()))
+    for match in TOOL_TAG_START_RE.finditer(source):
+        if any(start <= match.start() < end for start, end in fence_spans):
+            continue
+        start = _tag_payload_start(source, match.end())
+        if start is None:
+            continue
+        payload = _balanced_json(source, start)
+        if payload is None:
+            continue
+        end = start + len(payload)
+        closing = TOOL_CLOSE_RE.match(source, end)
+        if closing:
+            end = closing.end()
+        blocks.append((payload, match.start(), end))
+    return blocks
+
+
 def parse_tool_calls(text: str) -> list[ToolCall]:
     calls: list[ToolCall] = []
-    for match in TOOL_FENCE_RE.finditer(text or ""):
-        raw = match.group(1).strip()
-        calls.extend(_parse_call_payload(raw))
-    for match in TOOL_TAG_RE.finditer(text or ""):
-        calls.extend(_parse_call_payload(match.group(1).strip()))
+    for payload, _, _ in _tool_blocks(text):
+        calls.extend(_parse_call_payload(payload))
     return calls
+
+
+def _looks_like_tool_attempt(text: str) -> bool:
+    return bool(
+        re.search(r"<tool\b|```\s*(?:tool|dma-tool)\b", text or "", re.I)
+    )
 
 
 def _parse_call_payload(raw: str) -> list[ToolCall]:
@@ -107,9 +178,18 @@ def _parse_call_payload(raw: str) -> list[ToolCall]:
 
 
 def strip_tool_blocks(text: str) -> str:
-    cleaned = TOOL_FENCE_RE.sub("", text or "")
-    cleaned = TOOL_TAG_RE.sub("", cleaned)
-    return re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+    source = text or ""
+    blocks = sorted(_tool_blocks(source), key=lambda item: item[1])
+    if blocks:
+        pieces: list[str] = []
+        cursor = 0
+        for _, start, end in blocks:
+            if start > cursor:
+                pieces.append(source[cursor:start])
+            cursor = max(cursor, end)
+        pieces.append(source[cursor:])
+        source = "".join(pieces)
+    return re.sub(r"\n{3,}", "\n\n", source).strip()
 
 
 def _looks_like_path(value: str) -> bool:
@@ -287,6 +367,7 @@ class AgentWorker(QObject):
         run = AgentRun()
         limit = max(0, int(self.config.max_steps or 0))
         step = 0
+        broken_tool_retries = 0
 
         while True:
             if limit > 0 and step >= limit:
@@ -307,6 +388,23 @@ class AgentWorker(QObject):
                 self._stage_file(item, run)
 
             if not calls:
+                if broken_tool_retries < 2 and _looks_like_tool_attempt(reply):
+                    # 模型偶尔会漏掉 > 或闭合标签，任务会看起来“突然结束”。
+                    # 不发出去当最终答复，让它按完整格式重写一次。
+                    broken_tool_retries += 1
+                    self.status.emit("工具调用格式不完整，正在重试…")
+                    messages.append({"role": "assistant", "content": reply})
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": (
+                                "上面的工具调用没有解析成功。请重新输出完整的工具调用："
+                                "```tool\n{\"tool\":\"...\"}\n```，"
+                                "JSON 必须完整，代码块或 <tool> 标签都要闭合。"
+                            ),
+                        }
+                    )
+                    continue
                 final_text = visible or reply.strip()
                 run.text = final_text
                 return run
@@ -347,11 +445,15 @@ class AgentWorker(QObject):
             try:
                 project_mod.write_text(self.project.root, relative, item.content)
             except Exception as exc:
-                self.status.emit(f"自动写入失败 {relative}：{exc}")
+                self.status.emit(f"自动写入失败 {relative}：{exc}，已放入待写入列表")
             else:
                 self.applied.append(relative)
                 run.applied = list(self.applied)
                 self.status.emit(f"已自动写入 {relative}")
+                # 自动写入也要在面板里留记录，否则用户只会看到“0 个”，无法确认写过什么。
+                staged.applied = True
+                self._add_pending(staged)
+                run.pending = list(self.pending)
                 return True
         self._add_pending(staged)
         run.pending = list(self.pending)
@@ -437,7 +539,18 @@ class AgentWorker(QObject):
                     return "write_file 的 content 为空，已拒绝。"
                 if not self._stage_file(item, run):
                     return f"写入失败：路径不合法或没有打开工程（{item.path}）。"
-                state = "已自动写入" if self.config.auto_apply else "已加入待写入列表"
+                try:
+                    relative = (
+                        project_mod.safe_path(self.project.root, item.path)
+                        .relative_to(self.project.root.resolve())
+                        .as_posix()
+                    )
+                except Exception:
+                    relative = item.path.replace("\\", "/")
+                written = any(
+                    entry.applied for entry in self.pending if entry.path == relative
+                )
+                state = "已自动写入" if written else "已加入待写入列表"
                 return f"{state}：{item.path}（{len(item.content)} 字符）"
             if name == "read_skill":
                 skill = self.skill_store.get(str(args.get("id") or ""))
@@ -737,6 +850,8 @@ def _tool_status(call: ToolCall) -> str:
 def apply_pending(project: project_mod.Project, pending: list[PendingFile]) -> list[str]:
     written: list[str] = []
     for item in pending:
+        if item.applied:
+            continue
         target = project_mod.safe_path(project.root, item.path)
         relative = target.relative_to(project.root.resolve()).as_posix()
         project_mod.write_text(project.root, relative, item.content)
