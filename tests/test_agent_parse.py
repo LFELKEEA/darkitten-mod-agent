@@ -73,6 +73,43 @@ class AgentParseTests(unittest.TestCase):
             self.assertEqual(calls[0].args["path"], "src/main/java/A.java")
             self.assertEqual(strip_tool_blocks(text), "", text)
 
+    def test_dsml_edit_file_with_unescaped_quotes(self) -> None:
+        # 实际截图：old / new 里直接放 Java 代码，双引号没有转义。
+        text = (
+            "先加工具方法并改 snapshot。\n\n"
+            '< | DSLM | calls > < | DSLM | invoke name="tool">\n'
+            '{"tool":"edit_file","path":"src/main/java/com/darkitten/possession/mca/McaCompat.java",'
+            '"old":"    CompoundTag snapshot = new CompoundTag();\\n'
+            '    snapshot.putString("phs_name", resolveVillagerName(villager));",'
+            '"new":"    CompoundTag snapshot = new CompoundTag();\\n'
+            '    snapshot.putString("phs_name", resolveVillagerName(villager));\\n'
+            '    snapshot.put("phs_relations", captureRelations(villager.getRelationships().getFamilyEntry()));"}'
+            " </| DSML | parameter> </| DSML | invoke> </| DSML | calls>"
+        )
+        calls = parse_tool_calls(text)
+        self.assertEqual(len(calls), 1, text)
+        self.assertEqual(calls[0].name, "edit_file")
+        self.assertIn(
+            'snapshot.putString("phs_name", resolveVillagerName(villager));',
+            calls[0].args["old"],
+        )
+        self.assertIn('snapshot.put("phs_relations"', calls[0].args["new"])
+        self.assertEqual(strip_tool_blocks(text), "先加工具方法并改 snapshot。")
+
+    def test_dsml_edit_file_with_literal_newlines(self) -> None:
+        # 另一类坏格式：字符串里直接换行，没有写成 \n。
+        text = (
+            '<|DSML|calls><|DSML|invoke name="tool">'
+            '{"tool":"edit_file","path":"src/A.java","old":"class A {\n'
+            '    int x;\n}","new":"class A {\n    int y;\n}"}'
+            "</|DSML|parameter></|DSML|invoke></|DSML|calls>"
+        )
+        calls = parse_tool_calls(text)
+        self.assertEqual(len(calls), 1, text)
+        self.assertIn("int x;", calls[0].args["old"])
+        self.assertIn("int y;", calls[0].args["new"])
+        self.assertEqual(strip_tool_blocks(text), "")
+
     def test_strip_tool_blocks(self) -> None:
         text = "说明\n\n```tool\n{\"tool\":\"list_files\"}\n```\n\n结束"
         cleaned = strip_tool_blocks(text)

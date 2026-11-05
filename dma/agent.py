@@ -33,6 +33,10 @@ DSML_TAG_RE = re.compile(
 DSML_INVOKE_RE = re.compile(
     r"<\s*\|\s*D\s*S\s*(?:M\s*L|L\s*M)\s*\|\s*invoke\b[^>]*>", re.I
 )
+# 闭合标签有两种写法：</|DSML|parameter> 和 <|/DSML|invoke>。
+DSML_CLOSE_RE = re.compile(
+    r"<\s*(?:/\s*\|\s*|\|\s*/\s*)D\s*S\s*(?:M\s*L|L\s*M)\s*\|[^>]*>", re.I
+)
 FENCE_RE = re.compile(r"```([^\n`]*)\n(.*?)\n```", re.S)
 PATH_EXT = (
     "java|kt|kts|gradle|properties|json|json5|toml|yml|yaml|md|txt|xml|"
@@ -169,10 +173,23 @@ def _tool_blocks(text: str) -> list[tuple[str, int, int]]:
         # 里面已经有 <tool> 标签时交给上面的分支处理，避免重复执行。
         if "<tool" in source[match.end():brace].lower():
             continue
-        payload = _balanced_json(source, brace)
+        close = DSML_CLOSE_RE.search(source, brace)
+        payload = None
+        if close is not None:
+            # 有闭合标签时直接按标签截取。edit_file 的 old / new 里经常带
+            # 未转义的双引号（Java 代码），按括号配平容易被引号带偏。
+            chunk = source[brace:close.start()].strip()
+            cut = chunk.rfind("}")
+            if cut != -1:
+                chunk = chunk[: cut + 1]
+            if chunk.startswith("{") and chunk.endswith("}"):
+                payload = chunk
+        if payload is None:
+            payload = _balanced_json(source, brace)
         if payload is None or '"tool"' not in payload:
             continue
-        blocks.append((payload, match.start(), brace + len(payload)))
+        end = close.end() if close is not None else brace + len(payload)
+        blocks.append((payload, match.start(), end))
     return blocks
 
 
@@ -273,11 +290,108 @@ def _compact_messages(messages: list[dict[str, Any]]) -> None:
         total -= len(content) - len(shortened)
 
 
+LOOSE_KEY_RE = re.compile(r'(?:^|,)\s*"([A-Za-z_][A-Za-z0-9_-]*)"\s*:\s*')
+
+
+def _unescape_json_text(text: str) -> str:
+    mapping = {
+        "n": "\n",
+        "t": "\t",
+        "r": "\r",
+        "b": "\b",
+        "f": "\f",
+        '"': '"',
+        "\\": "\\",
+        "/": "/",
+    }
+    result: list[str] = []
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if char == "\\" and index + 1 < len(text) and text[index + 1] in mapping:
+            result.append(mapping[text[index + 1]])
+            index += 2
+            continue
+        result.append(char)
+        index += 1
+    return "".join(result)
+
+
+def _loose_json_value(text: str) -> Any:
+    value = text.strip()
+    if not value:
+        return ""
+    if value[0] in "{[":
+        try:
+            return json.loads(value, strict=False)
+        except ValueError:
+            pass
+    if value.startswith('"'):
+        body = value[1:-1] if value.endswith('"') and len(value) >= 2 else value[1:]
+        return _unescape_json_text(body)
+    if re.fullmatch(r"-?\d+", value):
+        return int(value)
+    if re.fullmatch(r"-?\d+\.\d+", value):
+        return float(value)
+    if value == "true":
+        return True
+    if value == "false":
+        return False
+    if value == "null":
+        return None
+    return value
+
+
+def _valid_loose_value(value: str) -> bool:
+    if not value:
+        return False
+    if value.startswith('"'):
+        return len(value) >= 2 and value.endswith('"')
+    if value[0] in "{[":
+        try:
+            json.loads(value, strict=False)
+            return True
+        except ValueError:
+            return False
+    if re.fullmatch(r"-?\d+(?:\.\d+)?", value):
+        return True
+    return value in {"true", "false", "null"}
+
+
+def _loose_json_object(raw: str) -> dict[str, Any] | None:
+    """解析模型写坏了的 JSON：字符串值里的双引号没有转义。
+
+    edit_file 的 old / new 直接放 Java 代码时很常见，标准 json.loads 会失败。
+    这里按顶层 `"key":` 切成字段，值里的引号和换行原样保留。
+    """
+    text = (raw or "").strip()
+    if not (text.startswith("{") and text.endswith("}")):
+        return None
+    inner = text[1:-1]
+    matches = list(LOOSE_KEY_RE.finditer(inner))
+    if not matches:
+        return None
+    result: dict[str, Any] = {}
+    for index, match in enumerate(matches):
+        key = match.group(1)
+        start = match.end()
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(inner)
+        value = inner[start:end].strip()
+        if value.endswith(","):
+            value = value[:-1].rstrip()
+        if not _valid_loose_value(value):
+            return None
+        result[key] = _loose_json_value(value)
+    return result
+
+
 def _parse_call_payload(raw: str) -> list[ToolCall]:
     try:
-        data = json.loads(raw)
+        data = json.loads(raw, strict=False)
     except ValueError:
-        return []
+        data = _loose_json_object(raw)
+        if data is None:
+            return []
     items = data if isinstance(data, list) else [data]
     result: list[ToolCall] = []
     for item in items:
