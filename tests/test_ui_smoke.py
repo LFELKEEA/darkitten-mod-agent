@@ -84,6 +84,57 @@ class UiSmokeTests(TempDataCase):
         window.memory.close()
         self.app.processEvents()
 
+    def test_old_dsml_markup_is_cleaned_when_loading_project(self) -> None:
+        from PySide6.QtWidgets import QTextBrowser
+
+        from dma import sessions
+        from dma.project import create_project
+        from dma.ui import theme
+        from dma.ui.main_window import MainWindow
+
+        project = create_project(
+            self.tmp,
+            name="清理测试",
+            mod_id="dsmlclean",
+            mc_version="1.21.1",
+            loader="NeoForge",
+        )
+        sessions.save_history(
+            project.root,
+            [
+                {"role": "user", "content": "继续"},
+                {
+                    "role": "assistant",
+                    "content": (
+                        '< | DSLM | calls > < | DSLM | invoke name="tool">'
+                        '{"tool":"read_file","path":"A.java"}'
+                        "</| DSML | parameter> </| DSML | invoke> </| DSML | calls>"
+                    ),
+                },
+                {"role": "assistant", "content": "读完了。"},
+            ],
+        )
+        theme.apply_theme(self.app, 13)
+        window = MainWindow()
+        page = window.chat_page
+        page._set_project(project, quiet=True)
+        self.assertEqual(
+            [item["content"] for item in page.history], ["继续", "读完了。"]
+        )
+        shown = [
+            view.toPlainText()
+            for bubble in page.chat.bubbles
+            for view in bubble.findChildren(QTextBrowser)
+        ]
+        self.assertFalse(any("DSML" in text or "DSLM" in text for text in shown))
+        self.assertEqual(
+            [item["content"] for item in sessions.load_history(project.root)],
+            ["继续", "读完了。"],
+        )
+        window.close()
+        window.memory.close()
+        self.app.processEvents()
+
 
 if __name__ == "__main__":
     unittest.main()

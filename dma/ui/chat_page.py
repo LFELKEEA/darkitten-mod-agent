@@ -21,7 +21,12 @@ from PySide6.QtWidgets import (
 
 from .. import project as project_mod
 from .. import sessions
-from ..agent import AgentWorker, PendingFile, apply_pending
+from ..agent import (
+    AgentWorker,
+    PendingFile,
+    apply_pending,
+    strip_tool_blocks,
+)
 from ..prompt import initial_project_request, requirement_form_text
 from .widgets import ChatView, NewProjectDialog, TextPreviewDialog, card, tiny
 
@@ -296,6 +301,18 @@ class ChatPage(QWidget):
         self.history = sessions.load_history(project.root)
         self.chat.clear_messages()
         if self.history:
+            cleaned: list[dict[str, str]] = []
+            for item in self.history:
+                role = item.get("role", "assistant")
+                content = str(item.get("content") or "")
+                if role == "assistant":
+                    content = strip_tool_blocks(content)
+                    if not content:
+                        continue
+                cleaned.append({"role": role, "content": content})
+            if len(cleaned) != len(self.history):
+                self.history = cleaned
+                sessions.save_history(project.root, self.history)
             for item in self.history:
                 self.chat.add_message(item["role"], item["content"])
             if not quiet:
