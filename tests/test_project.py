@@ -67,6 +67,48 @@ class ProjectTests(TempDataCase):
         self.assertIn("src/A.java", tree)
         self.assertIn("README.md", tree)
 
+    def test_write_strips_markdown_fences_from_code(self) -> None:
+        project = self.make()
+        content = "```java\npackage x;\n\npublic class A {}\n```\n"
+        project_mod.write_text(project.root, "src/A.java", content)
+        self.assertEqual(
+            project_mod.read_text(project.root, "src/A.java"),
+            "package x;\n\npublic class A {}\n",
+        )
+        # 只有结尾多出来的围栏也要清掉（实际工程里出现过的坏文件）
+        broken = "package x;\n\npublic class B {}\n```\n"
+        project_mod.write_text(project.root, "src/B.java", broken)
+        self.assertEqual(
+            project_mod.read_text(project.root, "src/B.java"),
+            "package x;\n\npublic class B {}\n",
+        )
+
+    def test_write_keeps_fences_in_markdown(self) -> None:
+        project = self.make()
+        content = "```java\nclass A {}\n```\n"
+        project_mod.write_text(project.root, "notes.md", content)
+        self.assertEqual(project_mod.read_text(project.root, "notes.md"), content)
+
+    def test_strip_wrapping_fences_only_touches_edges(self) -> None:
+        body = "class A {\n    String s = \"```\";\n}\n"
+        self.assertEqual(
+            project_mod.strip_wrapping_fences("A.java", body), body
+        )
+
+    def test_repair_fences_scans_existing_sources(self) -> None:
+        project = self.make()
+        bad = project.root / "src" / "Bad.java"
+        bad.parent.mkdir(parents=True, exist_ok=True)
+        bad.write_text("package x;\n\npublic class Bad {}\n```\n", encoding="utf-8")
+        good = project.root / "src" / "Good.java"
+        good.write_text("package x;\n\npublic class Good {}\n", encoding="utf-8")
+        fixed = project_mod.repair_fences(project.root)
+        self.assertEqual(fixed, ["src/Bad.java"])
+        self.assertEqual(
+            bad.read_text(encoding="utf-8"), "package x;\n\npublic class Bad {}\n"
+        )
+        self.assertEqual(project_mod.repair_fences(project.root), [])
+
     def test_write_rejects_wrong_type(self) -> None:
         project = self.make()
         (project.root / "folder").mkdir()

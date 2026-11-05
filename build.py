@@ -22,8 +22,10 @@ BUILD = ROOT / "build"
 APP_DIST = DIST / "DarkittenModAgent"
 ZIP_NAME = f"DarkittenModAgent-{APP_VERSION}.zip"
 NOTES = [
-    "安装包里开始自带 version.json（位于 _internal 目录），启动器可以直接读到工坊的真实版本。以前启动器只认自己安装时写的 state.json，工坊在程序内更新或手动覆盖后，启动器仍会显示旧版本。",
-    "程序内更新会连同 _internal 一起替换，所以 version.json 会跟着实际文件走，不需要再手动刷新启动器记录。",
+    "修复编译时反复卡在插件解析的问题。本地 Maven 代理遇到超长插件坐标时，Windows 路径长度限制会让文件写入失败，Gradle 只看到“响应头发出后断开”，于是一次次重试；现在超长路径会自动换成短哈希文件名。",
+    "插件门户坐标优先走 plugins.gradle.org；其它源明确返回 404 时不再误判成“上游不可用”，Gradle 可以立刻换下一个仓库，不会再空等半分钟。",
+    "本地代理端口固定不变，同一工程第二次构建实测从一分多钟降到 6 秒，仍然能正常产出模组 JAR。",
+    "编译前新增源码预检，自动清掉模型写文件时带进来的 Markdown 代码围栏，避免 javac 报“非法字符”。",
 ]
 
 

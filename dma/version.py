@@ -2,7 +2,7 @@ from __future__ import annotations
 
 APP_NAME = "Darkitten Mod Agent"
 APP_NAME_CN = "恶魔小猫工坊"
-APP_VERSION = "0.3.12"
+APP_VERSION = "0.3.13"
 APP_ID = "DarkittenModAgent"
 APP_EXE = "DarkittenModAgent.exe"
 APP_AUTHOR = "LFELKEEA"

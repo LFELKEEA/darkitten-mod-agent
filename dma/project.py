@@ -38,6 +38,34 @@ TEXT_SUFFIXES = {
 MAX_FILE_BYTES = 2 * 1024 * 1024
 MAX_WRITE_CHARS = 2_000_000
 
+# 模型偶尔会把 Markdown 代码围栏一起写进源文件，导致 javac 报「非法字符: '`'」。
+# 只处理整份内容被围栏包住的情况，正文中间出现的反引号保持原样。
+_FENCE_LINE = re.compile(r"^\s*```[A-Za-z0-9_+.#-]*\s*$")
+FENCE_STRIP_SUFFIXES = {
+    ".java", ".kt", ".kts", ".gradle", ".properties", ".json", ".json5",
+    ".toml", ".yml", ".yaml", ".xml", ".mcmeta", ".lang", ".cfg", ".conf",
+    ".py", ".js", ".ts", ".css", ".html", ".sh", ".bat", ".cmd", ".ps1",
+}
+
+
+def strip_wrapping_fences(relative: str, content: str) -> str:
+    """去掉包住整份代码文件的 ``` 围栏，避免写进源文件后编译失败。"""
+    if Path(relative).suffix.lower() not in FENCE_STRIP_SUFFIXES or "```" not in content:
+        return content
+    lines = content.splitlines()
+    if not lines:
+        return content
+    changed = False
+    if _FENCE_LINE.match(lines[0]):
+        lines = lines[1:]
+        changed = True
+    while lines and _FENCE_LINE.match(lines[-1]):
+        lines.pop()
+        changed = True
+    if not changed:
+        return content
+    return "\n".join(lines).rstrip("\n") + "\n"
+
 
 class ProjectError(Exception):
     pass
@@ -312,7 +340,40 @@ def _backup_path(root: Path, relative: Path) -> Path:
     return paths.backups_dir() / slug / stamp / relative
 
 
+def repair_fences(root: Path) -> list[str]:
+    """编译前扫描工程，修掉整份被代码围栏包住的源文件。返回改动过的相对路径。"""
+    base = Path(root).resolve()
+    fixed: list[str] = []
+    for path in base.rglob("*"):
+        if not path.is_file():
+            continue
+        try:
+            relative = path.relative_to(base)
+        except ValueError:
+            continue
+        if any(part in SKIP_DIRS for part in relative.parts):
+            continue
+        if path.suffix.lower() not in FENCE_STRIP_SUFFIXES:
+            continue
+        try:
+            if path.stat().st_size > MAX_FILE_BYTES:
+                continue
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        cleaned = strip_wrapping_fences(relative.name, text)
+        if cleaned == text:
+            continue
+        try:
+            write_text(base, relative.as_posix(), cleaned)
+        except (OSError, ProjectError):
+            continue
+        fixed.append(relative.as_posix())
+    return fixed
+
+
 def write_text(root: Path, relative: str, content: str) -> Path:
+    content = strip_wrapping_fences(relative, content)
     if len(content) > MAX_WRITE_CHARS:
         raise ProjectError("单个文件超过 2,000,000 字符，已拒绝写入。")
     target = safe_path(root, relative)

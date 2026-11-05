@@ -79,6 +79,16 @@ class MirrorHelperTests(TempDataCase):
     def test_normalize(self) -> None:
         self.assertEqual(mirrors._normalize("/a/b/c?x=1"), "a/b/c")
 
+    def test_cache_path_keeps_short_and_shortens_long_coordinates(self) -> None:
+        short = "com/example/lib/1.0/lib-1.0.jar"
+        self.assertEqual(mirrors.cache_path(short), mirrors.repo_cache() / short)
+        long = "/".join(["very-long-group-name"] * 12) + "/lib/1.0/lib-1.0.pom"
+        target = mirrors.cache_path(long)
+        self.assertIn("_long", target.parts)
+        self.assertEqual(target.suffix, ".bin")
+        self.assertEqual(target, mirrors.cache_path(long))
+        self.assertLessEqual(len(str(target)) + len(".part"), mirrors._MAX_CACHE_PATH)
+
     def test_needs_mirror(self) -> None:
         text = (
             "Could not GET https://maven.neoforged.net/releases/x\n"
@@ -256,6 +266,25 @@ class SourceHealthTests(unittest.TestCase):
         health.fail("b")
         self.assertEqual([name for name, _ in health.order(sources)], ["a", "b"])
 
+    def test_pinned_source_goes_first_for_neoforged_paths(self) -> None:
+        health = mirrors._SourceHealth()
+        sources = (("bmclapi", "http://b"), ("stellar", "http://s"))
+        health.ok("bmclapi", 0.1, 1024 * 1024)
+        self.assertEqual(
+            [name for name, _ in health.order(sources, "cpw/mods/x.jar")],
+            ["bmclapi", "stellar"],
+        )
+        self.assertEqual(
+            [
+                name
+                for name, _ in health.order(
+                    sources, "cpw/mods/x.jar", mirrors._pinned_sources("cpw/mods/x.jar")
+                )
+            ],
+            ["stellar", "bmclapi"],
+        )
+        self.assertEqual(mirrors._pinned_sources("com/google/guava/guava.jar"), ())
+
     def test_missing_path_is_skipped_then_reset(self) -> None:
         health = mirrors._SourceHealth()
         sources = (("a", "http://a"), ("b", "http://b"))
@@ -271,9 +300,10 @@ class RaceTests(TempDataCase):
         fast_server, fast = _serve(_RepoHandler, files={"m/a.jar": b"fast"})
         try:
             started = time.monotonic()
-            winner, _misses, _failures = mirrors._race(
+            winner, _misses, _failures, incomplete, _unresolved = mirrors._race(
                 [("slowrace2", slow), ("fastrace2", fast)], "m/a.jar", mode="bytes"
             )
+            self.assertFalse(incomplete)
             elapsed = time.monotonic() - started
             self.assertIsNotNone(winner)
             self.assertEqual(winner[0], "fastrace2")
@@ -284,18 +314,73 @@ class RaceTests(TempDataCase):
                 server.shutdown()
                 server.server_close()
 
+    def test_race_marks_unanswered_source_incomplete(self) -> None:
+        server, base = _serve(_SlowHandler)
+        try:
+            winner, _misses, failures, incomplete, _unresolved = mirrors._race(
+                [("slowinc", base)], "m/a.jar", mode="bytes", timeout=0.2, overall=0.2
+            )
+            self.assertIsNone(winner)
+            self.assertEqual(failures, 0)
+            self.assertTrue(incomplete)
+        finally:
+            server.shutdown()
+            server.server_close()
+
     def test_race_reports_missing_when_all_404(self) -> None:
         server, base = _serve(_RepoHandler, files={})
         try:
-            winner, misses, failures = mirrors._race(
+            winner, misses, failures, incomplete, _unresolved = mirrors._race(
                 [("missrace", base)], "m/none.jar", mode="bytes"
             )
             self.assertIsNone(winner)
             self.assertEqual(misses, 1)
             self.assertEqual(failures, 0)
+            self.assertFalse(incomplete)
         finally:
             server.shutdown()
             server.server_close()
+
+    def test_race_flags_unanswered_required_source(self) -> None:
+        server, base = _serve(_SlowHandler)
+        try:
+            winner, _misses, failures, incomplete, unresolved = mirrors._race(
+                [("slowreq", base)],
+                "m/a.jar",
+                mode="bytes",
+                timeout=0.2,
+                overall=0.2,
+                required=("slowreq",),
+            )
+            self.assertIsNone(winner)
+            self.assertEqual(failures, 0)
+            self.assertTrue(incomplete)
+            self.assertTrue(unresolved)
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_race_accepts_404_when_unpinned_source_is_slow(self) -> None:
+        miss_server, miss_base = _serve(_RepoHandler, files={})
+        slow_server, slow_base = _serve(_SlowHandler)
+        try:
+            winner, misses, _failures, incomplete, unresolved = mirrors._race(
+                [("missfast", miss_base), ("slowother", slow_base)],
+                "m/none.jar",
+                mode="bytes",
+                timeout=2.0,
+                overall=0.6,
+                stagger=0.1,
+                required=("missfast",),
+            )
+            self.assertIsNone(winner)
+            self.assertEqual(misses, 1)
+            self.assertTrue(incomplete)
+            self.assertFalse(unresolved)
+        finally:
+            for server in (miss_server, slow_server):
+                server.shutdown()
+                server.server_close()
 
 
 class MirrorServiceTests(TempDataCase):
@@ -313,6 +398,33 @@ class MirrorServiceTests(TempDataCase):
             self.assertEqual(cached.read_bytes(), b"data")
         finally:
             service.stop()
+
+    def test_missing_cache_expires_and_clears_on_new_build(self) -> None:
+        service = mirrors.MirrorService()
+        try:
+            service._mark_missing("cpw/mods/modlauncher/11.0.5/modlauncher-11.0.5.pom")
+            self.assertTrue(service._is_missing("cpw/mods/modlauncher/11.0.5/modlauncher-11.0.5.pom"))
+            service._missing["cpw/mods/modlauncher/11.0.5/modlauncher-11.0.5.pom"] = 0.0
+            self.assertFalse(service._is_missing("cpw/mods/modlauncher/11.0.5/modlauncher-11.0.5.pom"))
+            service._mark_missing("a/b.jar")
+            service.init_script()
+            self.assertFalse(service._is_missing("a/b.jar"))
+        finally:
+            service.stop()
+
+    def test_server_swallows_client_disconnects(self) -> None:
+        from unittest import mock
+
+        server = mirrors._Server(("127.0.0.1", 0), mirrors._Handler)
+        try:
+            with mock.patch("sys.stderr") as stderr:
+                try:
+                    raise ConnectionResetError(10054, "reset")
+                except ConnectionResetError:
+                    server.handle_error(None, ("127.0.0.1", 0))
+                stderr.write.assert_not_called()
+        finally:
+            server.server_close()
 
     def test_missing_jar_returns_503_only_for_transient(self) -> None:
         service = mirrors.MirrorService()

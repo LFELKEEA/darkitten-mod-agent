@@ -49,6 +49,8 @@ class GradleResolveTests(TempDataCase):
         init.write_text("", encoding="utf-8")
         launch = gradle.resolve_launch(root, "build", init_script=init)
         self.assertIsNotNone(launch.command)
+        self.assertTrue(launch.command.startswith('cmd /d /s /c "'))
+        self.assertTrue(launch.command.endswith('"'))
         result = subprocess.run(
             launch.command,
             cwd=str(root),

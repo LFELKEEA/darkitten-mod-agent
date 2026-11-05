@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import queue
 import re
 import shutil
+import sys
 import tempfile
 import threading
 import time
@@ -69,6 +71,20 @@ def repo_cache() -> Path:
     return path
 
 
+# Windows 默认 MAX_PATH 是 260，Gradle 插件坐标很容易超长。超长时 open()
+# 直接抛 OSError，客户端只会看到“发完响应头就断开”，Gradle 会反复重试。
+_MAX_CACHE_PATH = 235
+
+
+def cache_path(maven_path: str) -> Path:
+    base = repo_cache()
+    target = base / maven_path
+    if len(str(target)) + len(".part") <= _MAX_CACHE_PATH:
+        return target
+    digest = hashlib.sha1(maven_path.encode("utf-8")).hexdigest()
+    return base / "_long" / digest[:2] / f"{digest}.bin"
+
+
 def _normalize(path: str) -> str:
     path = path.split("?", 1)[0].strip("/")
     return path
@@ -90,7 +106,7 @@ def _open(url: str, timeout: float):
 
 # Stellar 的元数据最全，但同时连接多了会直接卡住不返回。给每个源单独限流，
 # 拿不到名额的请求排队，总比大家一起去把源拖死好。
-_SOURCE_LIMITS = {"stellar": 3, "minguncle": 4}
+_SOURCE_LIMITS = {"stellar": 6, "minguncle": 4}
 _slots: dict[str, threading.Semaphore] = {}
 _slots_guard = threading.Lock()
 
@@ -161,19 +177,24 @@ class _SourceHealth:
         self._streak: dict[str, int] = {}
         self._absent: dict[tuple[str, str], float] = {}
 
-    def order(self, sources, path: str = "") -> list[tuple[str, str]]:
+    def order(self, sources, path: str = "", pin: tuple[str, ...] = ()) -> list[tuple[str, str]]:
         now = time.time()
         with self._lock:
-            ready: list[tuple[float, int, str, str]] = []
+            ready: list[tuple[int, float, int, str, str]] = []
             for index, (name, base) in enumerate(sources):
                 if self._absent.get((name, path), 0.0) > now:
                     continue
                 if self._penalty.get(name, 0.0) > now:
                     continue
-                ready.append((self._speed.get(name, 0.0), index, name, base))
-        ready.sort(key=lambda item: (-item[0], item[1]))
-        ordered = [(name, base) for _speed, _index, name, base in ready]
-        return ordered or list(sources)
+                rank = 0 if name in pin else 1
+                ready.append((rank, self._speed.get(name, 0.0), index, name, base))
+        ready.sort(key=lambda item: (item[0], -item[1], item[2]))
+        ordered = [(name, base) for _rank, _speed, _index, name, base in ready]
+        if ordered:
+            return ordered
+        pinned = [(name, base) for name, base in sources if name in pin]
+        rest = [(name, base) for name, base in sources if name not in pin]
+        return pinned + rest
 
     def ok(self, name: str, seconds: float, size: int) -> None:
         speed = size / max(seconds, 0.05) / 1024.0
@@ -191,7 +212,7 @@ class _SourceHealth:
 
     def miss(self, name: str, path: str) -> None:
         with self._lock:
-            self._absent[(name, path)] = time.time() + 600.0
+            self._absent[(name, path)] = time.time() + _ABSENT_TTL
 
     def fail(self, name: str, transient: bool = True) -> None:
         if not transient:
@@ -225,8 +246,8 @@ def _close_quietly(response) -> None:
         pass
 
 
-_RACE_TIMEOUT = 12.0
-_RACE_OVERALL = 22.0
+_RACE_TIMEOUT = 30.0
+_RACE_OVERALL = 60.0
 _RACE_STAGGER = 0.3
 
 
@@ -240,6 +261,7 @@ def _race(
     overall: float = _RACE_OVERALL,
     headers: dict[str, str] | None = None,
     stagger: float = _RACE_STAGGER,
+    required: tuple[str, ...] = (),
 ):
     """并发打开多个源，返回最先拿到数据的那个。
 
@@ -247,8 +269,11 @@ def _race(
       stream - 读够 need 字节就停，response 留给调用方继续读；
       bytes  - 直接读完整个文件并关闭 response；
       head   - 只取内容长度，顺便确认文件存在。
-    返回 ((name, payload, response, slot), misses, failures)。response 为 None
-    表示调用方不需要继续读。
+    返回 ((name, payload, response, slot), misses, failures, incomplete,
+    unresolved)。incomplete 表示还有源没来得及回答（排队或超时）；
+    unresolved 表示 required 里的权威源没有给出明确答复，这两种情况都不能
+    断定文件不存在。
+    response 为 None 表示调用方不需要继续读。
     """
     results: queue.Queue = queue.Queue()
     stop = threading.Event()
@@ -327,6 +352,7 @@ def _race(
     winner = None
     misses = 0
     failures = 0
+    answered: set[str] = set()
     while winner is None:
         now = time.monotonic()
         if launched < len(sources) and now < deadline:
@@ -348,11 +374,14 @@ def _race(
         if status == "ok":
             stop.set()
             winner = (name, payload, response, slot)
+            answered.add(name)
         elif status == "miss":
             misses += 1
+            answered.add(name)
             _health.miss(name, maven_path)
         elif status == "fail":
             failures += 1
+            answered.add(name)
             _health.fail(name)
     stop.set()
     # 胜出后其它线程可能刚好也拿到数据，短时间清掉，避免连接和名额泄漏。
@@ -367,19 +396,26 @@ def _race(
                 _close_quietly(item[3])
             if item[4] is not None:
                 item[4].release()
-    return winner, misses, failures
+    incomplete = winner is None and (pending > 0 or launched < len(sources))
+    # 权威源（例如 Neoforged 相关路径上的 Stellar）没答复就不能当 404，
+    # 但普通路径只要有一个源明确回了 404，就可以放心告诉 Gradle 去下一个仓库。
+    unresolved = winner is None and any(name not in answered for name in required)
+    return winner, misses, failures, incomplete, unresolved
 
 
 def fetch(maven_path: str, timeout: float = 20.0, attempts: int = 2) -> bytes | None:
     """并发从各镜像取一个 Maven 路径，全部失败返回 None。"""
     maven_path = _normalize(maven_path)
-    ordered = _health.order(SOURCES + (("central", CENTRAL),), maven_path)
-    winner, _misses, _failures = _race(
+    ordered = _health.order(
+        SOURCES + (("central", CENTRAL),), maven_path, _pinned_sources(maven_path)
+    )
+    winner, _misses, _failures, _incomplete, _unresolved = _race(
         ordered,
         maven_path,
         mode="bytes",
-        timeout=min(timeout, 12.0),
-        overall=min(timeout + 3.0, 18.0),
+        timeout=min(timeout, 30.0),
+        overall=min(timeout + 5.0, 60.0),
+        required=_pinned_sources(maven_path),
     )
     if winner is None:
         return None
@@ -454,7 +490,7 @@ def fetch_to(
     part.unlink(missing_ok=True)
     pool = [(name, base) for name, base in SOURCES if not fast_only or name in FAST_SOURCE_NAMES]
     pool.append(("central", CENTRAL))
-    for name, base in _health.order(pool, maven_path):
+    for name, base in _health.order(pool, maven_path, _pinned_sources(maven_path)):
         result = _download_from(base, maven_path, part, timeout, attempts, name=name)
         if result is True:
             os.replace(part, target)
@@ -806,6 +842,46 @@ _MCD_MODULE = re.compile(r"^net/neoforged/minecraft-dependencies/([^/]+)/minecra
 # 本地 Maven 代理
 
 
+_MISS_TTL = 30.0
+_ABSENT_TTL = 60.0
+MIRROR_PORT = 55878
+
+# NeoForged 自己的仓库（maven.neoforged.net）被墙时，只有 Stellar 镜像是完整的。
+# 这些路径先问 Stellar，避免前面几个只镜像 Mojang 的源返回 404 把整个解析带偏。
+_PINNED_PREFIXES = {
+    "cpw/": ("stellar",),
+    "net/neoforged/": ("stellar",),
+    "net/minecraftforge/": ("stellar",),
+    "io/codechicken/": ("stellar",),
+    "org/vineflower/": ("stellar",),
+    # Gradle 自己的工具链解析插件只在插件门户上，先问门户可以少绕一圈。
+    "org/gradle/toolchains/": ("portal",),
+}
+
+
+def _pinned_sources(path: str) -> tuple[str, ...]:
+    for prefix, names in _PINNED_PREFIXES.items():
+        if path.startswith(prefix):
+            return names
+    return ()
+
+# Gradle 探测依赖时会频繁建立/关闭连接，客户端先断开属于正常现象。
+_DISCONNECT_ERRORS = (BrokenPipeError, ConnectionResetError, ConnectionAbortedError)
+
+
+class _Server(ThreadingHTTPServer):
+    daemon_threads = True
+    # Windows 下 SO_REUSEADDR 允许两个进程抢同一个端口，连接会被老进程接走，
+    # 结果就是新构建用到旧进程里过期的 404 缓存。这里宁可绑定失败换端口。
+    allow_reuse_address = False
+
+    def handle_error(self, request, client_address) -> None:
+        error = sys.exc_info()[1]
+        if isinstance(error, _DISCONNECT_ERRORS):
+            return
+        super().handle_error(request, client_address)
+
+
 class _Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "DarkittenMaven/1.0"
@@ -822,7 +898,7 @@ class _Handler(BaseHTTPRequestHandler):
             self.end_headers()
             if self.command != "HEAD":
                 self.wfile.write(data)
-        except (BrokenPipeError, ConnectionResetError):
+        except _DISCONNECT_ERRORS:
             pass
 
     def _send_file(self, path: Path) -> None:
@@ -836,7 +912,7 @@ class _Handler(BaseHTTPRequestHandler):
                 return
             with open(path, "rb") as handle:
                 shutil.copyfileobj(handle, self.wfile, 1 << 16)
-        except (BrokenPipeError, ConnectionResetError):
+        except _DISCONNECT_ERRORS:
             pass
         except OSError:
             self._send_bytes(b"", 500)
@@ -892,7 +968,7 @@ class MirrorService:
         self._thread: threading.Thread | None = None
         self._locks: dict[str, threading.Lock] = {}
         self._locks_guard = threading.Lock()
-        self._missing: set[str] = set()
+        self._missing: dict[str, float] = {}
         self._script: Path | None = None
 
     # -- 生命周期 -----------------------------------------------------
@@ -906,8 +982,17 @@ class MirrorService:
     def start(self) -> str:
         if self._server is not None:
             return self.base_url
-        server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
-        server.daemon_threads = True
+        # 端口固定，代理地址在每次构建之间保持一致。Gradle 的依赖解析缓存
+        # 以仓库 URL 为键，端口一变就要重新访问所有仓库，构建会慢上好几分钟。
+        server = None
+        for port in (MIRROR_PORT, *range(MIRROR_PORT + 1, MIRROR_PORT + 16), 0):
+            try:
+                server = _Server(("127.0.0.1", port), _Handler)
+                break
+            except OSError:
+                continue
+        if server is None:
+            raise OSError("找不到可用的本地镜像端口")
         server.service = self  # type: ignore[attr-defined]
         thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.2}, daemon=True)
         thread.start()
@@ -927,8 +1012,26 @@ class MirrorService:
         self._server = None
         self._thread = None
 
+    # -- 404 缓存 -------------------------------------------------------
+    def _is_missing(self, maven_path: str) -> bool:
+        expires = self._missing.get(maven_path)
+        if expires is None:
+            return False
+        if expires <= time.time():
+            self._missing.pop(maven_path, None)
+            return False
+        return True
+
+    def _mark_missing(self, maven_path: str) -> None:
+        self._missing[maven_path] = time.time() + _MISS_TTL
+
+    def forget_missing(self) -> None:
+        """新一次构建开始时清掉 404 缓存，让上游短暂缺失的包重新有机会下载。"""
+        self._missing.clear()
+
     # -- init script ---------------------------------------------------
     def init_script(self) -> Path:
+        self.forget_missing()
         base = self.start()
         target = cache_dir() / "mirror.gradle"
         content = _INIT_TEMPLATE.format(mirror=base, mojang=MOJANG_LIBS)
@@ -943,13 +1046,13 @@ class MirrorService:
 
     # -- 解析 ---------------------------------------------------------
     def cached(self, maven_path: str) -> Path | None:
-        cache = repo_cache() / maven_path
+        cache = cache_path(maven_path)
         if cache.is_file() and cache.stat().st_size > 0:
             return cache
         return None
 
     def store(self, maven_path: str, data: bytes) -> Path:
-        cache = repo_cache() / maven_path
+        cache = cache_path(maven_path)
         cache.parent.mkdir(parents=True, exist_ok=True)
         tmp = cache.with_suffix(cache.suffix + ".part")
         tmp.write_bytes(data)
@@ -958,24 +1061,29 @@ class MirrorService:
 
     def stream(self, maven_path: str, handler: _Handler) -> None:
         """并发试源，先把首块转给 Gradle，剩下的边下边缓存。"""
-        if maven_path in self._missing:
+        if self._is_missing(maven_path):
             handler._missing()
             return
-        cache = repo_cache() / maven_path
+        cache = cache_path(maven_path)
         cache.parent.mkdir(parents=True, exist_ok=True)
         tmp = cache.with_suffix(cache.suffix + ".part")
         self._log(f"[镜像] 获取 {maven_path}")
         started = time.monotonic()
-        ordered = _health.order(SOURCES + (("central", CENTRAL),), maven_path)
-        winner, _misses, failures = _race(ordered, maven_path, mode="stream")
+        pinned = _pinned_sources(maven_path)
+        ordered = _health.order(
+            SOURCES + (("central", CENTRAL),), maven_path, pinned
+        )
+        winner, misses, failures, incomplete, unresolved = _race(
+            ordered, maven_path, mode="stream", required=pinned
+        )
         if winner is None:
             tmp.unlink(missing_ok=True)
-            if failures:
-                # 超时而已，别记成“没有这个文件”，否则本轮构建就一直 404 了。
+            if unresolved or (misses == 0 and (failures or incomplete)):
+                # 权威源没答复，或者根本没有源明确说“没有”，别记成 404。
                 self._log(f"[镜像] {maven_path} 上游暂时不可用，稍后重试")
                 handler._send_bytes(b"", 503)
             else:
-                self._missing.add(maven_path)
+                self._mark_missing(maven_path)
                 handler._missing()
             return
         name, first, response, slot = winner
@@ -989,7 +1097,7 @@ class MirrorService:
                 else:
                     handler.close_connection = True
                 handler.end_headers()
-            except (BrokenPipeError, ConnectionResetError):
+            except _DISCONNECT_ERRORS:
                 tmp.unlink(missing_ok=True)
                 return
             try:
@@ -1002,7 +1110,7 @@ class MirrorService:
                             break
                         handler.wfile.write(chunk)
                         handle.write(chunk)
-            except (BrokenPipeError, ConnectionResetError):
+            except _DISCONNECT_ERRORS:
                 tmp.unlink(missing_ok=True)
                 return
             except Exception:  # noqa: BLE001 - 头都发出去了，只能断开让 Gradle 重试
@@ -1024,25 +1132,29 @@ class MirrorService:
 
     def head(self, maven_path: str, handler: _Handler) -> None:
         """Gradle 有时用 HEAD 探测文件是否存在，不能一律回 404。"""
-        if maven_path in self._missing:
+        if self._is_missing(maven_path):
             handler._missing()
             return
         started = time.monotonic()
-        ordered = _health.order(SOURCES + (("central", CENTRAL),), maven_path)
-        winner, _misses, failures = _race(
+        pinned = _pinned_sources(maven_path)
+        ordered = _health.order(
+            SOURCES + (("central", CENTRAL),), maven_path, pinned
+        )
+        winner, misses, failures, incomplete, unresolved = _race(
             ordered,
             maven_path,
             mode="head",
-            timeout=8.0,
-            overall=10.0,
+            timeout=30.0,
+            overall=45.0,
             headers={"Range": "bytes=0-0"},
             stagger=0.2,
+            required=pinned,
         )
         if winner is None:
-            if failures:
+            if unresolved or (misses == 0 and (failures or incomplete)):
                 handler._send_bytes(b"", 503)
             else:
-                self._missing.add(maven_path)
+                self._mark_missing(maven_path)
                 handler._missing()
             return
         name, length, _response, _slot = winner
