@@ -512,6 +512,22 @@ class AgentLoopTests(TempDataCase):
         self.assertIn("已折叠", messages[3]["content"])
         self.assertGreater(len(messages[-1]["content"]), 90_000)
 
+    def test_history_window_strips_old_dsml_markup(self) -> None:
+        dsml = (
+            '<|DSML|calls><|DSML|invoke name="tool">'
+            '{"tool":"read_file","path":"a.java"}'
+            "<|/DSML|invoke><|/DSML|calls>"
+        )
+        history = [
+            {"role": "user", "content": "继续"},
+            {"role": "assistant", "content": dsml},
+            {"role": "user", "content": "再继续"},
+            {"role": "assistant", "content": "读完了。"},
+        ]
+        window = agent_mod._history_window(history, 10)
+        self.assertTrue(all("DSML" not in item["content"] for item in window))
+        self.assertEqual([item["content"] for item in window], ["继续", "再继续", "读完了。"])
+
     def test_history_window_respects_char_budget(self) -> None:
         history = [{"role": "user", "content": "x" * 100} for _ in range(10)]
         with mock.patch("dma.agent.HISTORY_CHAR_BUDGET", 250):

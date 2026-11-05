@@ -227,9 +227,19 @@ MESSAGE_CHAR_BUDGET = 480_000
 def _history_window(history: list[dict[str, str]], turns: int) -> list[dict[str, str]]:
     """按轮数和字符预算截取历史，长对话不会把上下文塞爆。"""
     items = list(history[-max(1, turns) * 2:])
+    cleaned: list[dict[str, str]] = []
+    for item in items:
+        content = str(item.get("content") or "")
+        if item.get("role") == "assistant":
+            # 旧版本可能把 DSML / <tool> 原始标记存进了会话记录，
+            # 升级后继续对话时先清掉，避免模型模仿这些标记。
+            content = strip_tool_blocks(content)
+            if not content:
+                continue
+        cleaned.append({"role": item.get("role", "user"), "content": content})
     kept: list[dict[str, str]] = []
     total = 0
-    for item in reversed(items):
+    for item in reversed(cleaned):
         length = len(str(item.get("content") or ""))
         if kept and total + length > HISTORY_CHAR_BUDGET:
             break
