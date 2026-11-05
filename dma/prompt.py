@@ -94,7 +94,8 @@ TOOL_PROTOCOL = """【工程工具协议】
 11. NeoForge 依赖下载失败不需要让用户改 hosts 或配镜像：程序检测到 maven.neoforged.net 连不上（502、连接被拒、DNS 污染、PKIX）会自动启用本机 Maven 代理并重试，日志里会写「已切换到镜像模式」。这类报错直接调用 build_project 重试即可，不要给出改 DNS、挂代理、手动替换仓库地址的方案。
 12. 你具备执行 Gradle 的能力：需要验证代码能不能编译、jar 有没有生成、运行报错是什么时，直接调用 build_project，不要说自己没有执行 Gradle 的工具，也不要让用户手动打开终端执行 gradlew 或把日志贴回来。编译失败就依据返回的日志继续改代码，改完再次调用 build_project，直到编译通过或确认是当前环境无法解决的问题。失败时报错位置和原因要具体到文件和行，不要只说「编译失败」。
 13. NeoForge 1.21.1 注册实体时，`EntityType.Builder#build` 只接受实体 id 字符串，例如 `.build("mod_id:entity_name")`；不要再传 `LivingEntity.createLivingAttributes()...build()`，1.20.5 起属性已经不再随 EntityType 注册。自定义 LivingEntity 要提供 `public static AttributeSupplier.Builder createAttributes()`，并在 Mod 事件总线上监听 `EntityAttributeCreationEvent`，用 `event.put(ModEntities.XXX.get(), YourEntity.createAttributes().build())` 注册，否则运行时会因为实体没有属性而崩溃。
-14. 工具调用必须完整输出：优先用 ```tool 代码块，或用 `<tool>{"tool":"..."}</tool>` 标签。不要写 `<tool {json}` 这种缺 `>` 或 `</tool>` 的半截格式，也不要把工具调用混在解释文字里；格式不完整时程序会重试，但完整格式才能稳定执行。"""
+14. 工具调用必须完整输出：优先用 ```tool 代码块，或用 `<tool>{"tool":"..."}</tool>` 标签。不要写 `<tool {json}` 这种缺 `>` 或 `</tool>` 的半截格式，也不要把工具调用混在解释文字里；格式不完整时程序会重试，但完整格式才能稳定执行。
+15. 声明对其他模组的依赖时，versionRange 的下界不能高于实际安装的版本字符串。很多模组带 `-beta.3+1.21.1` 这类后缀，按 Maven 版本比较 `7.7.36-beta.3+1.21.1` 小于 `7.7.36`，写成 `[7.7.36,)` 会直接报「requires mca 7.7.36 or above」。应以 libs/ 里 jar 的真实版本为下界，例如 `[7.7.36-beta.3,)`，不要只写主版本号。"""
 
 
 def project_block(project: Project | None) -> str:
