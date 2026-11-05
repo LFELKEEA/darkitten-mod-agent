@@ -133,6 +133,57 @@ class AgentLoopTests(TempDataCase):
         self.assertIn("没有解析成功", messages[1][-1]["content"])
         self.assertIn("plugins {}", messages[2][-1]["content"])
 
+    def test_plan_only_reply_requests_tool(self) -> None:
+        project = make_project(self)
+        (project.root / "build.gradle").write_text("plugins {}", encoding="utf-8")
+        worker = self.worker(project)
+        replies = [
+            "我继续，先读 build.gradle 现状，确认问题根因。",
+            '```tool\n{"tool":"read_file","path":"build.gradle"}\n```',
+            "读完了，配置正常。",
+        ]
+        messages: list[list[dict]] = []
+
+        def fake(ai, items):
+            messages.append(list(items))
+            return replies.pop(0)
+
+        with mock.patch("dma.agent.ai.request_chat", side_effect=fake):
+            run = worker._loop()
+        self.assertEqual(run.text, "读完了，配置正常。")
+        self.assertEqual(len(messages), 3)
+        self.assertIn("没有真正调用工具", messages[1][-1]["content"])
+        self.assertIn("plugins {}", messages[2][-1]["content"])
+
+    def test_plan_only_reply_retry_is_limited(self) -> None:
+        project = make_project(self)
+        worker = self.worker(project)
+        calls: list[int] = []
+
+        def fake(ai, items):
+            calls.append(1)
+            return "我先读一下工程结构。"
+
+        with mock.patch("dma.agent.ai.request_chat", side_effect=fake):
+            run = worker._loop()
+        self.assertEqual(len(calls), 3)
+        self.assertIn("我先读一下工程结构。", run.text)
+        self.assertIn("再发送「继续」", run.text)
+
+    def test_finished_summary_not_treated_as_plan(self) -> None:
+        project = make_project(self)
+        worker = self.worker(project)
+        calls: list[int] = []
+
+        def fake(ai, items):
+            calls.append(1)
+            return "已经读取了 build.gradle，确认配置没有问题。"
+
+        with mock.patch("dma.agent.ai.request_chat", side_effect=fake):
+            run = worker._loop()
+        self.assertEqual(len(calls), 1)
+        self.assertIn("已经读取", run.text)
+
     def test_unsafe_path_refused(self) -> None:
         project = make_project(self)
         worker = self.worker(project)

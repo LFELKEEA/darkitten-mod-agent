@@ -154,6 +154,23 @@ def _looks_like_tool_attempt(text: str) -> bool:
     )
 
 
+INTENT_MARKER_RE = re.compile(
+    r"(?:我先|让我|我继续|继续|接下来|现在|先|首先|下一步|我这就|我来|我去|我准备)"
+    r"[^。！？!?\n]{0,12}?"
+    r"(?:读取|读|查看|看一下|看|检查|查|搜索|搜|找|打开|确认|分析|核对|定位|梳理|了解)"
+)
+
+
+def _looks_like_action_intent(text: str) -> bool:
+    """识别“我先读 / 让我看看 / 接下来检查”这类只写计划、没有工具调用的回复。"""
+    body = (text or "").strip()
+    if not body or len(body) > 200:
+        return False
+    if re.search(r"已经|已读取|已查看|已完成|已修改|已修复|总结如下|结论如下", body):
+        return False
+    return bool(INTENT_MARKER_RE.search(body))
+
+
 def _parse_call_payload(raw: str) -> list[ToolCall]:
     try:
         data = json.loads(raw)
@@ -368,6 +385,7 @@ class AgentWorker(QObject):
         limit = max(0, int(self.config.max_steps or 0))
         step = 0
         broken_tool_retries = 0
+        intent_retries = 0
 
         while True:
             if limit > 0 and step >= limit:
@@ -405,7 +423,28 @@ class AgentWorker(QObject):
                         }
                     )
                     continue
+                if intent_retries < 2 and _looks_like_action_intent(visible or reply):
+                    # 有些模型只回一句“我先读 xxx”，不发工具调用，循环会把它当最终答复。
+                    # 这里要求它把计划变成实际调用，最多催两次，避免死循环。
+                    intent_retries += 1
+                    self.status.emit("模型只描述了计划，正在要求它直接执行…")
+                    messages.append({"role": "assistant", "content": reply})
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": (
+                                "你刚才只说明了下一步要做什么，没有真正调用工具，任务会停在这里。"
+                                "请不要只描述计划：现在就输出工具调用"
+                                "（```tool\n{\"tool\":\"...\"}\n```，一次可以调用多个），"
+                                "直接读取、搜索或修改。如果任务已经完成，请直接给出最终结论，"
+                                "不要再预告下一步。"
+                            ),
+                        }
+                    )
+                    continue
                 final_text = visible or reply.strip()
+                if intent_retries >= 2 and _looks_like_action_intent(final_text):
+                    final_text += "\n\n（这次没有实际执行工具调用。再发送「继续」我会接着执行。）"
                 run.text = final_text
                 return run
 
