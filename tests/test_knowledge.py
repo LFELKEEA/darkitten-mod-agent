@@ -692,6 +692,14 @@ class KnowledgeAgentTests(TempDataCase):
         prompt = build_system_prompt(project, SkillStore())
         self.assertIn("reference/decompiled/INDEX.md", prompt)
 
+    def test_prompt_selects_skills_by_query(self) -> None:
+        prompt = build_system_prompt(None, SkillStore(), query="帮我画一个纹理图标")
+        self.assertIn("光源左上", prompt)
+        prompt = build_system_prompt(None, SkillStore(), query="这个 3D 模型怎么建模")
+        self.assertIn("白模", prompt)
+        prompt = build_system_prompt(None, SkillStore(), query="重构代码并做性能优化")
+        self.assertIn("每 tick 路径", prompt)
+
     def test_prompt_contains_knowledge_section(self) -> None:
         prompt = build_system_prompt(
             None,

@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import os
 import re
+import struct
 import threading
+import zlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -68,6 +70,62 @@ def _needs_build(paths: list[str]) -> bool:
         if not suffix or suffix in BUILD_TRIGGER_EXTS:
             return True
     return False
+
+
+def _parse_pixel_color(value: Any) -> tuple[int, int, int, int]:
+    text = str(value or "").strip().lower()
+    if text in {"", "transparent", "none"}:
+        return (0, 0, 0, 0)
+    if text.startswith("#"):
+        text = text[1:]
+    if len(text) == 3:
+        text = "".join(char * 2 for char in text)
+    if len(text) == 6:
+        text += "ff"
+    if len(text) != 8 or not re.fullmatch(r"[0-9a-f]{8}", text):
+        raise ValueError(f"颜色格式不对：{value}（用 #RRGGBB 或 #RRGGBBAA）")
+    return tuple(int(text[index:index + 2], 16) for index in range(0, 8, 2))  # type: ignore[return-value]
+
+
+def _encode_pixel_png(
+    palette: dict[str, Any], rows: list[Any]
+) -> tuple[bytes, int, int]:
+    if not rows or not isinstance(rows, list):
+        raise ValueError("rows 不能为空。")
+    height = len(rows)
+    width = len(str(rows[0]))
+    if width < 1 or height < 1 or width > 512 or height > 512:
+        raise ValueError("纹理尺寸必须在 1x1 到 512x512 之间。")
+    colors = {str(key): _parse_pixel_color(value) for key, value in palette.items()}
+    pixels: list[bytes] = []
+    for index, row in enumerate(rows):
+        line = str(row)
+        if len(line) != width:
+            raise ValueError(f"第 {index + 1} 行长度是 {len(line)}，应为 {width}。")
+        chunk = bytearray()
+        for char in line:
+            if char not in colors:
+                raise ValueError(f"第 {index + 1} 行出现调色板里没有的字符：{char}")
+            chunk.extend(colors[char])
+        pixels.append(bytes(chunk))
+    raw = b"".join(b"\x00" + line for line in pixels)
+
+    def chunk(tag: bytes, data: bytes) -> bytes:
+        return (
+            struct.pack(">I", len(data))
+            + tag
+            + data
+            + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
+        )
+
+    header = struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0)
+    png = (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", header)
+        + chunk(b"IDAT", zlib.compress(raw, 9))
+        + chunk(b"IEND", b"")
+    )
+    return png, width, height
 
 
 class AgentError(Exception):
@@ -593,6 +651,7 @@ class AgentWorker(QObject):
             self.connector_store.catalog_text(),
             max_steps=self.config.max_steps,
             knowledge_text=knowledge_context(knowledge_hits),
+            query=self.user_text,
         )
         messages: list[dict[str, Any]] = [{"role": "system", "content": system}]
         messages.extend(_history_window(self.history, self.config.context_turns))
@@ -894,6 +953,40 @@ class AgentWorker(QObject):
                 )
                 state = "已自动写入" if written else "已加入待写入列表"
                 return f"{state}：{item.path}（{len(item.content)} 字符）"
+            if name == "pixel_art":
+                relative = str(args.get("path") or "").strip()
+                if not relative.lower().endswith(".png"):
+                    return "pixel_art 只支持 .png 路径。"
+                palette = args.get("palette")
+                rows = args.get("rows")
+                if not isinstance(palette, dict) or not isinstance(rows, list):
+                    return "pixel_art 需要 palette 对象和 rows 数组。"
+                try:
+                    data, width, height = _encode_pixel_png(palette, rows)
+                except ValueError as exc:
+                    return f"pixel_art 参数错误：{exc}"
+                if self.project is None:
+                    return "当前没有打开工程。"
+                try:
+                    target = project_mod.write_bytes(self.project.root, relative, data)
+                except Exception as exc:  # noqa: BLE001 - 路径或写盘失败
+                    return f"写入失败：{exc}"
+                try:
+                    relative = target.relative_to(self.project.root.resolve()).as_posix()
+                except ValueError:
+                    relative = relative.replace("\\", "/")
+                staged = PendingFile(
+                    path=relative,
+                    content=f"[PNG {width}x{height}，{len(data)} 字节]",
+                    reason="pixel_art",
+                    applied=True,
+                )
+                self._add_pending(staged)
+                self.applied.append(relative)
+                run.pending = list(self.pending)
+                run.applied = list(self.applied)
+                self.status.emit(f"已生成纹理 {relative}")
+                return f"已生成纹理：{relative}（{width}x{height}，{len(data)} 字节）"
             if name in {"edit_file", "replace_in_file", "apply_patch"}:
                 relative = str(args.get("path") or "").strip()
                 old = str(args.get("old") or args.get("find") or "")
@@ -1180,8 +1273,8 @@ class AgentWorker(QObject):
                 return connectors.fetch_url(url)[:MAX_FETCH_RESULT]
             return (
                 f"未知工具：{name}。可用工具：list_files、read_file、search_text、write_file、"
-                "read_skill、remember、recall、search_knowledge、read_knowledge、"
-                "decompile_jar、build_project、fix_build_setup、fetch_url。"
+                "edit_file、pixel_art、read_skill、remember、recall、search_knowledge、"
+                "read_knowledge、decompile_jar、build_project、fix_build_setup、fetch_url。"
             )
         except Exception as exc:
             return f"工具执行失败：{exc}"

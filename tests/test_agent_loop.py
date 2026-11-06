@@ -102,6 +102,36 @@ class AgentLoopTests(TempDataCase):
         # 已经自动写入的文件再次点“写入全部”时不会重复写。
         self.assertEqual(apply_pending(project, run.pending), [])
 
+    def test_pixel_art_tool_writes_png(self) -> None:
+        project = make_project(self)
+        worker = self.worker(project)
+        reply = (
+            '```tool\n{"tool":"pixel_art","path":"src/main/resources/assets/test_mod/'
+            'textures/item/gem.png","palette":{".":"transparent","a":"#ff0000"},'
+            '"rows":["aa","a."]}\n```'
+        )
+        with mock.patch("dma.agent.ai.request_chat", side_effect=[reply, "纹理已生成。"]):
+            run = worker._loop()
+        target = project.root / "src/main/resources/assets/test_mod/textures/item/gem.png"
+        self.assertTrue(target.is_file())
+        data = target.read_bytes()
+        self.assertTrue(data.startswith(b"\x89PNG\r\n\x1a\n"))
+        self.assertEqual(int.from_bytes(data[16:20], "big"), 2)
+        self.assertEqual(int.from_bytes(data[20:24], "big"), 2)
+        self.assertEqual(run.pending[0].path, target.relative_to(project.root).as_posix())
+        self.assertTrue(run.pending[0].applied)
+
+    def test_pixel_art_rejects_bad_rows(self) -> None:
+        project = make_project(self)
+        worker = self.worker(project)
+        reply = (
+            '```tool\n{"tool":"pixel_art","path":"bad.png","palette":{".":"transparent"},'
+            '"rows":["..","."]}\n```'
+        )
+        with mock.patch("dma.agent.ai.request_chat", side_effect=[reply, "结束"]):
+            worker._loop()
+        self.assertFalse((project.root / "bad.png").exists())
+
     def test_apply_pending_skips_auto_written(self) -> None:
         project = make_project(self)
         pending = [

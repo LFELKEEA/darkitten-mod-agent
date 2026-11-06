@@ -506,6 +506,25 @@ def write_text(root: Path, relative: str, content: str) -> Path:
     return target
 
 
+def write_bytes(root: Path, relative: str, data: bytes) -> Path:
+    """写入纹理、图标这类二进制资源，覆盖前同样备份。"""
+    if len(data) > MAX_WRITE_CHARS:
+        raise ProjectError("单个文件超过 2,000,000 字节，已拒绝写入。")
+    target = safe_path(root, relative)
+    if target.exists():
+        if target.is_dir():
+            raise ProjectError(f"目标是一个目录：{relative}")
+        backup = _backup_path(Path(root), Path(relative))
+        backup.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            shutil.copy2(target, backup)
+        except OSError:
+            pass
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(data)
+    return target
+
+
 def remember_project(project: Project) -> None:
     path = paths.projects_path()
     items: list[dict[str, Any]] = []

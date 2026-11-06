@@ -31,6 +31,7 @@ Mod ID 只能是小写字母、数字、下划线，必须以字母开头，不�
 - 必须区分【客户端】【服务端】【通用】。
 - 资源文件要一并给出：方块状态、物品/方块模型、配方、战利品表、标签、语言文件、sounds.json。
 - 如果版本支持 Datagen，优先给 Datagen 代码，而不是手写大量重复 JSON。
+- 纹理和图标用 pixel_art 生成 PNG；3D 模型用 Minecraft 模型 JSON；不要在回复里贴无法落盘的二进制内容。
 
 【Mixin 与风险】
 - 能用官方事件解决就不要用 Mixin。
@@ -68,6 +69,7 @@ TOOL_PROTOCOL = """【工程工具协议】
 - search_text: {"tool":"search_text","query":"关键字"}
 - edit_file 精确替换已有文件的一处内容（推荐，省 token）: {"tool":"edit_file","path":"相对路径","old":"原文片段","new":"替换后的内容"}
 - write_file: {"tool":"write_file","path":"相对路径","content":"完整文件内容"}  // 新建文件或整体重写
+- pixel_art 直接生成像素纹理 PNG（RGBA，行内每个字符对应调色板里的颜色）: {"tool":"pixel_art","path":"src/main/resources/assets/<modid>/textures/item/gem.png","palette":{".":"transparent","o":"#1b1b1f","a":"#7fd6ff"},"rows":["....","...."]}
 - read_skill: {"tool":"read_skill","id":"fabric-scaffold"}
 - remember: {"tool":"remember","content":"值得长期记住的工程决定或踩坑"}
 - recall: {"tool":"recall","query":"关键字"}
@@ -100,7 +102,9 @@ TOOL_PROTOCOL = """【工程工具协议】
 15. 声明对其他模组的依赖时，versionRange 的下界不能高于实际安装的版本字符串。很多模组带 `-beta.3+1.21.1` 这类后缀，按 Maven 版本比较 `7.7.36-beta.3+1.21.1` 小于 `7.7.36`，写成 `[7.7.36,)` 会直接报「requires mca 7.7.36 or above」。应以 libs/ 里 jar 的真实版本为下界，例如 `[7.7.36-beta.3,)`，不要只写主版本号。
 16. 不要在回复里只写“我先读/我先看/接下来检查”然后结束。说了要读、要查、要改，就必须在同一轮输出对应的工具调用；只有确实不需要工具时才给出最终结论。
 17. 开启「自动写入 + 自动编译」时，write_file / edit_file 会直接落盘，宿主在你写完这一轮后会自动执行一次 build；失败会把日志回传给你修一轮。所以不要为了等编译而空转，写完就给出本轮说明即可。
-18. 任务完成时的最终答复必须能直接验收：列出改动的文件、编译结果（成功/失败及原因）、jar 产物在 build/libs 下的名字，以及游戏内安装与测试步骤。不要用“接下来我会…”结尾。"""
+18. 任务完成时的最终答复必须能直接验收：列出改动的文件、编译结果（成功/失败及原因）、jar 产物在 build/libs 下的名字，以及游戏内安装与测试步骤。不要用“接下来我会…”结尾。
+19. 纹理、图标、GUI 优先用 pixel_art 直接生成 PNG；3D 模型写 Minecraft 模型 JSON（elements / faces / display 或 GeckoLib 的 .geo.json），不要声称能直接生成 .obj / .fbx。架构图、流程图用 write_file 写 SVG 或 draw.io XML。需要像素图时按 visual-design 技能的调色板与轮廓规则来画。
+20. 写代码前先读目标文件；优先官方事件/API，必须用 Mixin 时按 mixin-safety 标注风险；架构、性能、并发、重构按 code-engineering 技能执行，改完调用 build_project 验证，不要只给方案。"""
 
 
 def project_block(project: Project | None) -> str:
@@ -135,6 +139,7 @@ def build_system_prompt(
     connector_text: str = "",
     max_steps: int = 0,
     knowledge_text: str = "",
+    query: str = "",
 ) -> str:
     limit = "不限制" if max_steps <= 0 else f"最多 {max_steps} 轮"
     parts = [
@@ -157,8 +162,9 @@ def build_system_prompt(
             relevant.append("porting")
         if project.meta.task_type in {"在现有工程上修改/新增功能", "在现有工程上修改 / 新增功能"}:
             relevant.append("incremental-edit")
+    selected = skill_store.select_for(query, relevant, limit=6)
     loaded = []
-    for skill_id in dict.fromkeys(relevant):
+    for skill_id in selected:
         skill = skill_store.get(skill_id)
         if skill and skill.enabled:
             loaded.append(f"\n## 技能：{skill.name}（{skill.id}）\n{skill.body.strip()}")

@@ -22,6 +22,9 @@ class UiSmokeTests(TempDataCase):
 
         theme.apply_theme(self.app, 13)
         window = MainWindow()
+        # 测试里不弹首次启动的快捷方式对话框，也不去联网检查更新。
+        window.config.shortcut_offered = True
+        window.config.update_url = ""
         window.show()
         self.app.processEvents()
         self.assertEqual(window.stack.count(), 8)
@@ -64,6 +67,9 @@ class UiSmokeTests(TempDataCase):
 
         theme.apply_theme(self.app, 13)
         window = MainWindow()
+        # 测试里不弹首次启动的快捷方式对话框，也不去联网检查更新。
+        window.config.shortcut_offered = True
+        window.config.update_url = ""
         window.config.auto_apply = True
         window.chat_page._set_pending(
             [
@@ -116,6 +122,9 @@ class UiSmokeTests(TempDataCase):
         )
         theme.apply_theme(self.app, 13)
         window = MainWindow()
+        # 测试里不弹首次启动的快捷方式对话框，也不去联网检查更新。
+        window.config.shortcut_offered = True
+        window.config.update_url = ""
         page = window.chat_page
         page._set_project(project, quiet=True)
         self.assertEqual(
