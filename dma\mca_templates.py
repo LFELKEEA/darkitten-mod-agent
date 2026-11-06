@@ -1,8 +1,8 @@
-"""MCA Reborn 兼容、皮物道具与客户端皮肤的 Java 模板。
+"""MCA Reborn 兼容、身份道具与客户端外观的 Java 模板。
 
-这些模板与 PoHypSkin 实际可编译、可运行的实现保持一致：
-- 附身/穿皮会同步姓名、性别、职业、配偶、父母、子女；
-- 村民本体随皮物保存，解除时原样放回世界；
+这些模板与实机验证过、可编译可运行的实现保持一致：
+- 身份同步会同步姓名、性别、职业、配偶、父母、子女；
+- 村民本体随身份道具保存，解除时原样放回世界；
 - 客户端通过 AbstractClientPlayer#getSkin 覆盖玩家皮肤，MCA 玩家由 MCA 自己渲染。
 占位符：@PACKAGE@ @MOD_ID@ @CLASS@。
 """
@@ -55,20 +55,20 @@ import java.util.UUID;
 
 /**
  * MCA Reborn 兼容层：把凡家村民的外观、身份和家庭关系同步到玩家，
- * 以及退出附身时完整还原。
+ * 以及退出时完整还原。
  *
  * <p>两条入口：</p>
  * <ul>
- *     <li>催眠手机直接附身：{@link #possess(ServerPlayer, Entity)} / {@link #release(ServerPlayer)}</li>
- *     <li>穿皮物：{@link #wear(ServerPlayer, ItemStack)} / {@link #release(ServerPlayer)}</li>
+ *     <li>道具右键直接接管身份：{@link #possess(ServerPlayer, Entity)} / {@link #release(ServerPlayer)}</li>
+ *     <li>穿戴身份道具：{@link #wear(ServerPlayer, ItemStack)} / {@link #release(ServerPlayer)}</li>
  * </ul>
  *
- * <p>写身份前先把玩家原本的资料快照到持久化数据里；同时把被附身村民的本体
- * （身体 NBT、坐标、维度、实体类型）一起存进去，解除附身时原样放回世界，
+ * <p>写身份前先把玩家原本的资料快照到持久化数据里；同时把被接管村民的本体
+ * （身体 NBT、坐标、维度、实体类型）一起存进去，解除时原样放回世界，
  * 不会凭空少一个村民。</p>
  */
 public final class McaCompat {
-    private static final String SNAPSHOT_KEY = "pohypskin_mca_snapshot";
+    private static final String SNAPSHOT_KEY = "mca_identity_snapshot";
     private static final String MODE_KEY = "Mode";
     private static final String TOKEN_KEY = "Token";
     private static final String VILLAGER_KEY = "Villager";
@@ -79,7 +79,7 @@ public final class McaCompat {
     private McaCompat() {
     }
 
-    /** 解除附身后通知客户端丢掉缓存的村民外观；否则皮肤会停留在村民状态。 */
+    /** 解除身份同步后通知客户端丢掉缓存的村民外观；否则皮肤会停留在村民状态。 */
     public record ClearPayload(UUID player) implements CustomPacketPayload {
         public static final CustomPacketPayload.Type<ClearPayload> TYPE =
                 new CustomPacketPayload.Type<>(
@@ -167,7 +167,7 @@ public final class McaCompat {
         );
     }
 
-    /** 用玩家自己的数据覆盖当前身份，用于解除附身/脱下皮物。 */
+    /** 用玩家自己的数据覆盖当前身份，用于解除身份同步/脱下身份道具。 */
     public static void restore(ServerPlayer player, Snapshot snapshot) {
         if (snapshot == null) {
             return;
@@ -229,7 +229,7 @@ public final class McaCompat {
             return false;
         }
         if (isPossessed(player)) {
-            // 已经附身着别的身体：先完整归还，再接管新的。
+            // 已经同步着别的身体：先完整归还，再接管新的。
             release(player);
         }
         CompoundTag info = villagerTag(villager);
@@ -245,15 +245,15 @@ public final class McaCompat {
         }
         info.putBoolean("Removed", true);
         storeSnapshot(player, before, MODE_PHONE, "", info);
-        // 身体已经被玩家接管，原实体从世界里移除，解除附身时再放回。
+        // 身体已经被玩家接管，原实体从世界里移除，解除时再放回。
         villager.discard();
         return true;
     }
 
     /**
-     * 穿上皮物时调用。
+     * 穿上身份道具时调用。
      *
-     * <p>村民皮物会连同姓名、职业、配偶、子女、父母一起覆盖；
+     * <p>村民身份会连同姓名、职业、配偶、子女、父母一起覆盖；
      * 普通玩家皮肤只改外观和显示名，不动 MCA 关系。</p>
      */
     public static boolean wear(ServerPlayer player, ItemStack skin) {
@@ -445,7 +445,7 @@ public final class McaCompat {
         return info;
     }
 
-    /** 用道具捕获一只 MCA 村民，返回可直接穿戴的皮物。 */
+    /** 用道具捕获一只 MCA 村民，返回可直接穿戴的身份道具。 */
     public static ItemStack captureVillager(Entity target) {
         if (!(target instanceof VillagerEntityMCA villager)) {
             return ItemStack.EMPTY;
@@ -457,7 +457,7 @@ public final class McaCompat {
         CompoundTag info = villagerTag(villager);
         FamilyTreeNode node = relationship.getFamilyEntry();
         ItemStack skin = SkinData.createVillagerSkin(node.getName(), node.id(), info);
-        // 皮物就是这具身体；原实体先离开世界，穿皮/解除附身时再放回。
+        // 这份道具就是这具身体；原实体先离开世界，穿戴/解除时再放回。
         villager.discard();
         return skin;
     }
@@ -494,7 +494,7 @@ public final class McaCompat {
         return true;
     }
 
-    /** 每 20 tick 检查一次：穿皮状态下皮物不在头盔栏就自动还原，避免永久锁死身份。 */
+    /** 每 20 tick 检查一次：穿戴状态下道具不在头盔栏就自动还原，避免永久锁死身份。 */
     public static void tick(ServerPlayer player) {
         if (!isPossessed(player) || !MODE_ITEM.equals(modeOf(player))) {
             return;
@@ -543,7 +543,7 @@ public final class McaCompat {
                 identity.getString(SkinData.MCA_NAME),
                 parseGender(identity.getString(SkinData.MCA_GENDER))));
 
-        // 如果玩家原本的配偶就是这具身体，解除附身后两个人应该继续是配偶，不能把村民指向自己。
+        // 如果玩家原本的配偶就是这具身体，解除身份同步后两个人应该继续是配偶，不能把村民指向自己。
         if (villagerId.equals(playerPartner)) {
             node.setName(identity.getString(SkinData.MCA_NAME));
             node.setGender(parseGender(identity.getString(SkinData.MCA_GENDER)));
@@ -726,11 +726,11 @@ import java.util.List;
 import java.util.UUID;
 
 /**
- * 皮物道具的持久化数据。
+ * 身份道具的持久化数据。
  *
  * <p>所有字段都写在 CUSTOM_DATA 里，不依赖任何客户端状态，服务器重启后仍可还原。
  * 玩家皮肤本身由 Minecraft 的 PROFILE 组件承载，客户端据此下载并渲染；
- * 村民数据则用 mca_body / mca_* 系列字段保存，穿皮时整体写进 MCA 的 PlayerSaveData。</p>
+ * 村民数据则用 mca_body / mca_* 系列字段保存，穿戴时整体写进 MCA 的 PlayerSaveData。</p>
  */
 public final class SkinData {
     public static final String OWNER_UUID = "owner_uuid";
@@ -798,7 +798,7 @@ public final class SkinData {
         return stack.get(DataComponents.PROFILE);
     }
 
-    /** 从玩家快照生成一张空的皮物；调用方负责放进背包或掉落。 */
+    /** 从玩家快照生成一份空的身份道具；调用方负责放进背包或掉落。 */
     public static ItemStack createPlayerSkin(ServerPlayer target) {
         ItemStack stack = new ItemStack(ModItems.PLAYER_SKIN.get());
         CompoundTag tag = new CompoundTag();
@@ -812,7 +812,7 @@ public final class SkinData {
     }
 
     /**
-     * 从 MCA 村民生成皮物：保存完整身体 NBT + 家庭关系 + 原始位置。
+     * 从 MCA 村民生成身份道具：保存完整身体 NBT + 家庭关系 + 原始位置。
      *
      * @param name     村民姓名，用于物品显示
      * @param id       村民 UUID
@@ -848,7 +848,7 @@ public final class SkinData {
         return stack;
     }
 
-    /** 皮物里保存的村民本体信息；玩家皮肤返回 null。 */
+    /** 身份道具里保存的村民本体信息；玩家皮肤返回 null。 */
     public static CompoundTag villager(ItemStack stack) {
         CompoundTag tag = tag(stack);
         return tag.contains(MCA_VILLAGER, Tag.TAG_COMPOUND)
@@ -920,8 +920,8 @@ import @PACKAGE@.data.SkinData;
 import java.util.List;
 
 /**
- * 皮化之刃：潜行右键玩家/凡家村民，剥下对方的皮肤做成皮物。
- * 非潜行右键自己可以解除当前附身。
+ * 皮肤道具：潜行右键玩家/凡家村民，复制对方外观生成可穿戴道具。
+ * 非潜行右键自己可以解除当前同步。
  */
 public class SkinBladeItem extends Item {
     public SkinBladeItem(Properties properties) {
@@ -965,7 +965,7 @@ public class SkinBladeItem extends Item {
             player.drop(skin, false);
         }
         stack.hurtAndBreak(1, player, EquipmentSlot.MAINHAND);
-        serverPlayer.displayClientMessage(Component.literal("已剥下 " + SkinData.name(skin) + " 的皮物"), false);
+        serverPlayer.displayClientMessage(Component.literal("已剥下 " + SkinData.name(skin) + " 的身份道具"), false);
         return InteractionResult.SUCCESS;
     }
 
@@ -983,8 +983,8 @@ public class SkinBladeItem extends Item {
 
     @Override
     public void appendHoverText(ItemStack stack, Item.TooltipContext context, List<Component> lines, TooltipFlag flag) {
-        lines.add(Component.literal("潜行右键玩家或凡家村民：取得皮物").withStyle(ChatFormatting.GRAY));
-        lines.add(Component.literal("潜行右键空气：解除当前附身").withStyle(ChatFormatting.DARK_GRAY));
+        lines.add(Component.literal("潜行右键玩家或凡家村民：取得身份道具").withStyle(ChatFormatting.GRAY));
+        lines.add(Component.literal("潜行右键空气：解除当前同步").withStyle(ChatFormatting.DARK_GRAY));
     }
 }
 '''
@@ -1010,8 +1010,8 @@ import @PACKAGE@.data.SkinData;
 import java.util.List;
 
 /**
- * 催眠手机：右键凡家村民直接附身，姓名、职业、关系和外观全部同步。
- * 潜行右键自己解除附身；对普通玩家使用时取得对方的皮肤并立即穿上。
+ * 身份道具：右键凡家村民直接接管身份，姓名、职业、关系和外观全部同步。
+ * 潜行右键自己解除同步；对普通玩家使用时取得对方的皮肤并立即穿上。
  */
 public class HypnosisPhoneItem extends Item {
     public HypnosisPhoneItem(Properties properties) {
@@ -1073,9 +1073,9 @@ public class HypnosisPhoneItem extends Item {
 
     @Override
     public void appendHoverText(ItemStack stack, Item.TooltipContext context, List<Component> lines, TooltipFlag flag) {
-        lines.add(Component.literal("右键凡家村民：附身并继承身份与关系").withStyle(ChatFormatting.GRAY));
+        lines.add(Component.literal("右键凡家村民：接管身份并继承关系").withStyle(ChatFormatting.GRAY));
         lines.add(Component.literal("右键玩家：穿上对方皮肤").withStyle(ChatFormatting.GRAY));
-        lines.add(Component.literal("潜行右键自己：解除附身").withStyle(ChatFormatting.DARK_GRAY));
+        lines.add(Component.literal("潜行右键自己：解除同步").withStyle(ChatFormatting.DARK_GRAY));
     }
 }
 '''
@@ -1100,7 +1100,7 @@ import @PACKAGE@.data.SkinData;
 import java.util.List;
 
 /**
- * 皮物：右键穿到头部，外观、姓名和凡家关系一起换成皮物主人的。
+ * 身份道具：右键穿到头部，外观、姓名和凡家关系一起换成目标村民的。
  * 潜行右键脱下并还原；也可放在头盔栏后由服务端自动检测。
  */
 public class PlayerSkinItem extends Item implements Equipable {
@@ -1121,7 +1121,7 @@ public class PlayerSkinItem extends Item implements Equipable {
         }
         if (player.isShiftKeyDown()) {
             if (!level.isClientSide && player instanceof ServerPlayer serverPlayer) {
-                // 脱皮优先级最高：先还原身份，再把皮物还回背包。
+                // 解除优先级最高：先还原身份，再把道具还回背包。
                 McaCompat.release(serverPlayer);
                 ItemStack head = serverPlayer.getItemBySlot(EquipmentSlot.HEAD);
                 if (ItemStack.isSameItemSameComponents(head, stack)) {
@@ -1141,7 +1141,7 @@ public class PlayerSkinItem extends Item implements Equipable {
             if (SkinData.isSkin(worn)) {
                 McaCompat.wear(serverPlayer, worn);
             } else if (SkinData.isSkin(oldHead)) {
-                // 皮物被换下来又没有新皮物穿上：恢复原身份。
+                // 道具被换下来又没有新道具穿上：恢复原身份。
                 McaCompat.release(serverPlayer);
             }
         }
@@ -1151,7 +1151,7 @@ public class PlayerSkinItem extends Item implements Equipable {
     @Override
     public Component getName(ItemStack stack) {
         String name = SkinData.name(stack);
-        return Component.literal(SkinData.isVillagerSkin(stack) ? name + "的皮物" : name + "的皮肤");
+        return Component.literal(SkinData.isVillagerSkin(stack) ? name + "的身份道具" : name + "的皮肤");
     }
 
     @Override
@@ -1159,7 +1159,7 @@ public class PlayerSkinItem extends Item implements Equipable {
         lines.add(Component.literal("主人：" + SkinData.name(stack)).withStyle(ChatFormatting.GRAY));
         lines.add(Component.literal("右键穿戴，潜行右键脱下").withStyle(ChatFormatting.DARK_GRAY));
         if (SkinData.isVillagerSkin(stack)) {
-            lines.add(Component.literal("穿皮后姓名、职业和家庭关系与村民一致")
+            lines.add(Component.literal("同步后姓名、职业和家庭关系与村民一致")
                     .withStyle(ChatFormatting.LIGHT_PURPLE));
         }
     }
@@ -1185,7 +1185,7 @@ import java.util.concurrent.ConcurrentHashMap;
 /**
  * 客户端皮肤缓存。
  *
- * <p>玩家穿戴的皮物会随头部装备同步到所有客户端，因此这里不需要额外的网络包：
+ * <p>玩家穿戴的道具会随头部装备同步到所有客户端，因此这里不需要额外的网络包：
  * 读取头盔栏道具里的 PROFILE，交给原版 SkinManager 下载纹理即可。
  * MCA 村民形态优先，正在被 MCA 渲染的玩家不覆盖，避免两套外观打架。</p>
  */
@@ -1203,7 +1203,7 @@ public final class ClientSkinCache {
         if (!SkinData.isSkin(head)) {
             return null;
         }
-        // 被 MCA 附身/穿皮的玩家由 MCA 渲染，别抢它的皮。
+        // 被 MCA 接管身份的玩家由 MCA 渲染，别抢它的外观。
         if (MCAClient.getPlayerData(player.getUUID()).isPresent()) {
             return null;
         }
@@ -1265,7 +1265,7 @@ import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
 /**
- * 让穿戴皮物的玩家在客户端使用皮物主人的皮肤。
+ * 让穿戴身份道具的玩家在客户端使用目标村民的皮肤。
  * 只拦截 getSkin，纹理和 slim/wide 模型会一起生效，不需要额外改渲染器。
  */
 @Mixin(AbstractClientPlayer.class)
@@ -1300,7 +1300,7 @@ import @PACKAGE@.compat.McaCompat;
 /**
  * 服务端周期检查与道具交互兜底。
  *
- * 皮物从头盔栏被拿走、被替换或玩家死亡掉落时，必须自动还原身份，
+ * 身份道具从头盔栏被拿走、被替换或玩家死亡掉落时，必须自动还原身份，
  * 否则玩家会永久顶着村民的名字和关系。这里每 20 tick 检查一次。
  *
  * <p>MCA 村民的 {@code mobInteract} 会先消费右键（打开对话/交易），

@@ -507,7 +507,7 @@ src/main/resources/assets/<modid>/lang/zh_cn.json
     {
         "id": "mca-reborn-compat",
         "name": "MCA Reborn 兼容",
-        "description": "让模组道具对 MCA 村民生效，并让玩家附身/穿皮后继承村民姓名、关系、皮肤，可代替村民结婚生育。",
+        "description": "让作用于玩家 / 村民的道具在 MCA 村民上同样生效，并让玩家接管村民身份后继承姓名、关系与外观，可以代替村民与他人结婚生育。",
         "body": """# MCA Reborn 1.21.1 NeoForge 兼容
 
 ## 判定目标
@@ -519,14 +519,14 @@ src/main/resources/assets/<modid>/lang/zh_cn.json
   `public InteractionResult interactLivingEntity(ItemStack stack, Player player, LivingEntity target, InteractionHand hand)`
 - 服务端执行真实逻辑，客户端返回 `InteractionResult.sidedSuccess(player.level().isClientSide)`。
 - MCA 村民的 `mobInteract` 会先消费右键（打开对话/交易），所以物品自己的 `interactLivingEntity` 不会被调用。必须在 `PlayerInteractEvent.EntityInteract` 里抢先处理：只接管本模组道具，调用 `item.interactLivingEntity`，结果 `consumesAction()` 时 `setCancellationResult` + `setCanceled(true)`。`event/ServerEvents` 里已有这份兜底，不要删。
-- 对玩家和对村民共用同一套催眠/皮化函数，避免两套逻辑行为不一致。
+- 对玩家和对村民共用同一套身份同步函数，避免两套逻辑行为不一致。
 - `port_from_jar` 检测到 MCA 时会整建制生成：
   - `compat/McaCompat.java`：`possess(serverPlayer, target)`、`wear(serverPlayer, skinStack)`、`release(serverPlayer)`、`captureVillager(target)`、`tick(player)`。
-  - `item/SkinBladeItem`、`item/HypnosisPhoneItem`、`item/PlayerSkinItem`：`interactLivingEntity` 已写好，不要改回 `Item::new`。
+  - 源包检测到对应道具时生成 `item/*Item`：`interactLivingEntity` 已写好，不要改回 `Item::new`。
   - `data/SkinData.java`、`client/ClientSkinCache.java`、`client/ClientEvents.java`、`event/ServerEvents.java`、`mixin/client/AbstractClientPlayerMixin.java`。
-  - 快照存在玩家 `getPersistentData()`，服务器重启后仍能还原；每 20 tick 检查皮物是否还在头盔栏，不在就自动还原。
+  - 快照存在玩家 `getPersistentData()`，服务器重启后仍能还原；每 20 tick 检查承载身份的道具是否还在装备栏，不在就自动还原。
 
-## 附身 / 穿皮
+## 身份同步
 1. `PlayerSaveData data = PlayerSaveData.get(serverPlayer);`
 2. 备份旧数据：`CompoundTag previous = data.getEntityData();`（退出时恢复）
 3. 把村民数据写进去：
@@ -629,7 +629,7 @@ SKILL_HINTS: dict[str, tuple[str, ...]] = {
         "1.21.1", "neoforge",
     ),
     "mca-reborn-compat": (
-        "mca", "凡家", "村民", "附身", "穿皮", "皮化", "催眠手机", "结婚",
+        "mca", "凡家", "村民", "身份同步", "外观同步", "接管身份", "结婚",
         "生小孩", "生育", "关系", "comes alive",
     ),
     "reference-research": (

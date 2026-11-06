@@ -2,13 +2,13 @@
 
 只写 Minecraft Java 模组的独立桌面 Agent。基于 PySide6，自带对话工作台、技能、连接器和知识库，可从下载站、GitHub 与 Darkitten 启动器获取，并支持自动更新。
 
-当前版本：`1.3.0`
+当前版本：`1.3.1`
 
 ## 功能
 
-- **Fabric → NeoForge 移植**：`port_from_jar` 扫描 JAR、转换 1.21.4+ 的 `items/` 模型、反编译参考源码、生成 Gradle / `mods.toml` / 规格 / 验收清单，并自动切换工程。PoHypSkin（123 个源类、6 个道具）实测 verify 0 错误、`BUILD SUCCESSFUL`。
-- **MCA Reborn 兼容**：自动识别皮物 / 催眠手机 / 皮化之刃或代码里的 `net.conczin.mca`，自动复制 NeoForge 版 MCA 依赖，生成 `McaCompat`、`SkinData`、道具类、客户端皮肤缓存 / Mixin 与服务端事件。MCA 村民的 `mobInteract` 会先消费右键，所以用 `PlayerInteractEvent.EntityInteract` 抢先处理，村民和玩家共用一套逻辑。
-- **附身 / 穿皮同步身份**：备份玩家原 `PlayerSaveData`，把村民身体 NBT 写进 `setEntityData`，姓名、性别、职业、配偶、父母、子女写进 `FamilyTree`；解除时恢复并放回村民本体。穿皮后可以代替该村民结婚、生育，皮物离开头盔栏会自动还原。
+- **Fabric → NeoForge 移植**：`port_from_jar` 扫描 JAR、转换 1.21.4+ 的 `items/` 模型、反编译参考源码、生成 Gradle / `mods.toml` / 规格 / 验收清单，并自动切换工程。用一个真实的 1.21.11 Fabric 模组（123 个源类、6 个道具）实测 verify 0 错误、`BUILD SUCCESSFUL`。
+- **MCA Reborn 兼容**：源模组引用 `net.conczin.mca`，或注册内容属于身份 / 外观类玩法时，自动复制 NeoForge 版 MCA 依赖，生成 `McaCompat`、`SkinData`、道具类、客户端皮肤缓存 / Mixin 与服务端事件。MCA 村民的 `mobInteract` 会先消费右键，所以用 `PlayerInteractEvent.EntityInteract` 抢先处理，村民和玩家共用一套逻辑。
+- **身份同步**：备份玩家原 `PlayerSaveData`，把目标村民的身体 NBT 写进 `setEntityData`，姓名、性别、职业、配偶、父母、子女写进 `FamilyTree`；解除时恢复并放回村民本体。同步后可以代替该村民结婚、生育，承载身份的道具离开装备栏会自动还原。
 - **先规划、再确认、后施工**：用一句话描述需求后，助手先一次性拆出完整规格（玩法、注册内容、获取方式、数值、美术、验收标准、风险），右侧「规格」页显示 10 项需求清单和说明书；必须点「确认规格并开始施工」才会写代码。
 - **施工任务与失败分析**：确认规格后自动拆成骨架、注册、玩法、纹理、配方、语言、编译、验收等任务，完成一项进度前进一项；编译失败会按真实日志归类为 Java 版本、依赖下载、Mixin、找不到符号、类型不匹配、缺少程序包、依赖变体、Gradle 任务或内存不足，并给出处理方式。
 - **成品说明书**：编译通过后直接读取 `build/libs` 里的 JAR，解析 `fabric.mod.json` / `neoforge.mods.toml`、物品与方块模型、blockstates、配方、掉落表、纹理、音效和语言文件，列出真实注册内容、配方数量、模型纹理数量、AI 推荐玩法和安装步骤。

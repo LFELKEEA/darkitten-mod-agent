@@ -22,11 +22,10 @@ BUILD = ROOT / "build"
 APP_DIST = DIST / "DarkittenModAgent"
 ZIP_NAME = f"DarkittenModAgent-{APP_VERSION}.zip"
 NOTES = [
-    "新增真正的 Fabric → NeoForge 移植流水线：port_from_jar 直接扫描 JAR、转换 1.21.4+ 的 items/ 模型、反编译参考源码、生成 Gradle / mods.toml / 规格 / 验收清单，并把工程自动切换过去。用 PoHypSkin（123 个源类、6 个道具）实测，生成的工程 verify 0 错误、Gradle BUILD SUCCESSFUL。",
-    "MCA Reborn 兼容不再靠猜：自动识别「皮物 + 催眠手机 / 皮化之刃」或代码里的 net.conczin.mca，自动复制 NeoForge 版 MCA 依赖；生成完整的 McaCompat、SkinData、三种道具类、客户端皮肤缓存 / Mixin、服务端事件。没有在 fabric.mod.json 声明 MCA 的生成器模组也会被识别。",
-    "修复道具对 MCA 村民完全没反应：MCA 村民的 mobInteract 会先消费右键（打开对话 / 交易），物品自己的 interactLivingEntity 根本不会被调用。现在通过 PlayerInteractEvent.EntityInteract 抢先处理并取消事件，催眠手机、皮化之刃对村民和对玩家使用同一套逻辑；verify_mod 会强制检查这个兜底。",
-    "附身 / 穿皮真正同步身份：备份玩家原 PlayerSaveData，把村民完整身体 NBT 写进 setEntityData，并把姓名、性别、职业、配偶、父母、子女写进 FamilyTree；解除时原样恢复并放回村民本体。穿皮后可以代替该村民与其他人结婚、生育；皮物离开头盔栏或玩家退出时自动还原，避免永久锁死身份。",
-    "修复道具贴图与编译按钮：1.21.1 物品模型、纹理、语言、配方在移植时逐项校验，缺模型会直接报 item_model_missing；编译页新增「选择工程」，打开磁盘上已有工程后编译 / 开发客户端 / 开发服务端 / 数据生成按钮立即可用，不再卡在未选择工程。修正提示词与技能里把 toVillager 当村民判定的错误建议。",
+    "工坊文案改为通用能力描述：技能、提示词、验收提示和下载页不再引用具体模组、道具或测试工程，只保留可复用的移植、交互兜底与关系同步能力。",
+    "清理测试数据：知识库里导入的测试 JAR 与最近工程列表里的测试记录不再显示，已有工程目录和备份不受影响。",
+    "移植与 MCA Reborn 兼容能力保持不变：port_from_jar、PlayerInteractEvent.EntityInteract 兜底、身份 / 家庭关系同步和 verify_mod 门禁照常工作。",
+    "修复道具贴图与编译按钮：1.21.1 物品模型、纹理、语言、配方在移植时逐项校验，缺模型会直接报 item_model_missing；编译页「选择工程」打开已有工程后，编译 / 开发客户端 / 开发服务端 / 数据生成按钮立即可用。",
 ]
 
 

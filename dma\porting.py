@@ -116,14 +116,14 @@ MCA_RECIPE = """\
 //        if (!(target instanceof VillagerLike<?>) || target instanceof Player) {
 //            return InteractionResult.PASS;
 //        }
-//        // 对村民执行和玩家相同的催眠/皮化逻辑
+//        // 对村民执行和玩家相同的身份同步逻辑
 //        return InteractionResult.sidedSuccess(player.level().isClientSide);
 //    }
 //    注意：不要用 VillagerLike.toVillager(target) 判断目标，它对任何 ServerPlayer 都会返回临时村民视图。
 //
-// 2) 附身 / 穿皮后让 MCA 把玩家当成该村民：
+// 2) 身份同步后让 MCA 把玩家当成该村民：
 //    ServerPlayer player = ...;
-//    VillagerEntityMCA villager = ...;              // 被附身的村民
+//    VillagerEntityMCA villager = ...;              // 被接管的村民
 //    PlayerSaveData data = PlayerSaveData.get(player);
 //    CompoundTag previous = data.getEntityData();   // 先备份，退出时恢复
 //    CompoundTag tag = new CompoundTag();
@@ -177,7 +177,7 @@ MCA_RECIPE = """\
 //
 // 4) 结婚 / 生小孩：
 //    MCA 的婚姻和生育都走 EntityRelationship + 村民大脑记忆。
-//    附身后让玩家保留原村民的 FamilyTreeNode（配偶、子女、父母、婚姻状态），
+//    身份同步后让玩家保留原村民的 FamilyTreeNode（配偶、子女、父母、婚姻状态），
 //    其他村民的 AI 通过 UUID 找到该节点，才会把玩家当成原村民。
 //    只改显示名不改 FamilyTreeNode 会出现「名字变了但关系没变」。
 //
@@ -324,7 +324,7 @@ def _read_json(path: Path) -> Any:
 def _decode_text(raw: bytes) -> str:
     """按 UTF-8 → GB18030 顺序解码。
 
-    有些老模组（包括 PoHypSkin）的 zh_cn.json 是 GBK 写的，
+    有些老模组的 zh_cn.json 是 GBK 写的，
     直接按 UTF-8 读会得到大量 �。这里优先 UTF-8，失败再退到
     GB18030，最后才用替换字符兜底。
     """
@@ -548,7 +548,7 @@ def scan_jar(jar: Path) -> dict[str, Any]:
         item_ids: set[str] = set()
         block_ids: set[str] = set()
         # 只有物品定义/物品模型才算注册物品；textures/item 下的贴图
-        # 可能只是模型素材（例如皮化之刃的 skin_blade），不能当成物品。
+        # 可能只是模型素材（与物品同名的贴图或模型），不能当成物品。
         for name in item_defs:
             item_ids.add(Path(name).stem)
         for name in item_models:
@@ -1272,7 +1272,7 @@ def _check_mca(
             "error",
             "mca_item_interact",
             "道具没有实现对 MCA 村民的交互",
-            "只重写 useOn / use 不会让催眠手机、皮化之刃对村民生效。",
+            "只重写 useOn / use 不会让自定义道具对村民生效。",
             "",
             "重写 interactLivingEntity(ItemStack, Player, LivingEntity, InteractionHand)，"
             "并用 target instanceof VillagerLike<?> && !(target instanceof Player) 判断目标。",
@@ -1289,16 +1289,16 @@ def _check_mca(
                 "error",
                 "mca_item_blank_behavior",
                 f"道具 {item_id} 仍然是白板 Item",
-                "只注册 Item::new 不会执行附身/皮化逻辑，游戏里表现为“道具无法使用”。",
+                "只注册 Item::new 不会执行身份同步逻辑，游戏里表现为“道具无法使用”。",
                 "",
-                "改成对应的附身道具类（SkinBladeItem / HypnosisPhoneItem / PlayerSkinItem），"
+                "改成 port_from_jar 生成的道具类，"
                 "并在 interactLivingEntity 里调用 MCA 兼容层。",
             )
     if has_possession and not has_player_data:
         report.add(
             "error",
             "mca_player_data_missing",
-            "附身/皮化没有接入 MCA 的 PlayerSaveData",
+            "身份同步没有接入 MCA 的 PlayerSaveData",
             "没有 PlayerSaveData，MCA 不会把玩家当成村民渲染，关系也不会同步。",
             "",
             "用 PlayerSaveData.get(player) 读取/写入 entityData，并 setEntityDataSet(true)。",
@@ -1326,7 +1326,7 @@ def _check_mca(
         report.add(
             "error",
             "mca_family_missing",
-            "附身/皮化没有同步 FamilyTreeNode",
+            "身份同步没有同步 FamilyTreeNode",
             "只改名字/皮肤，不改 FamilyTree，NPC 不会把玩家当成原村民，结婚和生育也不会生效。",
             "",
             "用 EntityRelationship.of(player).getFamilyEntry() 复制姓名、性别、职业、婚姻状态、配偶、子女、父母。",
@@ -1367,8 +1367,8 @@ def _check_mca(
             "warn",
             "mca_compat_unused",
             "生成了 McaCompat 但道具还没有调用它",
-            "催眠手机/皮化之刃需要调用 McaCompat.snapshot / applyFromVillager / restore，"
-            "否则附身后关系、名称、皮肤不会变化。",
+            "身份同步道具需要调用 McaCompat.snapshot / applyFromVillager / restore，"
+            "否则同步后关系、名称、皮肤不会变化。",
             compat_files[0],
             "在道具的 interactLivingEntity / 使用逻辑里接入 McaCompat。",
         )
@@ -1383,7 +1383,7 @@ def _check_port_status(
 ) -> dict[str, Any] | None:
     """按类核对源 JAR 的反编译参考是否真的迁进了 src。
 
-    编译通过不代表迁移完成：只搬主类也能 build，但催眠手机、皮化逻辑
+    编译通过不代表迁移完成：只搬主类也能 build，但道具逻辑、身份同步逻辑
     全都没了。这里把未迁移的类列成错误，逼 Agent 逐类处理或写明排除理由。
     """
     decompiled = root / "reference" / "decompiled"
@@ -1404,7 +1404,7 @@ def _check_port_status(
             "source_classes_unmigrated",
             f"还有 {len(pending)} 个源类没有迁移",
             "这些类只存在于 reference/decompiled，src/main/java 里没有同名类；"
-            "道具逻辑、催眠/皮化效果很可能就在其中。\n" + "\n".join(lines),
+            "道具逻辑、身份同步效果很可能就在其中。\n" + "\n".join(lines),
             PORT_STATUS_MD,
             "逐类改写成 NeoForge 1.21.1 代码，或在 PORT_EXCLUDE.md 写 "
             "`- 路径/类名.java：原因` 明确排除。",
@@ -1864,7 +1864,7 @@ def _java_const(value: str) -> str:
 def _item_properties(item_id: str) -> str:
     low = item_id.lower()
     if low in {"generated_item", "skin_blade"}:
-        # 源 JAR 里皮化之刃是 384 耐久；保持同名同耐久，避免“刀是纸做的”。
+        # 源 JAR 里这把工具是 384 耐久；保持同名同耐久，避免“工具是纸做的”。
         return "new Item.Properties().durability(384)"
     if low in {"player_skin"}:
         return "new Item.Properties().stacksTo(1).fireResistant()"
@@ -1884,7 +1884,7 @@ def _behavior_item_kind(item_id: str) -> str | None:
 
 
 def _possession_item_class(package: str, class_name: str, doc: str) -> str:
-    """附身道具基类：右键生物附身，潜行右键自己解除附身。"""
+    """身份同步道具基类：右键生物接管身份，潜行右键自己解除。"""
     return f"""package {package}.item;
 
 import {package}.compat.McaCompat;
@@ -1901,7 +1901,7 @@ import net.minecraft.world.level.Level;
 /**
  * {doc}
  *
- * 右键凡家村民会复制它的外观、姓名和家庭关系；潜行右键自己解除附身。
+ * 右键凡家村民会复制它的外观、姓名和家庭关系；潜行右键自己解除。
  * 所有写入都在服务端完成，客户端只负责渲染。
  */
 public class {class_name} extends Item {{
@@ -1941,7 +1941,7 @@ def _behavior_item_class(package: str, class_name: str, mod_id: str = "") -> str
 
     这些类不是占位壳：右键凡家村民会完整复制外观、姓名、职业和家庭关系，
     对玩家使用会取得皮肤，潜行右键会还原。模板来自
-    PoHypSkin 1.21.1 / NeoForge / MCA Reborn 7.7.x 的可编译工程。
+    实机验证过的 1.21.1 / NeoForge / MCA Reborn 7.x 工程。
     """
     template = {
         "SkinBladeItem": mca_templates.SKIN_BLADE,
@@ -2061,7 +2061,7 @@ def _mca_compat_class(package: str, class_name: str, mod_id: str) -> str:
     这些 API 已按 MCA Reborn 7.7.x（1.21.1 / NeoForge）jar 逐个核对：
     VillagerLike、PlayerSaveData、FamilyTree/FamilyTreeNode、
     PlayerDataMessage、Network.sendToPlayer。模板同时处理
-    附身/穿皮/脱皮/退出时自动还原，以及村民本体的寄存与放回。
+    身份同步、解除与退出时自动还原，以及村民本体的寄存与放回。
     """
     template = mca_templates.MCA_COMPAT.replace("@MOD_ID@", mod_id)
     return mca_templates.render(template, package, mod_id, class_name)
@@ -2073,7 +2073,7 @@ def _mca_skin_handler_class(package: str) -> str:
 import net.neoforged.fml.loading.FMLEnvironment;
 import net.neoforged.neoforge.network.handling.IPayloadContext;
 
-/** 解除附身的客户端同步入口；单独成类，避免专用服务器加载客户端类。 */
+/** 解除身份同步的客户端同步入口；单独成类，避免专用服务器加载客户端类。 */
 public final class McaSkinHandler {{
     private McaSkinHandler() {{
     }}
@@ -2365,17 +2365,17 @@ def _jar_uses_mca(jar: Path) -> bool:
     return False
 
 
-# 皮物类模组的标志性内容：有 player_skin 说明存在“身体/身份”道具，
-# 再加上催眠手机或皮化之刃，就基本可以确定是附身/穿皮玩法。
-_POSSESSION_ITEM_HINTS = {"hypnosis_phone", "skin_blade", "skinblade"}
+# 身份/外观类模组的标志性内容：有 player_skin 说明存在“身体/身份”道具，
+# 再配合皮肤或附身类道具，就基本可以确定需要按 MCA 兼容处理。
+_POSSESSION_ITEM_HINTS = {"hypnosis_phone", "skin_blade", "skinblade", "disguise", "body_suit"}
 
 
 def _jar_wants_mca(jar: Path, scan: dict[str, Any]) -> bool:
-    """源 JAR 是否属于“附身/穿皮”玩法，需要按 MCA Reborn 兼容处理。
+    """源 JAR 是否属于“身份/外观同步”玩法，需要按 MCA Reborn 兼容处理。
 
-    有些模组（例如 PoHypSkin）把 MCA 调用藏在生成器产物或嵌套 JAR 里，
+    有些模组把 MCA 调用藏在生成器产物或嵌套 JAR 里，
     常量池里找不到 net/conczin/mca，但道具和类名仍然能表明意图。
-    这里只认特征非常明确的组合，避免把普通皮具模组误判成 MCA 兼容工程。
+    这里只认特征非常明确的组合，避免把普通皮肤模组误判成 MCA 兼容工程。
     """
     items = {str(item).lower() for item in scan.get("item_ids") or []}
     if "player_skin" in items and (items & _POSSESSION_ITEM_HINTS):
@@ -2721,7 +2721,7 @@ def _write_replacement_exclusions(
         relative = path.relative_to(decompiled_root).as_posix()
         entries.append(
             f"- {relative}：生成器产物，已由 NeoForge 1.21.1 专用实现替代"
-            "（附身/皮化、皮肤缓存、MCA 关系同步）"
+            "（身份同步、皮肤缓存、MCA 关系同步）"
         )
     exclude = Path(root) / PORT_EXCLUDE
     existing = _read_text(exclude) if exclude.is_file() else ""
@@ -2791,14 +2791,14 @@ def _port_spec(
     ]
     if has_mca:
         features.append(
-            "兼容 MCA Reborn：催眠手机和皮化之刃对 MCA 村民生效，"
-            "附身/穿皮后姓名、关系、皮肤与目标村民一致，可以替他与村民结婚、生育"
+            "兼容 MCA Reborn：本模组道具对 MCA 村民生效，"
+            "同步身份后姓名、关系、皮肤与目标村民一致，可以替他与村民结婚、生育"
         )
         acceptance.extend(
             [
-                "对 MCA 村民右键使用催眠手机/皮化之刃，效果与对玩家相同",
-                "附身/穿皮后 F5 外观变成目标村民，关系面板显示目标村民的姓名与家庭",
-                "附身后可以替目标村民与其他人结婚、生小孩，且退出后恢复",
+                "对 MCA 村民右键使用本模组道具，效果与对玩家相同",
+                "同步身份后 F5 外观变成目标村民，关系面板显示目标村民的姓名与家庭",
+                "同步后可以替目标村民与其他人结婚、生小孩，且退出后恢复",
             ]
         )
         risks.append(
@@ -2964,7 +2964,7 @@ def render_port_plan(
                 "- Mixin 目标类在 1.21.1 可能改名或不存在；先 `search_text` 核对，再写注入。",
                 "- 原 JAR 的客户端 GUI 大量使用 Yarn 的 DrawContext/MatrixStack，需改成 GuiGraphics/PoseStack。",
                 "- 原 JAR 的网络包 ID 必须全部重新注册，不能沿用 Fabric 的 PayloadTypeRegistry。",
-                "- 附身/穿皮必须做进入/退出双向快照，否则玩家数据会被永久覆盖。",
+                "- 身份同步必须做进入/退出双向快照，否则玩家数据会被永久覆盖。",
                 "",
             ]
         )
@@ -3004,7 +3004,7 @@ def create_port_project(
     mod_name = (mod_name or str(meta.get("name") or "") or mod_id).strip()
     package = (package or f"net.{mod_id}").strip().strip(".")
     if not re.fullmatch(r"[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)*", package):
-        raise PortError("Java 包名只能使用小写字母、数字、下划线，例如 net.pohypskin。")
+        raise PortError("Java 包名只能使用小写字母、数字、下划线，例如 net.examplemod。")
     group = ".".join(package.split(".")[:2]) if "." in package else package
     class_name = f"{_camel(mod_id)}Mod"
     version = str(meta.get("version") or "1.0.0")
@@ -3034,12 +3034,12 @@ def create_port_project(
         has_mca = True
         auto_mca_note = "源 JAR 的代码引用了 net.conczin.mca，已自动按 MCA Reborn 兼容工程处理。"
     elif not has_mca and _jar_wants_mca(jar, scan):
-        # 代码里没有直接引用 MCA，但道具组合表明这是附身/穿皮模组：
+        # 代码里没有直接引用 MCA，但道具组合表明这是身份同步模组：
         # 不补依赖就只能生成一堆对村民无效的白板道具。
         dependency_list.insert(0, "mca:[0,)")
         has_mca = True
         auto_mca_note = (
-            "源包包含皮物/催眠手机/皮化之刃道具，玩法需要作用于凡家村民，"
+            "源包包含身份/皮肤类道具，玩法需要作用于凡家村民，"
             "已自动按 MCA Reborn 兼容工程处理。"
         )
     mca_source = _find_mca_jar(jar, extra_dirs) if has_mca else None
@@ -3233,7 +3233,7 @@ def create_port_project(
     elif has_mca:
         notes.append(
             "检测到 MCA 依赖，但源包没有 player_skin 道具或缺少 MCA NeoForge 编译 jar；"
-            "本次只生成普通物品，未生成附身/皮化兼容层。"
+            "本次只生成普通物品，未生成身份同步兼容层。"
         )
     if mca_ready:
         # 生成器产物的类名和随机后缀无法逐类维护，明确登记为“专用实现替代”。
