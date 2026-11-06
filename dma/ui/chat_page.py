@@ -327,11 +327,15 @@ class ChatPage(QWidget):
         if spec is not None:
             self.spec = spec
         self._refresh_workbench()
+        if spec is not None and not getattr(spec, "confirmed", lambda: False)():
+            self.side_tabs.setCurrentIndex(0)
 
     def _on_workflow_changed(self, state) -> None:
         if state is not None:
             self.workflow = state
         self._refresh_workbench()
+        if state is not None and getattr(state, "stage", "") == "review":
+            self.side_tabs.setCurrentIndex(0)
 
     def _on_artifact_changed(self, payload) -> None:
         if isinstance(payload, dict):
