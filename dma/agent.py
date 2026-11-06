@@ -13,6 +13,8 @@ from typing import Any, Callable
 from PySide6.QtCore import QObject, Signal
 
 from . import ai, builder, connectors, deps, project as project_mod, toolchain, wrapper
+from . import spec as spec_mod
+from . import workflow
 from .config import Config
 from .knowledge import (
     KnowledgeStore,
@@ -61,6 +63,20 @@ BUILD_TRIGGER_EXTS = {
     ".toml", ".xml", ".mcmeta", ".lang", ".yml", ".yaml", ".glsl", ".fsh",
     ".vsh", ".cfg", ".conf",
 }
+
+
+def _project_has_sources(root: Path) -> bool:
+    """已有 build.gradle 或 Java 源码的工程按“存量工程”处理，不强制先做规格。"""
+    base = Path(root)
+    if any((base / name).is_file() for name in ("build.gradle", "build.gradle.kts")):
+        return True
+    source = base / "src"
+    if source.is_dir():
+        try:
+            return any(source.rglob("*.java"))
+        except OSError:
+            return False
+    return False
 
 
 def _needs_build(paths: list[str]) -> bool:
@@ -565,6 +581,9 @@ class AgentWorker(QObject):
     status = Signal(str)
     assistant = Signal(str)
     pending_changed = Signal(object)
+    spec_changed = Signal(object)
+    workflow_changed = Signal(object)
+    artifact_changed = Signal(object)
     done = Signal(str)
     failed = Signal(str)
     finished = Signal()
@@ -580,12 +599,14 @@ class AgentWorker(QObject):
         memory: MemoryStore,
         connector_store: connectors.ConnectorStore,
         knowledge: KnowledgeStore | None = None,
+        stage: str = "",
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
         self.user_text = user_text
         self.history = [dict(item) for item in history]
         self.project = project
+        self.stage = stage
         self.config = config
         self.skill_store = skill_store
         self.memory = memory
@@ -593,6 +614,7 @@ class AgentWorker(QObject):
         self.connector_store = connector_store
         self.pending: list[PendingFile] = []
         self.applied: list[str] = []
+        self._plan_submitted = False
         self._cancel = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -631,6 +653,27 @@ class AgentWorker(QObject):
     def _loop(self) -> AgentRun:
         project = self.project
         project_key = str(project.root) if project is not None else ""
+        current_spec = spec_mod.load_spec(project.root) if project is not None else None
+        state = workflow.load_state(project.root, current_spec) if project is not None else None
+        if self.stage:
+            if state is None:
+                state = workflow.WorkflowState(stage=self.stage)
+            else:
+                state.stage = self.stage if self.stage in workflow.STAGES else state.stage
+        elif current_spec is not None or (state is not None and state.stage != "draft"):
+            self.stage = state.stage if state is not None else "review"
+        elif project is not None and _project_has_sources(project.root):
+            # 老工程没有规格文件时不要卡在规划阶段，直接按增量修改处理。
+            self.stage = "done"
+            if state is not None:
+                state.stage = "done"
+        else:
+            self.stage = "planning"
+            if state is not None:
+                state.stage = "planning"
+        if project is not None:
+            # 每次开工都从磁盘取，避免上一条消息里的规格已经被改过。
+            workflow.save_state(project.root, state)
         memory_items = []
         if project is not None:
             memory_items = self.memory.recall(project_key, self.user_text, limit=6)
@@ -652,6 +695,9 @@ class AgentWorker(QObject):
             max_steps=self.config.max_steps,
             knowledge_text=knowledge_context(knowledge_hits),
             query=self.user_text,
+            spec=current_spec,
+            workflow=state,
+            stage=self.stage,
         )
         messages: list[dict[str, Any]] = [{"role": "system", "content": system}]
         messages.extend(_history_window(self.history, self.config.context_turns))
@@ -666,6 +712,7 @@ class AgentWorker(QObject):
         applied_mark = 0
         pending_fix = False
         last_build_report = ""
+        plan_submitted = False
 
         while True:
             if limit > 0 and step >= limit:
@@ -787,6 +834,14 @@ class AgentWorker(QObject):
                 }
             )
             _compact_messages(messages)
+            plan_submitted = self._plan_submitted
+            if plan_submitted:
+                # 规划提交后必须停下来等用户确认，不能顺势开始写代码。
+                run.text = (
+                    visible.strip()
+                    or "规格已生成。请检查右侧说明书，确认后才会开始施工。"
+                )
+                return run
 
         final_text = final_text or "已达到工具调用轮数上限。请继续发送消息，让我接着完成剩余部分。"
         run.text = final_text
@@ -878,7 +933,63 @@ class AgentWorker(QObject):
             return False, f"自动编译没有开始：{exc}"
         except Exception as exc:  # noqa: BLE001 - 自动编译失败不应吞掉本轮结果
             return False, f"自动编译出错：{exc}"
-        return result.ok, _build_report(result)
+        report = _build_report(result)
+        if result.ok:
+            report += self._finalize_artifact()
+        else:
+            self._record_build_failure()
+        return result.ok, report
+
+    def _finalize_artifact(self) -> str:
+        """编译成功后读取真实 JAR，生成成品说明书并刷新右侧面板。"""
+        if self.project is None:
+            return ""
+        try:
+            current = spec_mod.load_spec(self.project.root)
+            state, inventory, _manual = workflow.finalize_build(
+                self.project.root, True, current
+            )
+        except Exception as exc:  # noqa: BLE001 - 说明书失败不影响编译结果
+            return f"\n\n成品说明书生成失败：{exc}"
+        self.stage = state.stage
+        self.spec_changed.emit(current)
+        self.workflow_changed.emit(state)
+        self.artifact_changed.emit(
+            {
+                "jar": inventory.jar,
+                "summary": inventory.summary(),
+                "inventory": inventory.to_dict(),
+                "manual": "MANUAL.md",
+            }
+        )
+        self.status.emit("已读取最终 JAR，生成成品说明书")
+        if inventory.jar:
+            return (
+                "\n\n【成品巡检】\n"
+                f"- JAR：{inventory.jar}\n"
+                f"- 注册内容：{inventory.content_count()} 个"
+                f"（物品 {len(inventory.items)} / 方块 {len(inventory.blocks)} / "
+                f"实体 {len(inventory.entities)} / 命令 {len(inventory.commands)}）\n"
+                f"- 配方：{len(inventory.recipes)} 个\n"
+                f"- 纹理：{len(inventory.textures)} 张\n"
+                "已生成 MANUAL.md。"
+            )
+        return "\n\n编译通过，但 build/libs 里没有找到可巡检的 jar。"
+
+    def _record_build_failure(self) -> None:
+        if self.project is None:
+            return
+        try:
+            current = spec_mod.load_spec(self.project.root)
+            state = workflow.load_state(self.project.root, current)
+            state.last_build_ok = False
+            if current is not None and current.confirmed():
+                state.stage = "building"
+            workflow.save_state(self.project.root, state)
+            self.stage = state.stage
+            self.workflow_changed.emit(state)
+        except Exception:
+            pass
 
     def _execute(self, call: ToolCall, run: AgentRun) -> str:
         name = call.name.strip().lower()
@@ -893,6 +1004,20 @@ class AgentWorker(QObject):
         }
         if self.project is None and name not in allowed_without_project:
             return "当前没有打开工程，无法执行文件操作。请先在界面创建或打开工程。"
+        if self.stage in {"draft", "planning", "review"} and name in {
+            "write_file",
+            "edit_file",
+            "replace_in_file",
+            "apply_patch",
+            "pixel_art",
+            "build_project",
+            "fix_build_setup",
+            "decompile_jar",
+        }:
+            return (
+                "规格还没有确认，现在不能修改工程。请先把完整规格提交给用户，"
+                "等用户点「确认规格并开始施工」后再写代码。"
+            )
         try:
             if name == "list_files":
                 root = self.project.root
@@ -1023,6 +1148,166 @@ class AgentWorker(QObject):
                 state = "已自动写入" if written else "已加入待写入列表"
                 delta = len(updated) - len(current)
                 return f"{state}：{relative}（替换 1 处，{delta:+d} 字符）"
+            if name in {"submit_spec", "submit_plan"}:
+                payload = args.get("spec")
+                if not isinstance(payload, dict):
+                    payload = {
+                        key: value
+                        for key, value in args.items()
+                        if key not in {"tool", "name"}
+                    }
+                existing = spec_mod.load_spec(self.project.root)
+                try:
+                    created = spec_mod.parse_spec(
+                        payload, project=self.project, base=existing
+                    )
+                except (ValueError, TypeError) as exc:
+                    return f"规格格式不正确：{exc}"
+                created.status = "draft"
+                created.revision = (existing.revision + 1) if existing else 1
+                if not created.title:
+                    created.title = self.project.meta.name or self.project.meta.mod_id
+                spec_mod.save_spec(self.project.root, created)
+                state = workflow.load_state(self.project.root, created)
+                state.stage = "review"
+                state.spec_revision = created.revision
+                state.tasks = []
+                state.jar = ""
+                state.manual = ""
+                workflow.save_state(self.project.root, state)
+                self.stage = "review"
+                self._plan_submitted = True
+                self.spec_changed.emit(created)
+                self.workflow_changed.emit(state)
+                passed, total = spec_mod.checklist_score(created)
+                missing = spec_mod.missing_items(created)
+                tail = (
+                    "\n缺少：" + "、".join(missing)
+                    if missing
+                    else "\n10 项需求已全部覆盖。"
+                )
+                return (
+                    f"规格已保存（第 {created.revision} 版），需求 {passed}/{total}。"
+                    f"{tail}\n用户确认后才会开始施工。"
+                )
+            if name == "update_spec":
+                payload = args.get("spec")
+                if not isinstance(payload, dict):
+                    payload = {
+                        key: value
+                        for key, value in args.items()
+                        if key not in {"tool", "name"}
+                    }
+                existing = spec_mod.load_spec(self.project.root)
+                if existing is None:
+                    return "还没有规格，请先用 submit_spec 提交完整规格。"
+                try:
+                    updated = spec_mod.apply_patch(
+                        existing, payload, project=self.project
+                    )
+                except (ValueError, TypeError) as exc:
+                    return f"规格格式不正确：{exc}"
+                changes = spec_mod.diff_spec(existing, updated)
+                if existing.confirmed():
+                    updated.status = "confirmed"
+                    state = workflow.load_state(self.project.root, updated)
+                    state.stage = "building"
+                    state.spec_revision = updated.revision
+                    if not state.tasks:
+                        state.tasks = workflow.plan_tasks(updated)
+                    self.stage = "building"
+                else:
+                    updated.status = "draft"
+                    state = workflow.load_state(self.project.root, updated)
+                    state.stage = "review"
+                    state.spec_revision = updated.revision
+                    self.stage = "review"
+                    self._plan_submitted = True
+                spec_mod.save_spec(self.project.root, updated)
+                workflow.save_state(self.project.root, state)
+                self.spec_changed.emit(updated)
+                self.workflow_changed.emit(state)
+                passed, total = spec_mod.checklist_score(updated)
+                return (
+                    f"规格已更新到第 {updated.revision} 版，需求 {passed}/{total}。\n"
+                    + "\n".join(f"- {line}" for line in changes)
+                    + (
+                        "\n用户确认后开始施工。"
+                        if updated.status == "draft"
+                        else "\n已保留现有工程，按新规格继续施工。"
+                    )
+                )
+            if name in {"complete_task", "finish_task"}:
+                task_id = str(
+                    args.get("id") or args.get("task") or args.get("task_id") or ""
+                ).strip()
+                if not task_id:
+                    return "complete_task 缺少 id。"
+                state = workflow.load_state(
+                    self.project.root, spec_mod.load_spec(self.project.root)
+                )
+                known = {item.get("id") for item in state.tasks}
+                if task_id not in known:
+                    return (
+                        f"任务清单里没有 {task_id}。可用："
+                        + "、".join(sorted(str(item) for item in known))
+                    )
+                workflow.complete_task(self.project.root, state, task_id)
+                self.workflow_changed.emit(state)
+                done, total = state.task_counts()
+                remaining = [
+                    item.get("id")
+                    for item in state.tasks
+                    if item.get("status") != "done"
+                ]
+                nxt = ("；下一项：" + remaining[0]) if remaining else "；全部完成"
+                return f"任务 {task_id} 已完成，进度 {done}/{total}{nxt}。"
+            if name in {"start_task", "begin_task"}:
+                task_id = str(args.get("id") or args.get("task") or "").strip()
+                if not task_id:
+                    return "start_task 缺少 id。"
+                state = workflow.load_state(
+                    self.project.root, spec_mod.load_spec(self.project.root)
+                )
+                workflow.start_task(self.project.root, state, task_id)
+                self.workflow_changed.emit(state)
+                return f"开始任务：{task_id}"
+            if name == "inspect_artifact":
+                inventory = workflow.inspect_artifacts(self.project.root)
+                current = spec_mod.load_spec(self.project.root)
+                manual = workflow.render_artifact_manual(current, inventory)
+                try:
+                    (self.project.root / "MANUAL.md").write_text(
+                        manual, encoding="utf-8", newline="\n"
+                    )
+                except OSError as exc:
+                    return f"成品说明书写入失败：{exc}"
+                state = workflow.load_state(self.project.root, current)
+                if inventory.jar:
+                    state.jar = inventory.jar
+                    state.manual = "MANUAL.md"
+                    state.stage = "done"
+                    self.stage = "done"
+                    workflow.save_state(self.project.root, state)
+                self.artifact_changed.emit(
+                    {
+                        "jar": inventory.jar,
+                        "summary": inventory.summary(),
+                        "inventory": inventory.to_dict(),
+                        "manual": "MANUAL.md",
+                    }
+                )
+                self.workflow_changed.emit(state)
+                if not inventory.jar:
+                    return (
+                        "build/libs 里还没有 jar。先让编译通过，再读取最终产物。\n\n"
+                        + manual[:4000]
+                    )
+                return (
+                    f"成品巡检完成：{inventory.summary()}\n"
+                    f"JAR：{inventory.jar}\n已写入 MANUAL.md。\n\n"
+                    + manual[:12000]
+                )
             if name == "read_skill":
                 skill = self.skill_store.get(str(args.get("id") or ""))
                 if skill is None:
@@ -1238,7 +1523,13 @@ class AgentWorker(QObject):
                     )
                 except builder.BuilderError as exc:
                     return f"编译没有开始：{exc}"
-                return _build_report(result)
+                report = _build_report(result)
+                if task == "build":
+                    if result.ok:
+                        report += self._finalize_artifact()
+                    else:
+                        self._record_build_failure()
+                return report
             if name == "fix_build_setup":
                 root = self.project.root
                 report: list[str] = []
@@ -1273,7 +1564,8 @@ class AgentWorker(QObject):
                 return connectors.fetch_url(url)[:MAX_FETCH_RESULT]
             return (
                 f"未知工具：{name}。可用工具：list_files、read_file、search_text、write_file、"
-                "edit_file、pixel_art、read_skill、remember、recall、search_knowledge、"
+                "edit_file、pixel_art、submit_spec、update_spec、start_task、complete_task、"
+                "inspect_artifact、read_skill、remember、recall、search_knowledge、"
                 "read_knowledge、decompile_jar、build_project、fix_build_setup、fetch_url。"
             )
         except Exception as exc:
@@ -1302,6 +1594,13 @@ def _build_report(result: builder.BuildResult) -> str:
         parts.append(f"Gradle 日志：\n{tail}")
     if result.message:
         parts.append(f"启动信息：{result.message}")
+    if not result.ok:
+        try:
+            parts.append(
+                workflow.analyze_build_failure(result.output, result.code).render()
+            )
+        except Exception:
+            pass
     return "\n\n".join(parts)[:MAX_TOOL_RESULT]
 
 

@@ -88,7 +88,7 @@ class Shot(QWidget):
         p.setPen(QColor(C["ok"]))
         p.setBrush(QColor(C["ok"]))
         p.drawEllipse(QRectF(r.left() + 2, r.top() + 82, 8, 8))
-        self._text(p, QRectF(r.left() + 16, r.top() + 77, 220, 18), "创建后立即生成骨架", "ok", 8)
+        self._text(p, QRectF(r.left() + 16, r.top() + 77, 220, 18), "创建后立即拆解规格", "ok", 8)
         self._box(p, QRectF(r.right() - 100, r.bottom() - 22, 100, 22), "accent", None)
         self._text(p, QRectF(r.right() - 92, r.bottom() - 22, 88, 22), "创建并开始", "#fff", 8, True)
 
@@ -98,9 +98,9 @@ class Shot(QWidget):
                    "做一个会发光的矿石，挖掉回血", "text", 8)
         self._box(p, QRectF(r.right() - 205, r.top() + 42, 205, 44), "accent_soft")
         self._text(p, QRectF(r.right() - 197, r.top() + 44, 190, 18),
-                   "写入 6 个文件…", "text", 8, True)
+                   "规格已生成，等待确认", "text", 8, True)
         self._text(p, QRectF(r.right() - 197, r.top() + 62, 190, 18),
-                   "自动编译已开始", "ok", 8)
+                   "确认后才开始写代码", "ok", 8)
         self._box(p, QRectF(r.left(), r.bottom() - 26, 52, 22), "accent", None)
         self._text(p, QRectF(r.left() + 8, r.bottom() - 26, 44, 22), "发送", "#fff", 8, True)
         self._text(p, QRectF(r.left() + 62, r.bottom() - 26, 120, 22), "Ctrl+Enter", "muted", 7)
@@ -172,8 +172,8 @@ STEPS = [
     {
         "kind": "project",
         "title": "新建工程，一键开始",
-        "text": "点右上角「新建工程」，填 Mod ID、MC 版本和加载器。"
-                "勾选「创建后立即生成可编译骨架」，创建后助手会直接写工程文件、补依赖并执行 Gradle，不再反复追问版本。",
+        "text": "点右上角「新建工程」，填 Mod ID、MC 版本、加载器和运行端。"
+                "勾选「创建后立即让 AI 拆解完整规格」，创建后助手会先规划玩法、数值、美术和验收标准，生成规格说明书，确认后才写代码。",
         "tip": "三项基础信息缺一不可；Mod ID 只能是小写字母、数字、下划线。",
         "action": ("现在新建", "new"),
     },
@@ -181,24 +181,24 @@ STEPS = [
         "kind": "chat",
         "title": "用一句话描述需求",
         "text": "在输入框写清要什么，例如物品、方块、机器、生物，或者直接贴报错日志，按 Ctrl+Enter 发送。"
-                "助手会先读现有代码，再改必要的文件。",
-        "tip": "开启输入框下方的「自动编译」后，每轮写完都会自动跑 build。",
+                "助手会先把需求拆成完整规格，右侧「规格」页会显示 10 项需求清单和说明书。",
+        "tip": "检查注册内容、获取方式和数值；不满意就直接说，它会更新规格，不会提前写代码。",
         "action": ("去对话", "chat"),
     },
     {
         "kind": "pending",
-        "title": "文件写入与自动检查",
-        "text": "开启「自动写入」时，生成的文件直接落盘，右侧列表会标记「已自动写入」；关闭时会先进入待写入列表，"
-                "可以逐个预览后再点「写入全部」。覆盖前都会自动备份。",
-        "tip": "落盘位置在工程目录，备份在 data/backups 下。",
+        "title": "确认规格，开始施工",
+        "text": "规格没问题就点「确认规格并开始施工」。助手会按骨架、注册、玩法、纹理、配方、语言、编译、验收的顺序逐项完成，"
+                "右侧任务进度会实时前进；开启「自动写入」时文件直接落盘，关闭时先进入待写入列表。",
+        "tip": "覆盖前都会自动备份；确认后也可以随时让助手更新规格。",
         "action": ("打开工程目录", "folder"),
     },
     {
         "kind": "build",
-        "title": "编译、运行与数据生成",
+        "title": "编译、运行与成品说明书",
         "text": "打开「编译运行」页可以直接执行编译、开发客户端、开发服务端和数据生成。"
-                "第一次运行会自动准备 JDK、Gradle Wrapper 和依赖，下载慢时会自动切换镜像。",
-        "tip": "编译通过不等于游戏内正常，进游戏后还要看日志和实际效果。",
+                "编译通过后，右侧「成品」页会读取 build/libs 里的真实 JAR，列出注册内容、配方、模型纹理和安装步骤。",
+        "tip": "第一次运行会自动准备 JDK、Gradle Wrapper 和依赖，下载慢时会自动切换镜像。",
         "action": ("打开编译运行", "build"),
     },
     {

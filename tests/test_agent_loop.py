@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import json
 import unittest
 from unittest import mock
 
 from dma import agent as agent_mod
 from dma import builder
-from dma.agent import AgentWorker, PendingFile, apply_pending
+from dma import spec as spec_mod
+from dma import workflow as workflow_mod
+from dma.agent import AgentRun, AgentWorker, PendingFile, ToolCall, apply_pending
 from dma.config import Config
 from dma.connectors import ConnectorStore
 from dma.memory import MemoryStore
@@ -51,6 +54,7 @@ class AgentLoopTests(TempDataCase):
             skill_store=SkillStore(),
             memory=memory,
             connector_store=ConnectorStore(),
+            stage="building",
         )
 
     def test_tool_write_then_final(self) -> None:
@@ -576,6 +580,113 @@ class AgentLoopTests(TempDataCase):
             worker._loop()
         self.assertEqual(worker.memory.count(), 1)
         self.assertIn("Yarn", worker.memory.list()[0]["content"])
+
+    def test_write_blocked_before_spec_confirmed(self) -> None:
+        project = make_project(self)
+        worker = self.worker(project)
+        worker.stage = "planning"
+        reply = (
+            '```tool\n{"tool":"write_file","path":"A.java",'
+            '"content":"class A {}"}\n```'
+        )
+        seen: list[list[dict]] = []
+
+        def fake(ai, messages):
+            seen.append(list(messages))
+            return reply if len(seen) == 1 else "先不动手。"
+
+        with mock.patch("dma.agent.ai.request_chat", side_effect=fake):
+            run = worker._loop()
+        self.assertEqual(run.pending, [])
+        self.assertFalse((project.root / "A.java").exists())
+        self.assertIn("规格还没有确认", seen[1][-1]["content"])
+        self.assertEqual(worker.stage, "planning")
+
+    def test_submit_spec_stops_loop_and_enters_review(self) -> None:
+        project = make_project(self)
+        worker = self.worker(project)
+        worker.stage = "planning"
+        payload = {
+            "title": "星尘工具",
+            "summary": "用星尘升级工具",
+            "mc_version": "1.21.1",
+            "loader": "Fabric",
+            "runtime": "双端",
+            "content": [{"type": "物品", "id": "gem", "name": "星尘"}],
+            "features": ["挖矿更快"],
+            "obtain": ["工作台合成"],
+            "balance": ["耐久 2000"],
+            "assets": ["16x16 物品纹理"],
+            "acceptance": ["进游戏能找到物品"],
+            "risks": ["无"],
+        }
+        reply = (
+            '```tool\n{"tool":"submit_spec","spec":'
+            + json.dumps(payload, ensure_ascii=False)
+            + "}\n```"
+        )
+        with mock.patch("dma.agent.ai.request_chat", return_value=reply):
+            run = worker._loop()
+        self.assertIn("规格已生成", run.text)
+        saved = spec_mod.load_spec(project.root)
+        self.assertIsNotNone(saved)
+        assert saved is not None
+        self.assertEqual(saved.status, "draft")
+        self.assertEqual(saved.title, "星尘工具")
+        self.assertEqual(saved.features, ["挖矿更快"])
+        state = workflow_mod.load_state(project.root, saved)
+        self.assertEqual(state.stage, "review")
+        self.assertEqual(worker.stage, "review")
+
+    def test_update_spec_keeps_confirmed_and_resumes_building(self) -> None:
+        project = make_project(self)
+        spec = spec_mod.parse_spec(
+            {
+                "title": "星尘工具",
+                "summary": "用星尘升级工具",
+                "mc_version": "1.21.1",
+                "loader": "Fabric",
+            },
+            project=project,
+        )
+        spec.revision = 1
+        spec_mod.save_spec(project.root, spec)
+        workflow_mod.confirm(project.root, spec)
+
+        worker = self.worker(project)
+        worker.stage = "done"
+        reply = (
+            '```tool\n{"tool":"update_spec","spec":'
+            '{"mc_version":"1.20.1","summary":"改为 1.20.1"}}\n```'
+        )
+        with mock.patch("dma.agent.ai.request_chat", side_effect=[reply, "改好了"]):
+            worker._loop()
+        updated = spec_mod.load_spec(project.root)
+        assert updated is not None
+        self.assertTrue(updated.confirmed())
+        self.assertEqual(updated.mc_version, "1.20.1")
+        self.assertEqual(updated.title, "星尘工具")
+        self.assertEqual(updated.revision, 3)
+        self.assertEqual(worker.stage, "building")
+
+    def test_complete_task_updates_progress(self) -> None:
+        project = make_project(self)
+        spec = spec_mod.parse_spec(
+            {"title": "A", "summary": "B", "mc_version": "1.21.1", "loader": "Fabric"},
+            project=project,
+        )
+        spec.revision = 1
+        spec_mod.save_spec(project.root, spec)
+        workflow_mod.confirm(project.root, spec)
+
+        worker = self.worker(project)
+        worker.stage = "building"
+        text = worker._execute(
+            ToolCall(name="complete_task", args={"id": "scaffold"}), AgentRun()
+        )
+        self.assertIn("进度 1/", text)
+        state = workflow_mod.load_state(project.root, spec)
+        self.assertEqual(state.task_counts()[0], 1)
 
 
 if __name__ == "__main__":

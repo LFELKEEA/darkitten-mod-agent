@@ -36,6 +36,7 @@ class BuildToolTests(TempDataCase):
             skill_store=SkillStore(),
             memory=self.memory,
             connector_store=ConnectorStore(),
+            stage="building",
         )
 
     def tearDown(self) -> None:

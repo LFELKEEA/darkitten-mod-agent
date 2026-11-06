@@ -19,7 +19,17 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .. import deps, envcheck, gradle, mirrors, project as project_mod, toolchain, wrapper
+from .. import (
+    deps,
+    envcheck,
+    gradle,
+    mirrors,
+    project as project_mod,
+    spec as spec_mod,
+    toolchain,
+    workflow,
+    wrapper,
+)
 from . import theme
 from .prep_worker import PrepareWorker
 from .widgets import card, tiny
@@ -548,6 +558,7 @@ class BuildPage(QWidget):
             self._status(f"{self._task}完成", theme.COLORS["ok"])
             if self._task == "编译":
                 self.detail.setText("编译成功，jar 在 build/libs 目录。点「复制日志」可以把结果贴回对话页。")
+                self._finalize_artifact()
             else:
                 self.detail.setText("任务正常结束。需要继续修改就让助手改文件，再重新运行。")
             self._append(f"=== {self._task}完成（退出码 0）===")
@@ -692,6 +703,26 @@ class BuildPage(QWidget):
             self._append(f"=== {self._task}失败（退出码 {code}）===")
             self.main.status(f"{self._task}失败，退出码 {code}")
         self._task = ""
+
+    def _finalize_artifact(self) -> None:
+        """手动点「编译」时也生成成品说明书，并刷新右侧成品页。"""
+        project = getattr(self.main, "active_project", None)
+        if project is None:
+            return
+        try:
+            spec = spec_mod.load_spec(project.root)
+            state, _inventory, _manual = workflow.finalize_build(
+                project.root, True, spec
+            )
+        except Exception as exc:  # noqa: BLE001 - 巡检失败不该影响编译结果
+            self._append(f"[成品巡检失败] {exc}")
+            return
+        self._append(f"=== 成品巡检完成：{state.manual or 'MANUAL.md'} ===")
+        chat = getattr(self.main, "chat_page", None)
+        if chat is not None:
+            reload_workflow = getattr(chat, "reload_workflow", None)
+            if callable(reload_workflow):
+                reload_workflow()
 
     def _tick(self) -> None:
         if not self.runner.running:

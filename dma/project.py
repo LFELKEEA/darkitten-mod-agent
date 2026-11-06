@@ -77,6 +77,7 @@ class ProjectMeta:
     mod_id: str = ""
     mc_version: str = ""
     loader: str = "Fabric"
+    runtime: str = "双端"
     dependencies: str = ""
     task_type: str = "创建全新模组"
     notes: str = ""
@@ -153,6 +154,7 @@ def create_project(
     mod_id: str,
     mc_version: str,
     loader: str,
+    runtime: str = "双端",
     dependencies: str = "",
     task_type: str = "创建全新模组",
     notes: str = "",
@@ -172,6 +174,7 @@ def create_project(
         mod_id=mod_id,
         mc_version=mc_version,
         loader=loader,
+        runtime=(runtime or "双端").strip(),
         dependencies=dependencies.strip(),
         task_type=task_type,
         notes=notes.strip(),
@@ -702,6 +705,7 @@ def project_context(project: Project, max_files: int = 180) -> str:
         f"Mod ID：{meta.mod_id or '未填写'}",
         f"MC 版本：{meta.mc_version or '未填写'}",
         f"加载器：{meta.loader or '未填写'}",
+        f"运行端：{meta.runtime or '双端'}",
         f"依赖：{meta.dependencies or '无'}",
         f"任务类型：{meta.task_type or '创建全新模组'}",
         "",

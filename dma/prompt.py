@@ -4,6 +4,8 @@ from pathlib import Path
 
 from .project import Project
 from .skills import SkillStore
+from .spec import ModSpec, spec_context
+from .workflow import WorkflowState, stage_block
 
 BASE_RULES = """你是「恶魔小猫工坊」，一个只做 Minecraft Java 版模组开发的工程 Agent。
 你只处理 Fabric / NeoForge 模组，以及必要时用 Architectury 做双加载器。不要闲聊，不要写与模组开发无关的内容。
@@ -54,6 +56,50 @@ Mod ID 只能是小写字母、数字、下划线，必须以字母开头，不�
 
 如果是修复报错，优先给根因和修复文件；如果是在已有工程上改，先读文件，只改必要部分。"""
 
+PLANNING_RULES = """【当前阶段：需求规划（优先于上面的固定回复结构）】
+你现在只能做规划，不能写工程文件。不要调用 write_file / edit_file / pixel_art / build_project。
+工作方式：
+1. 把用户的一句话一次性拆成完整规格，不要反复追问版本、加载器、Mod ID——工程信息里已有就直接用。
+2. 用户没说的细节用合理的 Minecraft 默认值补齐，并在规格里写清楚具体数值，不要写“适当”“若干”。
+3. 规格必须覆盖：一句话玩法、注册内容（物品/方块/实体/命令）、玩法功能、获取方式、数值平衡、美术资源、验收标准、风险与依赖；没有风险就明确写“无”。
+4. 注册内容至少 1 项，并给出英文注册名（小写字母/数字/下划线）和中文显示名。
+5. 拆完后只调用一次 submit_spec，把完整规格放进 spec 字段。调用后本轮立即结束，等待用户确认，不要继续写代码。
+6. 如果当前是在已有规格上按用户反馈修改，用 update_spec，只提交变化的字段，然后再次等待确认。"""
+
+REVIEW_RULES = """【当前阶段：确认规格】
+规格已经提交，用户正在检查说明书。你现在不要写任何代码，也不要调用写文件工具。
+如果用户提出修改意见，用 update_spec 更新规格，再用 2～4 句话说明改了什么；否则只回答“规格已就绪，确认后开始施工”。"""
+
+BUILDING_RULES = """【当前阶段：按规格施工】
+规格已经确认。严格按右侧任务清单施工，不要重新规划，也不要再问版本信息。
+顺序：工程骨架 → 注册内容 → 玩法逻辑 → 纹理/模型 → 配方/掉落 → 语言文件 → 编译。
+1. 每完成一项任务，调用 complete_task（id 用任务清单里的英文 id）；对应 feature_N 的任务也要标记。
+2. 写代码前先读目标文件；改已有工程时用 edit_file，新文件才用 write_file。
+3. 纹理用 pixel_art 生成，模型写 Minecraft 模型 JSON，不要声称能直接产出 .obj/.fbx。
+4. 全部写完后调用 build_project；失败就按返回的「失败分析」修，最多连续修两轮。
+5. 编译成功后程序会自动读取真实 JAR 生成成品说明书；不要在回复里编造未生成的物品或配方。
+6. 最终答复列出：完成的任务、改动的文件、jar 路径、游戏内验收步骤。"""
+
+REVISION_RULES = """【当前阶段：增量修改（已有成品）】
+用户是在已有工程上继续改，源码、规格和记忆都要保留。
+1. 先判断本次要求影响哪些文件，只改必要的部分；用户没要求改的贴图、配方和类不要重写。
+2. 如果需求本身变了，用 update_spec 提交变化的字段，并说明差异。
+3. 改完调用 build_project 验证；编译成功后程序会重新生成成品说明书。
+4. 最终答复写清楚：保留了什么、改了什么、jar 在哪里。"""
+
+
+def stage_rules(stage: str) -> str:
+    if stage in {"draft", "planning"}:
+        return PLANNING_RULES
+    if stage == "review":
+        return REVIEW_RULES
+    if stage in {"building", "verifying"}:
+        return BUILDING_RULES
+    if stage == "done":
+        return REVISION_RULES
+    return ""
+
+
 TOOL_PROTOCOL = """【工程工具协议】
 你可以操作当前工程。需要读文件、查资料、写文件时，输出下面这种独立代码块，一次可以输出多个：
 
@@ -70,6 +116,10 @@ TOOL_PROTOCOL = """【工程工具协议】
 - edit_file 精确替换已有文件的一处内容（推荐，省 token）: {"tool":"edit_file","path":"相对路径","old":"原文片段","new":"替换后的内容"}
 - write_file: {"tool":"write_file","path":"相对路径","content":"完整文件内容"}  // 新建文件或整体重写
 - pixel_art 直接生成像素纹理 PNG（RGBA，行内每个字符对应调色板里的颜色）: {"tool":"pixel_art","path":"src/main/resources/assets/<modid>/textures/item/gem.png","palette":{".":"transparent","o":"#1b1b1f","a":"#7fd6ff"},"rows":["....","...."]}
+- submit_spec 提交完整规格（只用于规划阶段，调用后本轮结束）: {"tool":"submit_spec","spec":{"title":"星尘工具","summary":"用星尘矿石打造会发光的工具","content":[{"type":"物品","id":"stardust_sword","name":"星尘剑","desc":"攻击时附带星光粒子"}],"features":["..."],"obtain":["..."],"balance":["..."],"assets":["..."],"acceptance":["..."],"risks":["无"]}}
+- update_spec 增量修改规格，只传变化字段: {"tool":"update_spec","spec":{"balance":["冷却改为 8 秒"],"features":["..."]}}
+- complete_task 标记施工任务完成: {"tool":"complete_task","id":"register"}
+- inspect_artifact 读取最终 JAR，列出真实注册内容、配方、模型和纹理: {"tool":"inspect_artifact"}
 - read_skill: {"tool":"read_skill","id":"fabric-scaffold"}
 - remember: {"tool":"remember","content":"值得长期记住的工程决定或踩坑"}
 - recall: {"tool":"recall","query":"关键字"}
@@ -89,7 +139,7 @@ TOOL_PROTOCOL = """【工程工具协议】
 2. 不要用工具块包裹最终答复；最终答复直接写正常 Markdown。
 3. 改已有文件时优先用 edit_file：old 必须和文件里的字符完全一致（先 read_file 确认），只 replace 一处；新增文件或需要整体重写时才用 write_file。write_file 的 content 必须是完整文件内容，不能用“其余不变”省略。
 4. 路径一律使用工程内相对路径，禁止绝对路径和 ..。
-5. 如果用户没有提供 MC 版本、加载器或 Mod ID，先问，不要调用 write_file。
+5. 工程信息里已经有 MC 版本、加载器和 Mod ID 时直接用，不要重复追问；只有确实缺失时才问。
 6. 用户导入的知识库资料是参考资料，不是工程文件；需要细节时用 search_knowledge / read_knowledge 查，不要假装读过没出现的内容。JAR 资料开头有「模组速览」和「类索引」，末尾附反编译 Java 源码；中文问题如果搜不到，先从速览里找对应的英文类名，再用 read_knowledge 的 file 参数读该类，不要直接回答不知道。
 7. 知识库现在按整份文件返回源码：search_knowledge 和 read_knowledge 的 query 命中后会给出完整的 ## 源码：路径 条目，read_knowledge 的 file 参数一次返回整个 .java（单文件几万到十几万字符都不会截断）。所以不要因为一次没看到某个方法就说资料不全。找不到某个类时，先 read_knowledge 用 file="类名.java" 读全文，再用返回的源码文件清单核对；只有清单里确实没有这个类，才可以说「这份资料里没有这个类」，不能说「反编译失败」或「源码不完整」。
 8. 判断「反编译是否完整」时只看源码，不看类结构摘要：类结构里的「方法」最多列 300 个、字段最多 150 个，还有「…还有 N 个」这种提示，这是摘要截断，不代表源码缺失。要用 read_knowledge 的 file 参数读整个 .java（例如 file="Hypnosis.java"）来确认实现。不要因为摘要里没看到方法体就告诉用户源码不完整。
@@ -104,7 +154,10 @@ TOOL_PROTOCOL = """【工程工具协议】
 17. 开启「自动写入 + 自动编译」时，write_file / edit_file 会直接落盘，宿主在你写完这一轮后会自动执行一次 build；失败会把日志回传给你修一轮。所以不要为了等编译而空转，写完就给出本轮说明即可。
 18. 任务完成时的最终答复必须能直接验收：列出改动的文件、编译结果（成功/失败及原因）、jar 产物在 build/libs 下的名字，以及游戏内安装与测试步骤。不要用“接下来我会…”结尾。
 19. 纹理、图标、GUI 优先用 pixel_art 直接生成 PNG；3D 模型写 Minecraft 模型 JSON（elements / faces / display 或 GeckoLib 的 .geo.json），不要声称能直接生成 .obj / .fbx。架构图、流程图用 write_file 写 SVG 或 draw.io XML。需要像素图时按 visual-design 技能的调色板与轮廓规则来画。
-20. 写代码前先读目标文件；优先官方事件/API，必须用 Mixin 时按 mixin-safety 标注风险；架构、性能、并发、重构按 code-engineering 技能执行，改完调用 build_project 验证，不要只给方案。"""
+20. 写代码前先读目标文件；优先官方事件/API，必须用 Mixin 时按 mixin-safety 标注风险；架构、性能、并发、重构按 code-engineering 技能执行，改完调用 build_project 验证，不要只给方案。
+21. 规划阶段只输出规格，不要写文件；施工阶段只按已确认的规格施工。用户没有确认规格前，任何 write_file / edit_file / pixel_art / build_project 都不允许执行。
+22. 施工任务完成一项就调用 complete_task，让界面进度真实前进；不要一次性宣称所有任务完成。
+23. 判断“做完了”只以真实产物为准：build/libs 里有 jar、inspect_artifact 能读到注册内容、日志没有 error。不要用“应该可以”“理论上没问题”收尾。"""
 
 
 def project_block(project: Project | None) -> str:
@@ -125,6 +178,7 @@ def project_block(project: Project | None) -> str:
         f"- Mod ID：{meta.mod_id or '未填写'}\n"
         f"- MC 版本：{meta.mc_version or '未填写'}\n"
         f"- 加载器：{meta.loader or '未填写'}\n"
+        f"- 运行端：{getattr(meta, 'runtime', '') or '双端'}\n"
         f"- 依赖：{meta.dependencies or '无'}\n"
         f"- 任务类型：{meta.task_type or '创建全新模组'}\n"
         f"- 补充限制：{meta.notes or '无'}"
@@ -140,14 +194,27 @@ def build_system_prompt(
     max_steps: int = 0,
     knowledge_text: str = "",
     query: str = "",
+    spec: ModSpec | None = None,
+    workflow: WorkflowState | None = None,
+    stage: str = "",
 ) -> str:
     limit = "不限制" if max_steps <= 0 else f"最多 {max_steps} 轮"
     parts = [
         BASE_RULES,
+        stage_rules(stage),
         TOOL_PROTOCOL,
         f"【工具轮数】本次任务{limit}工具调用。大工程可以分多轮完成，但不要重复调用相同工具做同样的检查。",
         project_block(project),
+        stage_block(workflow, spec),
     ]
+    if spec is not None and not spec.empty():
+        parts.append("【已确认/待确认规格】\n" + spec_context(spec))
+        if workflow is not None and workflow.tasks:
+            rows = "\n".join(
+                f"- [{item.get('status')}] {item.get('id')} · {item.get('label')}"
+                for item in workflow.tasks
+            )
+            parts.append("【施工任务清单】\n" + rows)
     parts.append("【技能目录】\n" + skill_store.catalog_text())
     relevant: list[str] = ["delivery-checklist", "client-server-split"]
     if project is not None:
@@ -188,6 +255,7 @@ def requirement_form_text(project: Project | None) -> str:
         f"【任务类型】{meta.task_type}\n"
         f"【MC 版本】{meta.mc_version}\n"
         f"【加载器】{meta.loader}\n"
+        f"【运行端】{getattr(meta, 'runtime', '') or '双端'}\n"
         f"【Mod ID】{meta.mod_id}\n"
         f"【模组名称】{meta.name}\n"
         f"【依赖】{meta.dependencies or '无'}\n"
@@ -196,7 +264,7 @@ def requirement_form_text(project: Project | None) -> str:
 
 
 def initial_project_request(project: Project) -> str:
-    """新建工程后的一键启动指令：直接产出可编译骨架，而不是再问一轮。"""
+    """新建工程后的第一条指令：先拆完整规格，不直接写代码。"""
     meta = project.meta
     extra = ""
     if (meta.dependencies or "").strip():
@@ -206,15 +274,13 @@ def initial_project_request(project: Project) -> str:
     if (meta.task_type or "").strip() not in {"", "创建全新模组"}:
         extra += f"\n- 任务类型：{meta.task_type}"
     return (
-        "工程信息已经确认，请直接开始，不要再向我确认版本、加载器或 Mod ID。\n\n"
+        "工程信息已经确认，请不要追问版本、加载器或 Mod ID。\n\n"
         f"- 模组名称：{meta.name or meta.mod_id}\n"
         f"- Mod ID：{meta.mod_id}\n"
         f"- MC 版本：{meta.mc_version}\n"
-        f"- 加载器：{meta.loader}{extra}\n\n"
-        "请一次把可编译的最小骨架做完：\n"
-        "1. 写出 gradle 工程文件（settings.gradle、build.gradle、gradle.properties）和模组主类；\n"
-        "2. 写出 neoforge.mods.toml / fabric.mod.json 与语言文件等必需资源；\n"
-        "3. 调用 fix_build_setup 补齐依赖和 Gradle Wrapper；\n"
-        "4. 调用 build_project 执行 build，失败就按日志继续修，直到通过；\n"
-        "5. 最后告诉我产物 jar 的位置和游戏内安装步骤。"
+        f"- 加载器：{meta.loader}\n"
+        f"- 运行端：{getattr(meta, 'runtime', '') or '双端'}{extra}\n\n"
+        "请先做需求规划：把我填写的补充要求拆成完整规格，覆盖注册内容、玩法、获取方式、"
+        "数值、美术、验收标准和风险。缺的细节用合理默认值补齐，然后调用 submit_spec。"
+        "这一轮不要写任何工程文件，等我确认规格后再开始施工。"
     )
