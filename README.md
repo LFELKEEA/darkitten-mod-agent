@@ -2,10 +2,13 @@
 
 只写 Minecraft Java 模组的独立桌面 Agent。基于 PySide6，自带对话工作台、技能、连接器和知识库，可从下载站、GitHub 与 Darkitten 启动器获取，并支持自动更新。
 
-当前版本：`1.2.0`
+当前版本：`1.3.0`
 
 ## 功能
 
+- **Fabric → NeoForge 移植**：`port_from_jar` 扫描 JAR、转换 1.21.4+ 的 `items/` 模型、反编译参考源码、生成 Gradle / `mods.toml` / 规格 / 验收清单，并自动切换工程。PoHypSkin（123 个源类、6 个道具）实测 verify 0 错误、`BUILD SUCCESSFUL`。
+- **MCA Reborn 兼容**：自动识别皮物 / 催眠手机 / 皮化之刃或代码里的 `net.conczin.mca`，自动复制 NeoForge 版 MCA 依赖，生成 `McaCompat`、`SkinData`、道具类、客户端皮肤缓存 / Mixin 与服务端事件。MCA 村民的 `mobInteract` 会先消费右键，所以用 `PlayerInteractEvent.EntityInteract` 抢先处理，村民和玩家共用一套逻辑。
+- **附身 / 穿皮同步身份**：备份玩家原 `PlayerSaveData`，把村民身体 NBT 写进 `setEntityData`，姓名、性别、职业、配偶、父母、子女写进 `FamilyTree`；解除时恢复并放回村民本体。穿皮后可以代替该村民结婚、生育，皮物离开头盔栏会自动还原。
 - **先规划、再确认、后施工**：用一句话描述需求后，助手先一次性拆出完整规格（玩法、注册内容、获取方式、数值、美术、验收标准、风险），右侧「规格」页显示 10 项需求清单和说明书；必须点「确认规格并开始施工」才会写代码。
 - **施工任务与失败分析**：确认规格后自动拆成骨架、注册、玩法、纹理、配方、语言、编译、验收等任务，完成一项进度前进一项；编译失败会按真实日志归类为 Java 版本、依赖下载、Mixin、找不到符号、类型不匹配、缺少程序包、依赖变体、Gradle 任务或内存不足，并给出处理方式。
 - **成品说明书**：编译通过后直接读取 `build/libs` 里的 JAR，解析 `fabric.mod.json` / `neoforge.mods.toml`、物品与方块模型、blockstates、配方、掉落表、纹理、音效和语言文件，列出真实注册内容、配方数量、模型纹理数量、AI 推荐玩法和安装步骤。
@@ -27,7 +30,7 @@
 - **NeoForge 依赖自动兜底**：`maven.neoforged.net` 返回 502、连接被拒、被 DNS 污染或证书校验失败时，自动启动本机 Maven 代理并重试；代理按需从国内镜像取文件并缓存，缺的 `neoform-runtime` 和 `minecraft-dependencies` 会在本机合成，不需要手动改 hosts 或配镜像源。
 - **删除工程**：对话页右上角的「删除工程」先把工程目录移到 Windows 回收站，再从最近列表里移除并清掉会话记录；有生成任务或 Gradle 任务在跑时会先拦住。
 - **环境自检**：检查 Java、JAVA_HOME、Gradle、Git、目录写入、资料源连通性和模型通道，给出缺失项与修复建议，可复制报告。
-- **编译运行**：点任务按钮时先自动准备环境，再执行 `gradlew build` / `runClient` / `runServer` / 数据生成（`runData` / `runDatagen` 按工程自动选择）；日志实时回显，可停止、复制日志、打开 `build/libs`。
+- **编译运行**：没通过对话新建工程时，可以直接点「选择工程」打开磁盘上已有的工程，选中后编译 / 开发客户端 / 开发服务端 / 数据生成按钮立即恢复可用。点任务按钮时先自动准备环境，再执行 `gradlew build` / `runClient` / `runServer` / 数据生成（`runData` / `runDatagen` 按工程自动选择）；日志实时回显，可停止、复制日志、打开 `build/libs`。
 - **工具轮数**：默认 32 轮，可调到 999；填 0 表示不限制，适合大型工程。
 - **知识库**：导入 txt / md / docx / pdf / jar / 代码和配置文件，自动提取正文、分片；每轮对话前检索相关片段，也能让助手用 `search_knowledge` / `read_knowledge` 按需查。列表里点选文件只加载前 4 万字符预览，上千万字的大 JAR 也不会卡住界面。
 - **模组 JAR 分析**：直接导入现成模组，提取 `fabric.mod.json` / `mods.toml`、语言与资源 JSON、类结构，并用内置 Vineflower 反编译出 Java 源码；开头生成「模组速览 + 类索引」，中文问题也能对上英文类名，做兼容、移植或复刻功能时可直接参考实现。
