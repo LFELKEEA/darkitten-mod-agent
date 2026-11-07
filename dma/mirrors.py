@@ -85,6 +85,76 @@ def cache_path(maven_path: str) -> Path:
     return base / "_long" / digest[:2] / f"{digest}.bin"
 
 
+def _gradle_cache_find(maven_path: str) -> Path | None:
+    """从本机 Gradle / Maven 缓存里找同名构件。
+
+    国内镜像有时缺 FancyModLoader、NeoForm 这类构件，但用户机器上别的
+    模组工程早就下过。直接复用本地缓存，比让用户改仓库或挂代理可靠。
+    """
+    parts = [item for item in maven_path.split("/") if item]
+    if len(parts) < 4:
+        return None
+    filename = parts[-1]
+    version = parts[-2]
+    artifact = parts[-3]
+    group = ".".join(parts[:-3])
+    # 新版 Gradle 把 group 直接当成一个带点号的目录；旧版/ Maven 用多级目录。
+    relatives = [
+        Path(group, artifact, version),
+        Path(*group.split("."), artifact, version),
+    ]
+    roots: list[Path] = []
+    env = os.environ.get("GRADLE_USER_HOME")
+    if env:
+        roots.append(Path(env) / "caches" / "modules-2" / "files-2.1")
+    roots.append(Path.home() / ".gradle" / "caches" / "modules-2" / "files-2.1")
+    for root in roots:
+        for relative in relatives:
+            folder = root / relative
+            if not folder.is_dir():
+                continue
+            hits = sorted(folder.glob(f"*/{filename}"))
+            for hit in hits:
+                if hit.is_file() and hit.stat().st_size > 0:
+                    return hit
+    for relative in relatives:
+        m2 = Path.home() / ".m2" / "repository" / relative / filename
+        if m2.is_file() and m2.stat().st_size > 0:
+            return m2
+    return None
+
+
+def _import_from_gradle_cache(
+    maven_path: str, service: "MirrorService"
+) -> Path | None:
+    try:
+        digest_request = maven_path.endswith(".sha1")
+        base = maven_path[:-5] if digest_request else maven_path
+        if digest_request:
+            existing = cache_path(base)
+            if existing.is_file() and existing.stat().st_size > 0:
+                service.store(
+                    maven_path,
+                    hashlib.sha1(existing.read_bytes()).hexdigest().encode(),
+                )
+                return cache_path(maven_path)
+            target = _gradle_cache_find(base)
+            if target is None:
+                return None
+            data = target.read_bytes()
+            service.store(base, data)
+            service.store(maven_path, hashlib.sha1(data).hexdigest().encode())
+            return cache_path(maven_path)
+        target = _gradle_cache_find(base)
+        if target is None:
+            return None
+        service.store(base, target.read_bytes())
+        service._log(f"[镜像] 复用本地缓存 {maven_path}")
+        return cache_path(base)
+    except OSError:
+        return None
+
+
 def _normalize(path: str) -> str:
     path = path.split("?", 1)[0].strip("/")
     return path
@@ -1049,6 +1119,9 @@ class MirrorService:
         cache = cache_path(maven_path)
         if cache.is_file() and cache.stat().st_size > 0:
             return cache
+        imported = _import_from_gradle_cache(maven_path, self)
+        if imported is not None:
+            return imported
         return None
 
     def store(self, maven_path: str, data: bytes) -> Path:

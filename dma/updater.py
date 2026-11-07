@@ -9,7 +9,6 @@ import subprocess
 import sys
 import threading
 import time
-import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
@@ -17,13 +16,17 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from . import paths
+from . import paths, toolchain
 from .version import APP_EXE, APP_VERSION, UPDATE_MANIFEST_URL
 
 MAX_MANIFEST_BYTES = 512 * 1024
 MAX_UPDATE_BYTES = 512 * 1024 * 1024
 MAX_EXTRACT_BYTES = 900 * 1024 * 1024
 ProgressCallback = Callable[[int, str], None]
+
+# GitHub 的 release 资产在国内经常只有几十 KB/s。带 SHA-256 校验的加速入口
+# 排在最前面，校验不通过会自动退回官方地址，不会把损坏的文件装进去。
+UPDATE_ACCELERATORS = ("https://gh-proxy.com/",)
 
 
 class UpdateError(Exception):
@@ -224,42 +227,43 @@ def download_update(
         _remove(dest)
 
     progress(1, f"正在下载 {release.version}…")
-    request = urllib.request.Request(
-        release.download_url, headers={"User-Agent": "DarkittenModAgent-Updater/1.0"}
-    )
+    mirrors = [
+        prefix + release.download_url
+        for prefix in UPDATE_ACCELERATORS
+        if release.download_url.startswith("https://github.com/")
+    ]
+
+    def on_progress(done: int, total: int) -> None:
+        if cancel_event.is_set():
+            return
+        if total:
+            percent = max(1, min(99, int(done * 100 / total)))
+            progress(
+                percent,
+                f"{done / 1024 / 1024:.1f}/{total / 1024 / 1024:.1f} MB",
+            )
+        else:
+            progress(50, f"已下载 {done / 1024 / 1024:.1f} MB")
+
     try:
-        with urllib.request.urlopen(request, timeout=60) as response:
-            total = int(response.headers.get("Content-Length") or release.size or 0)
-            done = 0
-            with dest.open("wb") as handle:
-                while True:
-                    if cancel_event.is_set():
-                        raise UpdateError("已取消。")
-                    chunk = response.read(1024 * 1024)
-                    if not chunk:
-                        break
-                    done += len(chunk)
-                    if done > MAX_UPDATE_BYTES:
-                        raise UpdateError("更新包体积异常，已停止。")
-                    handle.write(chunk)
-                    if total:
-                        percent = max(1, min(99, int(done * 100 / total)))
-                        progress(
-                            percent,
-                            f"{done / 1024 / 1024:.1f}/{total / 1024 / 1024:.1f} MB",
-                        )
-                    else:
-                        progress(50, f"已下载 {done / 1024 / 1024:.1f} MB")
-    except UpdateError:
+        toolchain.download(
+            release.download_url,
+            dest,
+            sha256=release.sha256,
+            mirrors=mirrors,
+            progress=on_progress,
+            cancel=cancel_event,
+        )
+    except toolchain.DownloadCancelled as exc:
         _remove(dest)
-        raise
-    except urllib.error.HTTPError as exc:
-        _remove(dest)
-        raise UpdateError(f"下载失败：HTTP {exc.code}") from exc
+        raise UpdateError("已取消。") from exc
     except Exception as exc:
         _remove(dest)
         raise UpdateError(f"下载失败：{exc}") from exc
 
+    if dest.stat().st_size > MAX_UPDATE_BYTES:
+        _remove(dest)
+        raise UpdateError("更新包体积异常，已停止。")
     if release.size and dest.stat().st_size != release.size:
         _remove(dest)
         raise UpdateError(

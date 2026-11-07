@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..skills import Skill, SkillError
+from ..skills import BUILTIN_SKILLS, Skill, SkillError
 from .widgets import card, tiny
 
 
@@ -43,7 +43,10 @@ class SkillsPage(QWidget):
         title.setObjectName("H1")
         title_box.addWidget(title)
         title_box.addWidget(
-            tiny("技能是写进系统提示的领域工作流。内置技能可以停用或恢复默认，不能删除。")
+            tiny(
+                f"内置 {len(BUILTIN_SKILLS)} 个领域工作流，会按当前这句话自动匹配相关技能。"
+                "内置技能可以停用或恢复默认，不能删除。"
+            )
         )
         head.addLayout(title_box, 1)
         self.new_btn = QPushButton("新建技能")

@@ -16,15 +16,7 @@ class GradleResolveTests(TempDataCase):
     def test_tasks(self) -> None:
         self.assertEqual(
             set(gradle.GRADLE_TASKS),
-            {
-                "build",
-                "runClient",
-                "runServer",
-                "runData",
-                "runDatagen",
-                "runGameTestServer",
-                "runGametest",
-            },
+            {"build", "runClient", "runServer", "runData", "runDatagen"},
         )
 
     def test_resolve_data_task_by_declared_run(self) -> None:

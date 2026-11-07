@@ -412,6 +412,28 @@ class MirrorServiceTests(TempDataCase):
         finally:
             service.stop()
 
+    def test_cached_falls_back_to_gradle_cache(self) -> None:
+        from unittest import mock
+
+        coordinate = "net/neoforged/fancymodloader/loader/9.9.99/loader-9.9.99.pom"
+        # Gradle 缓存按 group 的点号拆成多级目录。
+        folder = self.tmp / ".gradle/caches/modules-2/files-2.1"
+        for part in ("net", "neoforged", "fancymodloader", "loader", "9.9.99", "abc123"):
+            folder = folder / part
+        folder.mkdir(parents=True, exist_ok=True)
+        cached_file = folder / "loader-9.9.99.pom"
+        cached_file.write_bytes(b"<project/>")
+        service = mirrors.MirrorService()
+        try:
+            with mock.patch("pathlib.Path.home", return_value=self.tmp):
+                found = mirrors._gradle_cache_find(coordinate)
+                self.assertEqual(found, cached_file)
+                result = service.cached(coordinate)
+            self.assertIsNotNone(result)
+            self.assertEqual(result.read_bytes(), b"<project/>")
+        finally:
+            service.stop()
+
     def test_server_swallows_client_disconnects(self) -> None:
         from unittest import mock
 

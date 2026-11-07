@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .. import porting
 from .. import project as project_mod
 from .. import toolchain
 from ..knowledge import (
@@ -70,6 +71,12 @@ class KnowledgePage(QWidget):
             "不会放进 src/main/java，不影响编译。"
         )
         self.decompile_btn.clicked.connect(self.decompile_to_project)
+        self.port_btn = QPushButton("生成 NeoForge 移植工程")
+        self.port_btn.setToolTip(
+            "选中一个 Fabric JAR，自动反编译并生成 NeoForge 1.21.1 工程："
+            "复制资源、补物品模型、写 gradle 与 mods.toml。"
+        )
+        self.port_btn.clicked.connect(self.port_to_neoforge)
         self.delete_btn = QPushButton("删除")
         self.delete_btn.setObjectName("Danger")
         self.delete_btn.clicked.connect(self._delete)
@@ -79,6 +86,7 @@ class KnowledgePage(QWidget):
         for button in (
             self.import_btn,
             self.decompile_btn,
+            self.port_btn,
             self.delete_btn,
             self.refresh_btn,
         ):
@@ -376,6 +384,95 @@ class KnowledgePage(QWidget):
         self.main.status(
             f"已反编译 {jar.name}：{result['written']} 个 Java 文件，目录 {result['target']}"
         )
+
+    def port_to_neoforge(self) -> None:
+        item = self._selected()
+        jar: Path | None = None
+        if item is not None and str(item.get("kind") or "") == "jar":
+            candidate = Path(str(item.get("source") or ""))
+            if candidate.is_file():
+                jar = candidate
+        if jar is None:
+            filename, _ = QFileDialog.getOpenFileName(
+                self,
+                "选择要移植的 Fabric JAR",
+                str(self.main.config.project_root or Path.home()),
+                "模组 JAR (*.jar);;所有文件 (*.*)",
+            )
+            if not filename:
+                return
+            jar = Path(filename)
+        project = self._project()
+        base = (
+            Path(project.root.parent)
+            if project is not None
+            else Path(str(self.main.config.project_root or Path.home()))
+        )
+        parent, ok = QInputDialog.getText(
+            self,
+            "生成 NeoForge 移植工程",
+            "工程放到哪个目录（会在该目录下创建以 Mod ID 命名的子目录）：",
+            text=str(base),
+        )
+        if not ok or not str(parent).strip():
+            return
+        dependencies, ok = QInputDialog.getText(
+            self,
+            "前置依赖",
+            "需要兼容的前置模组 ID，多个用逗号分隔；MCA Reborn 填 mca：",
+            text="mca" if "poh" in jar.name.lower() else "",
+        )
+        if not ok:
+            return
+        progress = QProgressDialog("正在扫描 JAR 并生成移植工程…", "", 0, 0, self)
+        progress.setWindowTitle(f"移植：{jar.name}")
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setCancelButton(None)
+        progress.show()
+        QApplication.processEvents()
+
+        def report(message: str) -> None:
+            progress.setLabelText(message)
+            QApplication.processEvents()
+
+        try:
+            result = porting.create_port_project(
+                jar,
+                Path(str(parent).strip()),
+                target_mc="1.21.1",
+                dependencies=str(dependencies or ""),
+                progress=report,
+            )
+        except Exception as exc:
+            progress.close()
+            QMessageBox.critical(self, "移植工程生成失败", str(exc))
+            return
+        progress.close()
+        errors = [
+            issue
+            for issue in (result.get("verify") or {}).get("issues") or []
+            if issue.get("level") == "error"
+        ]
+        detail = (
+            f"已生成：{result['root']}\n\n"
+            f"物品：{', '.join(result.get('item_ids') or []) or '无'}\n"
+            f"反编译参考：{result.get('class_count', 0)} 个 Java 文件\n"
+            f"资源：{result.get('written_resources', 0)} 个\n"
+            f"验收：{'通过' if not errors else f'{len(errors)} 个错误待修'}\n\n"
+            "可以直接切换到该工程，让助手继续迁移代码。"
+        )
+        answer = QMessageBox.question(
+            self,
+            "移植工程已生成",
+            detail + "\n\n现在切换到新工程吗？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if answer == QMessageBox.StandardButton.Yes:
+            self.main.chat_page.open_project_path(result["root"])
+            self.main.go_to(self.main.chat_page)
+        self.refresh()
 
     def _delete(self) -> None:
         item = self._selected()

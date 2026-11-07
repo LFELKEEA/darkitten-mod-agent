@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import json
-import threading
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, Qt, QTimer, Signal
@@ -22,9 +20,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .. import mcdev
 from .. import project as project_mod
 from .. import sessions
+from .. import spec as spec_mod
+from .. import workflow as workflow_mod
 from ..agent import (
     AgentWorker,
     PendingFile,
@@ -33,13 +32,11 @@ from ..agent import (
 )
 from ..prompt import initial_project_request, requirement_form_text
 from .widgets import ChatView, NewProjectDialog, TextPreviewDialog, card, tiny
-from .workbench_panel import ArtifactPanel, RunPanel
+from .workbench_panel import ArtifactPanel, SpecPanel
 
 
 class ChatPage(QWidget):
     status = Signal(str)
-    run_log = Signal(str)
-    run_busy = Signal(bool, str)
 
     def __init__(self, main, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -48,17 +45,12 @@ class ChatPage(QWidget):
         self.history: list[dict[str, str]] = []
         self._worker: AgentWorker | None = None
         self._pending: list[PendingFile] = []
-        self.artifact_jars: list[dict] = []
-        self.artifact_summary = ""
-        self._launch_thread: threading.Thread | None = None
+        self.spec = None
+        self.workflow = workflow_mod.WorkflowState()
+        self.artifact_inventory: dict = {}
+        self.artifact_manual = ""
         self._build()
-        self.run_log.connect(self._append_run_log)
-        self.run_busy.connect(self._on_run_busy)
         self._restore_project()
-        self._run_timer = QTimer(self)
-        self._run_timer.setInterval(3000)
-        self._run_timer.timeout.connect(self._refresh_run_status)
-        self._run_timer.start()
         self.main.update_checked.connect(self._on_update_checked)
 
     # ------------------------------------------------------------------
@@ -112,11 +104,10 @@ class ChatPage(QWidget):
         side_layout.setSpacing(6)
 
         self.side_tabs = QTabWidget()
-        self.run_panel = RunPanel()
-        self.run_panel.prepare_requested.connect(self._start_mcdev)
-        self.run_panel.stop_requested.connect(self._stop_mcdev)
-        self.run_panel.refresh_requested.connect(self._refresh_run_status)
-        self.side_tabs.addTab(self.run_panel, "运行")
+        self.spec_panel = SpecPanel()
+        self.spec_panel.confirm_requested.connect(self._confirm_spec)
+        self.spec_panel.replan_requested.connect(self._replan)
+        self.side_tabs.addTab(self.spec_panel, "规格")
 
         files_tab = QWidget()
         files_layout = QVBoxLayout(files_tab)
@@ -292,103 +283,76 @@ class ChatPage(QWidget):
         self._set_pending(self._pending)
 
     # ------------------------------------------------------------------
-    def _load_artifacts(self) -> None:
-        """从 build/libs 恢复产物列表。"""
-        self.artifact_jars = []
-        self.artifact_summary = ""
-        if self.project is not None:
-            libs = self.project.root / "build" / "libs"
-            if libs.is_dir():
-                try:
-                    files = sorted(item for item in libs.glob("*.jar") if item.is_file())
-                except OSError:
-                    files = []
-                for item in files:
-                    try:
-                        size = item.stat().st_size
-                    except OSError:
-                        size = 0
-                    self.artifact_jars.append(
-                        {"name": item.name, "size": size, "path": str(item)}
-                    )
-            if self.artifact_jars:
-                self.artifact_summary = f"build/libs 里 {len(self.artifact_jars)} 个 JAR"
+    def _load_workflow(self) -> None:
+        """从工程里恢复规格、施工阶段和成品清单。"""
+        if self.project is None:
+            self.spec = None
+            self.workflow = workflow_mod.WorkflowState()
+            self.artifact_inventory = {}
+            self.artifact_manual = ""
+            self._refresh_workbench()
+            return
+        root = self.project.root
+        self.spec = spec_mod.load_spec(root)
+        self.workflow = workflow_mod.load_state(root, self.spec)
+        manual_path = root / workflow_mod.MANUAL_FILE
+        if manual_path.is_file():
+            try:
+                self.artifact_manual = manual_path.read_text(
+                    encoding="utf-8", errors="replace"
+                )
+            except OSError:
+                self.artifact_manual = ""
+        if self.workflow.jar:
+            try:
+                inventory = workflow_mod.inspect_artifacts(root)
+                self.artifact_inventory = inventory.to_dict()
+            except Exception:
+                self.artifact_inventory = {}
+        self._refresh_workbench()
+
+    def _refresh_workbench(self) -> None:
+        self.spec_panel.update_view(self.spec, self.workflow)
         self.artifact_panel.update_view(
-            self.artifact_jars,
-            self.artifact_summary,
-            self.artifact_jars[0]["path"] if self.artifact_jars else "",
+            self.artifact_inventory,
+            self.artifact_manual,
+            self.workflow.jar if self.workflow is not None else "",
         )
 
-    def _refresh_run_status(self) -> None:
-        try:
-            payload = mcdev.shared().launch_status()
-        except Exception:
-            payload = {"processes": []}
-        self.run_panel.update_status(payload)
+    def reload_workflow(self) -> None:
+        """供编译页在手动构建完成后刷新规格与成品页。"""
+        self._load_workflow()
 
-    def _append_run_log(self, text: str) -> None:
-        self.run_panel.append_log(text)
+    def _on_spec_changed(self, spec) -> None:
+        if spec is not None:
+            self.spec = spec
+        self._refresh_workbench()
+        if spec is not None and not getattr(spec, "confirmed", lambda: False)():
+            self.side_tabs.setCurrentIndex(0)
 
-    def _on_run_busy(self, busy: bool, text: str) -> None:
-        self.run_panel.set_busy(busy, text)
-        self._refresh_run_status()
-
-    def _start_mcdev(self, kind: str) -> None:
-        if self.project is None:
-            QMessageBox.information(self, "还没有工程", "请先新建或打开一个工程。")
-            return
-        if self._launch_thread is not None and self._launch_thread.is_alive():
-            self.main.status("开发端还在启动中，先等它就绪。")
-            return
-        service = mcdev.shared()
-        service.set_log(lambda text: self.run_log.emit(str(text)))
-        root = self.project.root
-        self.run_busy.emit(True, f"正在启动 {kind}…")
-        self.main.status(f"正在启动开发端（{kind}），首次运行需要编译并安装探针…")
-
-        def work() -> None:
-            try:
-                result = service.prepare(root, kind)
-                self.run_log.emit(
-                    json.dumps(result, ensure_ascii=False, indent=2)[:6000]
-                )
-                self.main.status("开发端已就绪")
-            except Exception as exc:  # noqa: BLE001 - 启动失败要显示原因
-                self.run_log.emit(f"启动失败：{exc}")
-                self.main.status(f"开发端启动失败：{exc}")
-            finally:
-                self.run_busy.emit(False, "")
-
-        self._launch_thread = threading.Thread(target=work, daemon=True)
-        self._launch_thread.start()
-
-    def _stop_mcdev(self, side: str) -> None:
-        service = mcdev.shared()
-        service.set_log(lambda text: self.run_log.emit(str(text)))
-
-        def work() -> None:
-            try:
-                result = service.stop(side)
-                self.run_log.emit(json.dumps(result, ensure_ascii=False, indent=2))
-                self.main.status("开发端已停止")
-            except Exception as exc:  # noqa: BLE001 - 停止失败要显示原因
-                self.run_log.emit(f"停止失败：{exc}")
-            finally:
-                self.run_busy.emit(False, "")
-
-        self.run_busy.emit(True, "正在停止…")
-        threading.Thread(target=work, daemon=True).start()
+    def _on_workflow_changed(self, state) -> None:
+        if state is not None:
+            self.workflow = state
+        self._refresh_workbench()
+        if state is not None and getattr(state, "stage", "") == "review":
+            self.side_tabs.setCurrentIndex(0)
 
     def _on_artifact_changed(self, payload) -> None:
         if isinstance(payload, dict):
-            jars = payload.get("jars")
-            if isinstance(jars, list):
-                self.artifact_jars = [item for item in jars if isinstance(item, dict)]
-            summary = str(payload.get("summary") or "")
-            self.artifact_summary = summary
-            jar = str(payload.get("jar") or "")
-            self.artifact_panel.update_view(self.artifact_jars, summary, jar)
-        if self.artifact_jars:
+            inventory = payload.get("inventory")
+            if isinstance(inventory, dict):
+                self.artifact_inventory = inventory
+            manual_path = payload.get("manual") or ""
+            if self.project is not None and manual_path:
+                path = self.project.root / manual_path
+                try:
+                    self.artifact_manual = path.read_text(
+                        encoding="utf-8", errors="replace"
+                    )
+                except OSError:
+                    pass
+        self._refresh_workbench()
+        if self.artifact_manual:
             self.side_tabs.setCurrentIndex(2)
 
     def _open_artifact_folder(self) -> None:
@@ -398,6 +362,55 @@ class ChatPage(QWidget):
         if not target.is_dir():
             target = self.project.root
         self.main.open_folder(target)
+
+    def _confirm_spec(self) -> None:
+        if self.project is None or self.spec is None:
+            return
+        if self._worker is not None:
+            self.main.status("上一轮还在运行，先等它完成或点停止。")
+            return
+        if self.spec.confirmed():
+            self.main.status("规格已经确认过了。")
+            return
+        try:
+            self.spec, self.workflow = workflow_mod.confirm(
+                self.project.root, self.spec
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, "确认失败", str(exc))
+            return
+        self._refresh_workbench()
+        self.main.status("规格已确认，开始施工")
+        self.ask(
+            "规格已确认，开始施工。请严格按任务清单执行：先搭工程骨架和注册内容，"
+            "再实现玩法、生成纹理与模型、补配方和语言文件，最后调用 build_project。"
+            "每完成一项调用 complete_task；编译失败按失败分析修，不要重新规划。"
+        )
+
+    def _replan(self) -> None:
+        self.side_tabs.setCurrentIndex(0)
+        self.input.setFocus()
+        self.main.status("在输入框补充或修改要求，发送后会更新规格。")
+
+    # ------------------------------------------------------------------
+    def _stage_for_message(self) -> str:
+        if self.spec is None:
+            if self.project is not None and (
+                (self.project.root / "build.gradle").is_file()
+                or (self.project.root / "build.gradle.kts").is_file()
+                or any(
+                    (self.project.root / "src").rglob("*.java")
+                    if (self.project.root / "src").is_dir()
+                    else []
+                )
+            ):
+                return "done"
+            return "planning"
+        if not self.spec.confirmed():
+            return "planning"
+        if self.workflow.stage == "done":
+            return "done"
+        return "building"
 
     # ------------------------------------------------------------------
     def _restore_project(self) -> None:
@@ -423,11 +436,10 @@ class ChatPage(QWidget):
             "assistant",
             "我是恶魔小猫工坊，只写 Minecraft Java 模组。\n\n"
             "开始前请先新建一个工程，确认 **MC 版本、加载器、Mod ID** 三项信息。"
-            "之后我会直接改工程、跑编译，再启动真实的 Forge 开发端验证游戏内行为。\n\n"
-            "判断做没做完以编译产物、探针状态和场景断言为准，不靠口头保证。",
+            "之后我会先把需求拆成规格；确认规格后才会写代码，最后读取真实 JAR 生成成品说明。",
         )
         self._set_pending([])
-        self._load_artifacts()
+        self._load_workflow()
 
     def _set_project(self, project, quiet: bool = False) -> None:
         self.project = project
@@ -468,7 +480,7 @@ class ChatPage(QWidget):
                 f"工程已就绪：**{meta.name or meta.mod_id}**\n\n"
                 f"- 加载器：{meta.loader}\n- MC 版本：{meta.mc_version}\n"
                 f"- Mod ID：`{meta.mod_id}`\n\n"
-                "把需求写清楚，我会直接落地代码，并用真实开发端验证。"
+                "把需求写清楚，我会先给你目录树和完整文件。"
                 + (
                     "当前是自动写入模式，文件会直接落盘，并在右侧列表留下记录。"
                     if self.main.config.auto_apply
@@ -476,7 +488,7 @@ class ChatPage(QWidget):
                 ),
             )
         self._set_pending([])
-        self._load_artifacts()
+        self._load_workflow()
         self.main.project_changed.emit(project)
 
     def new_project(self) -> None:
@@ -501,14 +513,14 @@ class ChatPage(QWidget):
         QTimer.singleShot(0, lambda: self.ask(initial_project_request(dialog.project)))
 
     def open_project_path(self, path: str) -> None:
-        """助手生成新工程后自动切换过去。"""
+        """Agent 生成移植工程后自动切换过去。"""
         try:
             project = project_mod.load_project(Path(path))
         except Exception as exc:
-            self.main.status(f"自动打开新工程失败：{exc}")
+            self.main.status(f"自动打开移植工程失败：{exc}")
             return
         self._set_project(project)
-        self.main.status(f"已切换到新工程：{project.root}")
+        self.main.status(f"已切换到移植工程：{project.root}")
 
     def open_project(self) -> None:
         folder = QFileDialog.getExistingDirectory(
@@ -668,6 +680,7 @@ class ChatPage(QWidget):
         self._set_pending([])
         self._set_running(True)
 
+        stage = self._stage_for_message()
         worker = AgentWorker(
             user_text=text,
             history=self.history[:-1],
@@ -677,11 +690,14 @@ class ChatPage(QWidget):
             memory=self.main.memory,
             connector_store=self.main.connector_store,
             knowledge=self.main.knowledge,
+            stage=stage,
         )
         self._worker = worker
         worker.status.connect(self.main.status)
         worker.assistant.connect(self._on_assistant)
         worker.pending_changed.connect(self._set_pending)
+        worker.spec_changed.connect(self._on_spec_changed)
+        worker.workflow_changed.connect(self._on_workflow_changed)
         worker.artifact_changed.connect(self._on_artifact_changed)
         worker.project_created.connect(self.open_project_path)
         worker.done.connect(self._on_done)
@@ -699,7 +715,7 @@ class ChatPage(QWidget):
         self.continue_btn.setEnabled(not running)
         self.auto_apply_box.setEnabled(not running)
         self.auto_build_box.setEnabled(not running and bool(self.main.config.auto_apply))
-        self.run_panel.setEnabled(not running)
+        self.spec_panel.setEnabled(not running)
         self.send_btn.setText("生成中…" if running else "发送")
 
     def _on_assistant(self, text: str) -> None:
@@ -716,7 +732,7 @@ class ChatPage(QWidget):
             if self.project is not None:
                 sessions.save_history(self.project.root, self.history)
         if self.project is not None:
-            self._load_artifacts()
+            self._load_workflow()
         self.main.status("本轮完成")
 
     def _on_failed(self, message: str) -> None:
@@ -725,8 +741,6 @@ class ChatPage(QWidget):
 
     def _on_finished(self) -> None:
         self._worker = None
-        # Agent 线程结束后把日志回调还给界面，避免后续启动/停止写到已销毁的对象上。
-        mcdev.shared().set_log(lambda text: self.run_log.emit(str(text)))
         self._set_running(False)
 
     def _stop(self) -> None:

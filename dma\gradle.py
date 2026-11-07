@@ -15,8 +15,6 @@ GRADLE_TASKS = {
     "runServer": "开发服务端",
     "runData": "数据生成",
     "runDatagen": "数据生成",
-    "runGameTestServer": "GameTest",
-    "runGametest": "GameTest",
 }
 
 # NeoForge 的 ModDevGradle 把数据生成运行命名为 data（任务 runData），

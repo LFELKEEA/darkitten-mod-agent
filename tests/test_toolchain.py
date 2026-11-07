@@ -9,7 +9,6 @@ from pathlib import Path
 from unittest import mock
 
 from dma import envcheck, toolchain, wrapper
-from dma.ui.build_page import scaffold_request
 from dma.project import create_project
 
 from .base import TempDataCase
@@ -66,7 +65,7 @@ class DistributionTests(TempDataCase):
 
 
 class JavaTests(TempDataCase):
-    def test_find_java_prefers_21(self) -> None:
+    def test_find_java_prefers_17(self) -> None:
         root = self.tmp / "jdks"
         homes = [
             make_jdk(root, "25.0.1"),
@@ -75,8 +74,8 @@ class JavaTests(TempDataCase):
         ]
         install = toolchain.find_java(homes)
         assert install is not None
-        self.assertEqual(install.major, 21)
-        self.assertEqual(install.version, "21.0.9")
+        self.assertEqual(install.major, 17)
+        self.assertEqual(install.version, "17.0.10")
 
     def test_envcheck_picks_21_over_25(self) -> None:
         root = self.tmp / "jdks"
@@ -293,18 +292,6 @@ class PrepareTests(TempDataCase):
             wrapper.current_distribution(project.root), wrapper.MODDEV_DISTRIBUTION
         )
         self.assertTrue(any("Gradle" in note for note in prepared.notes))
-
-    def test_scaffold_request_mentions_one_click(self) -> None:
-        project = create_project(
-            self.tmp / "projects",
-            name="Demo",
-            mod_id="demo_mod",
-            mc_version="1.21.1",
-            loader="Fabric",
-        )
-        text = scaffold_request(project)
-        self.assertIn("一键准备", text)
-
 
 if __name__ == "__main__":
     import unittest

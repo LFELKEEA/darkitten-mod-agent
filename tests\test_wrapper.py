@@ -5,6 +5,7 @@ from pathlib import Path
 
 from dma import wrapper
 from dma.project import create_project
+from dma.ui.build_page import scaffold_request
 
 from .base import TempDataCase
 
@@ -116,6 +117,32 @@ class WrapperTests(TempDataCase):
         self.assertTrue(wrapper.properties_valid(project.root))
         text = (folder / "gradle-wrapper.properties").read_text(encoding="utf-8")
         self.assertIn("distributionBase=", text)
+
+
+class ScaffoldRequestTests(TempDataCase):
+    def project(self, loader: str):
+        return create_project(
+            self.tmp / "projects",
+            name="Demo",
+            mod_id="demo_mod",
+            mc_version="1.21.1",
+            loader=loader,
+        )
+
+    def test_fabric_request(self) -> None:
+        text = scaffold_request(self.project("Fabric"))
+        self.assertIn("1.21.1", text)
+        self.assertIn("demo_mod", text)
+        self.assertIn("fabric-loom", text)
+        self.assertIn("settings.gradle", text)
+        self.assertIn("build.gradle", text)
+        self.assertIn("不要猜", text)
+        self.assertIn(wrapper.DEFAULT_DISTRIBUTION, text)
+
+    def test_neoforge_request(self) -> None:
+        text = scaffold_request(self.project("NeoForge"))
+        self.assertIn("NeoGradle", text)
+        self.assertIn("NeoForge", text)
 
 
 if __name__ == "__main__":

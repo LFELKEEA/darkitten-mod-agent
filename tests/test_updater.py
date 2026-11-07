@@ -1,13 +1,52 @@
 from __future__ import annotations
 
+import hashlib
+import http.server
 import json
+import threading
 import unittest
 import zipfile
 from pathlib import Path
 
-from dma import updater
+from dma import toolchain, updater
 
 from .base import TempDataCase
+
+
+class _RangeHandler(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, *args) -> None:  # noqa: D102
+        pass
+
+    def do_GET(self) -> None:  # noqa: N802
+        data = self.server.payload  # type: ignore[attr-defined]
+        start = 0
+        end = len(data) - 1
+        raw = self.headers.get("Range") or ""
+        if raw.startswith("bytes="):
+            first, _, last = raw[6:].partition("-")
+            start = int(first)
+            if last:
+                end = min(int(last), len(data) - 1)
+            self.send_response(206)
+            self.send_header("Content-Range", f"bytes {start}-{end}/{len(data)}")
+        else:
+            self.send_response(200)
+        body = data[start : end + 1]
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        try:
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
+
+class _RangeServer(http.server.ThreadingHTTPServer):
+    daemon_threads = True
+
+    def handle_error(self, request, client_address) -> None:
+        return
 
 
 def build_zip(path: Path, *, wrapper: str = "", traversal: bool = False) -> Path:
@@ -106,6 +145,52 @@ class UpdaterTests(TempDataCase):
         info = updater.UpdateInfo(version="1.0.0", download_url="https://example.com/a.zip")
         with self.assertRaises(updater.UpdateError):
             updater.download_update(info)
+
+    def test_download_reports_progress_and_verifies(self) -> None:
+        data = b"z" * (toolchain.RANGE_MIN_SIZE + 2048)
+        server = _RangeServer(("127.0.0.1", 0), _RangeHandler)
+        server.payload = data
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            url = f"http://127.0.0.1:{server.server_port}/agent.zip"
+            info = updater.UpdateInfo(
+                version="9.9.9",
+                download_url=url,
+                sha256=hashlib.sha256(data).hexdigest(),
+                size=len(data),
+            )
+            seen: list[int] = []
+            path = updater.download_update(
+                info, progress_cb=lambda percent, _text: seen.append(percent)
+            )
+            self.assertEqual(path.read_bytes(), data)
+            self.assertEqual(max(seen), 100)
+            self.assertTrue(any(0 < value < 100 for value in seen))
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_download_cancel(self) -> None:
+        server = _RangeServer(("127.0.0.1", 0), _RangeHandler)
+        server.payload = b"y" * (toolchain.RANGE_MIN_SIZE + 1024)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            url = f"http://127.0.0.1:{server.server_port}/agent.zip"
+            info = updater.UpdateInfo(
+                version="9.9.9",
+                download_url=url,
+                sha256=hashlib.sha256(server.payload).hexdigest(),
+                size=len(server.payload),
+            )
+            cancel = threading.Event()
+            cancel.set()
+            with self.assertRaises(updater.UpdateError):
+                updater.download_update(info, cancel_event=cancel)
+        finally:
+            server.shutdown()
+            server.server_close()
 
 
 if __name__ == "__main__":

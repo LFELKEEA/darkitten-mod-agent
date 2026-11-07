@@ -32,11 +32,11 @@ class UiSmokeTests(TempDataCase):
         self.assertIsNotNone(window.tutorial_page)
         self.assertIsNotNone(window.build_page)
         self.assertIsNotNone(window.environment_page)
-        self.assertFalse(window.build_page.build_btn.isEnabled())
-        self.assertFalse(window.build_page.gametest_btn.isEnabled())
-        self.assertFalse(window.build_page.libs_btn.isEnabled())
-        self.assertIsNotNone(window.build_page.run_panel)
-        self.assertIsNotNone(window.build_page.artifact_panel.view)
+        self.assertFalse(window.build_page.stop_btn.isEnabled())
+        self.assertFalse(window.build_page.assist_btn.isEnabled())
+        self.assertFalse(window.build_page.wrapper_btn.isEnabled())
+        self.assertFalse(window.build_page.prepare_btn.isEnabled())
+        self.assertFalse(window.build_page.cert_box.isChecked())
         self.assertIsNotNone(window.environment_page.prepare_btn)
         self.assertIsNotNone(window.chat_page.delete_btn)
         self.assertFalse(window.chat_page.delete_btn.isEnabled())
@@ -44,8 +44,8 @@ class UiSmokeTests(TempDataCase):
         self.assertIsNotNone(window.chat_page.auto_build_box)
         self.assertIsNotNone(window.chat_page.continue_btn)
         self.assertEqual(window.chat_page.side_tabs.count(), 3)
-        self.assertIsNotNone(window.chat_page.run_panel)
-        self.assertTrue(window.chat_page.run_panel.server_btn.isEnabled())
+        self.assertFalse(window.chat_page.spec_panel.confirm_btn.isVisible())
+        self.assertEqual(window.chat_page.spec_panel.score_label.text(), "需求 0/10")
         self.assertIsNotNone(window.chat_page.artifact_panel.view)
         window.go_to(window.tutorial_page)
         self.assertIs(window.stack.currentWidget(), window.tutorial_page)
@@ -157,8 +157,8 @@ class UiSmokeTests(TempDataCase):
             self.tmp,
             name="编译按钮测试",
             mod_id="buildbtn",
-            mc_version="1.20.1",
-            loader="Forge",
+            mc_version="1.21.1",
+            loader="NeoForge",
         )
         theme.apply_theme(self.app, 13)
         window = MainWindow()
@@ -167,13 +167,9 @@ class UiSmokeTests(TempDataCase):
         window.chat_page._set_project(project, quiet=True)
         self.app.processEvents()
         self.assertIs(window.build_page.main.active_project, project)
-        for button in (
-            window.build_page.build_btn,
-            window.build_page.gametest_btn,
-            window.build_page.libs_btn,
-        ):
+        for button in window.build_page._buttons:
             self.assertTrue(button.isEnabled(), button.text())
-        self.assertTrue(window.build_page.run_panel.server_btn.isEnabled())
+        self.assertTrue(window.build_page.prepare_btn.isEnabled())
         window.close()
         window.memory.close()
         self.app.processEvents()

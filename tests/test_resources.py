@@ -49,6 +49,23 @@ class SkillTests(TempDataCase):
         self.assertIn("neoforge-scaffold", ids)
         catalog = store.catalog_text()
         self.assertIn("fabric-scaffold", catalog)
+        for skill_id in ("asset-3d-modeling", "visual-design", "code-engineering"):
+            self.assertIn(skill_id, ids)
+
+    def test_skill_selection_follows_query(self) -> None:
+        store = SkillStore()
+        selected = store.select_for("帮我画一个 16x16 的纹理图标", limit=6)
+        self.assertIn("visual-design", selected)
+        selected = store.select_for("这个 3D 方块模型怎么建，UV 怎么排", limit=6)
+        self.assertIn("asset-3d-modeling", selected)
+        selected = store.select_for("重构代码并做性能优化", limit=6)
+        self.assertIn("code-engineering", selected)
+
+    def test_disabled_skill_not_selected(self) -> None:
+        store = SkillStore()
+        store.set_enabled("visual-design", False)
+        selected = store.select_for("画一个纹理图标", limit=6)
+        self.assertNotIn("visual-design", selected)
 
     def test_custom_save_disable_delete(self) -> None:
         store = SkillStore()

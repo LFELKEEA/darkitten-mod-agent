@@ -83,12 +83,12 @@ class Shot(QWidget):
 
     def _draw_project(self, p: QPainter, r: QRectF) -> None:
         self._row(p, r.top(), "Mod ID", "stardust_tools")
-        self._row(p, r.top() + 26, "MC 版本", "1.20.1")
-        self._row(p, r.top() + 52, "加载器", "Fabric / Forge / NeoForge")
+        self._row(p, r.top() + 26, "MC 版本", "1.21.1")
+        self._row(p, r.top() + 52, "加载器", "NeoForge")
         p.setPen(QColor(C["ok"]))
         p.setBrush(QColor(C["ok"]))
         p.drawEllipse(QRectF(r.left() + 2, r.top() + 82, 8, 8))
-        self._text(p, QRectF(r.left() + 16, r.top() + 77, 220, 18), "1.20.1 直接生成可编译骨架", "ok", 8)
+        self._text(p, QRectF(r.left() + 16, r.top() + 77, 220, 18), "创建后立即拆解规格", "ok", 8)
         self._box(p, QRectF(r.right() - 100, r.bottom() - 22, 100, 22), "accent", None)
         self._text(p, QRectF(r.right() - 92, r.bottom() - 22, 88, 22), "创建并开始", "#fff", 8, True)
 
@@ -98,9 +98,9 @@ class Shot(QWidget):
                    "做一个会发光的矿石，挖掉回血", "text", 8)
         self._box(p, QRectF(r.right() - 205, r.top() + 42, 205, 44), "accent_soft")
         self._text(p, QRectF(r.right() - 197, r.top() + 44, 190, 18),
-                   "正在写模组代码", "text", 8, True)
+                   "规格已生成，等待确认", "text", 8, True)
         self._text(p, QRectF(r.right() - 197, r.top() + 62, 190, 18),
-                   "写完直接启动游戏验证", "ok", 8)
+                   "确认后才开始写代码", "ok", 8)
         self._box(p, QRectF(r.left(), r.bottom() - 26, 52, 22), "accent", None)
         self._text(p, QRectF(r.left() + 8, r.bottom() - 26, 44, 22), "发送", "#fff", 8, True)
         self._text(p, QRectF(r.left() + 62, r.bottom() - 26, 120, 22), "Ctrl+Enter", "muted", 7)
@@ -127,8 +127,8 @@ class Shot(QWidget):
         lines = [
             ("> Task :compileJava", "muted"),
             ("BUILD SUCCESSFUL in 1m 12s", "ok"),
-            ("> runServer  → 探针 127.0.0.1:39001", "accent"),
-            ("> runClient  → 已进入世界 / 已连接", "accent"),
+            ("6 actionable tasks: 6 executed", "muted"),
+            ("> build/libs/stardust_tools-1.0.0.jar", "accent"),
         ]
         for i, (line, color) in enumerate(lines):
             self._text(p, QRectF(r.left() + 10, r.top() + 8 + i * 22, r.width() - 20, 20),
@@ -136,16 +136,16 @@ class Shot(QWidget):
 
     def _draw_fix(self, p: QPainter, r: QRectF) -> None:
         self._box(p, QRectF(r.left(), r.top() + 12, 142, 78), "card_soft")
-        self._text(p, QRectF(r.left() + 8, r.top() + 18, 128, 18), "assert:", "danger", 8, True)
-        self._text(p, QRectF(r.left() + 8, r.top() + 38, 128, 18), "items 里没有星尘", "danger", 7)
-        self._text(p, QRectF(r.left() + 8, r.top() + 56, 128, 18), "步骤 6 / 场景卡", "muted", 7)
+        self._text(p, QRectF(r.left() + 8, r.top() + 18, 128, 18), "error:", "danger", 8, True)
+        self._text(p, QRectF(r.left() + 8, r.top() + 38, 128, 18), "cannot find symbol", "danger", 7)
+        self._text(p, QRectF(r.left() + 8, r.top() + 56, 128, 18), "L42 ModItems.java", "muted", 7)
         self._text(p, QRectF(r.left() + 148, r.top() + 34, 26, 30), "→", "accent", 15, True)
         self._box(p, QRectF(r.right() - 142, r.top() + 12, 142, 78), "card_soft")
-        self._text(p, QRectF(r.right() - 134, r.top() + 18, 126, 18), "定位并改代码", "ok", 8, True)
-        self._text(p, QRectF(r.right() - 134, r.top() + 40, 126, 18), "重跑场景", "muted", 7)
-        self._text(p, QRectF(r.right() - 134, r.top() + 58, 126, 18), "全部通过", "ok", 7)
+        self._text(p, QRectF(r.right() - 134, r.top() + 18, 126, 18), "BUILD SUCCESSFUL", "ok", 8, True)
+        self._text(p, QRectF(r.right() - 134, r.top() + 40, 126, 18), "自动修 1 轮", "muted", 7)
+        self._text(p, QRectF(r.right() - 134, r.top() + 58, 126, 18), "已出包", "ok", 7)
         self._text(p, QRectF(r.left(), r.bottom() - 16, r.width(), 16),
-                   "断言失败会带出真实背包、界面和日志，不需要手贴", "muted", 7)
+                   "失败日志会直接回传给助手，不需要手贴", "muted", 7)
 
     def _draw_output(self, p: QPainter, r: QRectF) -> None:
         self._box(p, QRectF(r.left(), r.top() + 10, 158, 100), "card_soft")
@@ -155,7 +155,7 @@ class Shot(QWidget):
                    "stardust_tools-1.0.0.jar", "text", 7, True)
         self._text(p, QRectF(r.left() + 10, r.top() + 74, 138, 18), "复制到 .minecraft/mods", "muted", 7)
         self._text(p, QRectF(r.left() + 174, r.top() + 18, 140, 18), "安装步骤", "text", 8, True)
-        steps = ["1. 关闭游戏", "2. 关闭工坊开发端", "3. 按工程加载器启动", "4. 放入 mods 并启动"]
+        steps = ["1. 关闭游戏", "2. 放入 mods 文件夹", "3. 依赖 jar 一起放", "4. 启动并检查日志"]
         for i, line in enumerate(steps):
             self._text(p, QRectF(r.left() + 174, r.top() + 40 + i * 18, 140, 18), line, "muted", 7)
 
@@ -171,62 +171,62 @@ STEPS = [
     },
     {
         "kind": "project",
-        "title": "新建工程，直接拿到骨架",
-        "text": "点右上角「新建工程」，选加载器（Fabric / Forge / NeoForge / Architectury）、MC 版本和运行端。"
-                "1.20.1 的 Forge / Fabric / NeoForge 会直接生成可编译骨架；其他版本由助手核对官方模板后生成。",
-        "tip": "Mod ID 只能是小写字母、数字、下划线，必须以字母开头。",
+        "title": "新建工程，一键开始",
+        "text": "点右上角「新建工程」，填 Mod ID、MC 版本、加载器和运行端。"
+                "勾选「创建后立即让 AI 拆解完整规格」，创建后助手会先规划玩法、数值、美术和验收标准，生成规格说明书，确认后才写代码。",
+        "tip": "三项基础信息缺一不可；Mod ID 只能是小写字母、数字、下划线。",
         "action": ("现在新建", "new"),
     },
     {
         "kind": "chat",
         "title": "用一句话描述需求",
-        "text": "在输入框写清要什么：物品、方块、机器、生物、事件都行，按 Ctrl+Enter 发送。"
-                "助手会直接读工程、改代码、补资源，不再先做一页规格让你确认。",
-        "tip": "不确定写法时，让它先去知识库或真实代码检索里查对应加载器和版本的 API。",
+        "text": "在输入框写清要什么，例如物品、方块、机器、生物，或者直接贴报错日志，按 Ctrl+Enter 发送。"
+                "助手会先把需求拆成完整规格，右侧「规格」页会显示 10 项需求清单和说明书。",
+        "tip": "检查注册内容、获取方式和数值；不满意就直接说，它会更新规格，不会提前写代码。",
         "action": ("去对话", "chat"),
     },
     {
         "kind": "pending",
-        "title": "文件落盘",
-        "text": "开启「自动写入」时，生成的文件直接写进工程，覆盖前自动备份；关闭时先进入右侧待写入列表，"
-                "确认后再落盘。无论哪种方式，助手都会优先用精确替换，避免整份重写。",
-        "tip": "写完可以随时让它编译，失败日志会带回对话里继续修。",
+        "title": "确认规格，开始施工",
+        "text": "规格没问题就点「确认规格并开始施工」。助手会按骨架、注册、玩法、纹理、配方、语言、编译、验收的顺序逐项完成，"
+                "右侧任务进度会实时前进；开启「自动写入」时文件直接落盘，关闭时先进入待写入列表。",
+        "tip": "覆盖前都会自动备份；确认后也可以随时让助手更新规格。",
         "action": ("打开工程目录", "folder"),
     },
     {
         "kind": "build",
-        "title": "启动真实开发端",
-        "text": "对话页的「运行」面板可以直接启动开发服务端 / 客户端 / 双端。工坊先编译再执行 Gradle 运行任务；"
-                "Forge 1.20.1 会额外安装游戏内探针，其他加载器直接看运行日志和 GameTest。",
-        "tip": "首次启动会下载加载器和 Minecraft 依赖，需要几分钟；探针日志在工程的 .mcdev 目录。",
-        "action": ("打开运行面板", "run"),
+        "title": "编译、运行与成品说明书",
+        "text": "打开「编译运行」页可以直接执行编译、开发客户端、开发服务端和数据生成。"
+                "编译通过后，右侧「成品」页会读取 build/libs 里的真实 JAR，列出注册内容、配方、模型纹理和安装步骤。",
+        "tip": "第一次运行会自动准备 JDK、Gradle Wrapper 和依赖，下载慢时会自动切换镜像。",
+        "action": ("打开编译运行", "build"),
     },
     {
         "kind": "fix",
-        "title": "在游戏里验证，而不是靠猜",
-        "text": "Forge 1.20.1 的探针能读真实背包、界面、方块状态和截图，也能执行指令和点击；用场景卡片把"
-                "「挖矿 → 掉落 → 合成」写成步骤和断言。其他加载器用 GameTest 和运行日志验证。失败时助手按真实数据改代码并重跑。",
-        "tip": "GameTest 适合纯逻辑；Forge 1.20.1 涉及界面和渲染的玩法用客户端探针截图确认。",
-        "action": ("查看运行日志", "run"),
+        "title": "失败自动修复",
+        "text": "自动编译失败时，宿主会把 Gradle 日志作为下一条消息交给助手，让它按文件和行号修代码，"
+                "修完再自动编译一次；仍然失败就停下来把完整日志给你，不会无限重试。",
+        "tip": "最多连续自动编译两次；需要继续时点「继续」。",
+        "action": ("查看编译日志", "build"),
     },
     {
         "kind": "output",
         "title": "拿到成品 jar",
-        "text": "编译成功后产物在工程的 build/libs 下。把模组 jar 放进 .minecraft/mods，"
-                "用对应加载器（Fabric / Forge / NeoForge）和匹配的 Minecraft 版本启动即可加载。",
-        "tip": "发布前先跑一遍场景卡片，确认注册、资源和客户端 / 服务端分离都没有问题。",
+        "text": "编译成功后产物在工程的 build/libs 下。把模组 jar 和它依赖的 jar 一起放进 .minecraft/mods，"
+                "启动对应加载器（Fabric / NeoForge）即可加载。",
+        "tip": "发布前建议先运行开发客户端，确认注册、资源和客户端/服务端分离都没有问题。",
         "action": ("打开产物目录", "libs"),
     },
 ]
 
 SAMPLES = [
     ("发光矿石", "做一个新的发光矿石「星尘矿」，生成在主世界 0~40 层，挖掉后掉落星尘，"
-                 "星尘可以合成一把自带微弱光照的剑。做完启动开发端挖一块验证掉落。"),
+                 "星尘可以合成一把自带微弱光照的剑。"),
     ("修复编译错误", "编译报错贴在这里：\n\n（粘贴 Gradle 报错日志）\n\n请定位根因并直接修复。"),
     ("新增机器", "新增一个消耗熔岩发电的方块机器，带 GUI、能量缓存和物品栏，"
                  "并给出合成配方和语言文件。"),
-    ("游戏内验证", "给「星尘剑」写一个场景卡片：服务端 give 一把星尘剑，客户端选中后截图，"
-                 "断言背包里物品名称正确。"),
+    ("纹理与 3D 模型", "给「星尘剑」画一个 16x16 的物品纹理，再做一个带护手和宝石的 3D 物品模型，"
+                    "写好模型 JSON、lang 和合成配方，最后编译出包。"),
 ]
 
 
@@ -339,12 +339,6 @@ class TutorialPage(QWidget):
             return
         if name == "build":
             self.main.go_to(self.main.build_page)
-            return
-        if name == "run":
-            self.main.go_to(self.main.chat_page)
-            page = self.main.chat_page
-            if hasattr(page, "side_tabs") and hasattr(page, "run_panel"):
-                page.side_tabs.setCurrentWidget(page.run_panel)
             return
         if name == "folder":
             project = self.main.chat_page.project

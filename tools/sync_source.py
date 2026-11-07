@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -20,19 +21,23 @@ files = [
     "tools/sync_source.py",
 ]
 files += sorted(
-    str(path.relative_to(ROOT))
+    path.relative_to(ROOT).as_posix()
     for path in (ROOT / "assets").rglob("*")
     if path.is_file()
 )
-files += sorted(str(path.relative_to(ROOT)) for path in (ROOT / "dma").rglob("*.py"))
 files += sorted(
-    str(path.relative_to(ROOT))
+    path.relative_to(ROOT).as_posix() for path in (ROOT / "dma").rglob("*.py")
+)
+files += sorted(
+    path.relative_to(ROOT).as_posix()
     for path in (ROOT / "dma" / "resources").rglob("*")
     if path.is_file()
     and not any(part in {"__pycache__", "build", ".gradle"} for part in path.parts)
     and path.suffix.lower() not in {".pyc", ".pyo", ".log"}
 )
-files += sorted(str(path.relative_to(ROOT)) for path in (ROOT / "tests").rglob("*.py"))
+files += sorted(
+    path.relative_to(ROOT).as_posix() for path in (ROOT / "tests").rglob("*.py")
+)
 files = list(dict.fromkeys(files))
 
 EXECUTABLE = {"assets/wrapper/gradlew", "dma/resources/forge-1.20.1/gradlew", "dma/resources/fabric-1.20.1/gradlew", "dma/resources/neoforge-1.20.1/gradlew", "dma/resources/mcdev-probe/gradlew"}
@@ -54,7 +59,12 @@ def api(method: str, endpoint: str, payload: dict | None = None) -> dict:
 ref = api("GET", f"repos/{REPO}/git/ref/heads/{BRANCH}")
 head = ref["object"]["sha"]
 commit = api("GET", f"repos/{REPO}/git/commits/{head}")
-base_tree = commit["tree"]["sha"]
+base_override = os.environ.get("DMA_SYNC_BASE_TREE", "").strip()
+if base_override:
+    base_commit = api("GET", f"repos/{REPO}/git/commits/{base_override}")
+    base_tree = base_commit["tree"]["sha"]
+else:
+    base_tree = commit["tree"]["sha"]
 
 entries = []
 for rel in files:

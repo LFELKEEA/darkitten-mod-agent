@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
 )
 
 from .. import config as config_mod
-from .. import paths, shortcut, updater
+from .. import mcdev, paths, shortcut, updater
 from ..connectors import ConnectorStore
 from ..knowledge import KnowledgeStore
 from ..memory import MemoryStore
@@ -195,6 +195,10 @@ class MainWindow(QMainWindow):
 
     def _track_project(self, project) -> None:
         self.active_project = project
+        # BuildPage 在本信号链里更早连接；这里要再同步一次，
+        # 否则页面判断到的还是旧的 active_project，编译/运行按钮会一直是灰的。
+        if hasattr(self, "build_page"):
+            self.build_page.sync_project(project)
         if project is not None:
             self.config.project_root = str(project.root.parent)
             self.save_config()
@@ -272,6 +276,10 @@ class MainWindow(QMainWindow):
         self.save_config()
         try:
             self.build_page.shutdown()
+        except Exception:
+            pass
+        try:
+            mcdev.shared().shutdown()
         except Exception:
             pass
         try:

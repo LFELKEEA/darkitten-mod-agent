@@ -76,7 +76,7 @@ class ProjectMeta:
     name: str = ""
     mod_id: str = ""
     mc_version: str = ""
-    loader: str = "Fabric"
+    loader: str = "Forge"
     runtime: str = "双端"
     dependencies: str = ""
     task_type: str = "创建全新模组"
@@ -158,14 +158,15 @@ def create_project(
     dependencies: str = "",
     task_type: str = "创建全新模组",
     notes: str = "",
+    package: str = "",
 ) -> Project:
     mod_id = validate_mod_id(mod_id)
     mc_version = (mc_version or "").strip()
     loader = (loader or "").strip()
     if not mc_version:
         raise ProjectError("请填写 MC 版本。")
-    if loader not in {"Fabric", "NeoForge", "Architectury"}:
-        raise ProjectError("加载器只能是 Fabric、NeoForge 或 Architectury。")
+    if loader not in {"Forge", "Fabric", "NeoForge", "Architectury"}:
+        raise ProjectError("加载器只能是 Forge、Fabric、NeoForge 或 Architectury。")
     base = Path(root).expanduser().resolve()
     target = base / mod_id
     target.mkdir(parents=True, exist_ok=True)
@@ -183,13 +184,41 @@ def create_project(
     )
     project = Project(root=target, meta=meta)
     project.save()
+    scaffolded = False
+    scaffold_error = ""
+    try:
+        from .mcdev import templates as mcdev_templates
+
+        if mcdev_templates.supports_scaffold(loader, mc_version):
+            mcdev_templates.create_scaffold(
+                loader,
+                target,
+                mod_id=mod_id,
+                mod_name=meta.name,
+                package=package,
+                mc_version=mc_version,
+            )
+            scaffolded = True
+    except Exception as exc:  # noqa: BLE001 - 骨架失败也要让工程能打开
+        scaffold_error = str(exc)
     readme = target / "README.md"
     if not readme.exists():
+        note = (
+            "已生成可编译骨架。\n"
+            if scaffolded
+            else (
+                "内置骨架目前覆盖 Minecraft 1.20.1 的 Forge / Fabric / NeoForge。"
+                "当前版本或加载器没有内置骨架，助手会按目标版本核对官方模板后生成构建脚本。\n"
+            )
+        )
+        if scaffold_error:
+            note = f"骨架生成遇到问题：{scaffold_error}\n助手会改为手工生成构建脚本。\n"
         readme.write_text(
             f"# {meta.name}\n\n"
             f"- Minecraft: {mc_version}\n"
             f"- Loader: {loader}\n"
             f"- Mod ID: `{mod_id}`\n\n"
+            f"{note}\n"
             "由 Darkitten Mod Agent 创建。\n",
             encoding="utf-8",
         )
@@ -232,22 +261,27 @@ def _infer_meta(project: Project) -> None:
             meta.mc_version = str(depends.get("minecraft") or meta.mc_version)
         except (OSError, ValueError):
             pass
-    toml = root / "src/main/resources/META-INF/neoforge.mods.toml"
+    modern_toml = root / "src/main/resources/META-INF/neoforge.mods.toml"
     legacy_toml = root / "src/main/resources/META-INF/mods.toml"
-    for path in (toml, legacy_toml):
+    for path in (modern_toml, legacy_toml):
         if path.is_file():
-            meta.loader = "NeoForge"
             try:
                 text = path.read_text(encoding="utf-8-sig")
                 id_match = re.search(r'modId\s*=\s*"([^"]+)"', text)
                 name_match = re.search(r'displayName\s*=\s*"([^"]+)"', text)
                 version_match = re.search(r'versionRange\s*=\s*"\[?([0-9][^",\]]*)', text)
-                if id_match:
+                # 模板里的 ${mod_id} 是 Gradle 占位符，构建前读出来不是真实值。
+                if id_match and "${" not in id_match.group(1):
                     meta.mod_id = id_match.group(1)
-                if name_match:
+                if name_match and "${" not in name_match.group(1):
                     meta.name = name_match.group(1)
                 if version_match and not meta.mc_version:
                     meta.mc_version = version_match.group(1)
+                # mods.toml 同时被 Forge 和 NeoForge 使用，靠依赖里的命名空间区分。
+                if path == modern_toml or "net.neoforged" in text:
+                    meta.loader = "NeoForge"
+                else:
+                    meta.loader = "Forge"
             except OSError:
                 pass
             break
