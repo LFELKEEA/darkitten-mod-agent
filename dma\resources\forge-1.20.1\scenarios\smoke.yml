@@ -1,0 +1,10 @@
+name: smoke
+description: 最小冒烟场景：服务端能执行命令，并能读到刚放下的方块。
+setup:
+  commands:
+    - time set day
+actions:
+  - command: setblock 0 64 0 minecraft:stone
+  - wait: 500
+assert:
+  - block_state: {x: 0, y: 64, z: 0, block: "minecraft:stone"}

@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
 )
 
 from .. import config as config_mod
-from .. import paths, shortcut, updater
+from .. import mcdev, paths, shortcut, updater
 from ..connectors import ConnectorStore
 from ..knowledge import KnowledgeStore
 from ..memory import MemoryStore
@@ -276,6 +276,10 @@ class MainWindow(QMainWindow):
         self.save_config()
         try:
             self.build_page.shutdown()
+        except Exception:
+            pass
+        try:
+            mcdev.shared().shutdown()
         except Exception:
             pass
         try:

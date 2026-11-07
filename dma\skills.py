@@ -43,60 +43,104 @@ BUILTIN_SKILLS: list[dict] = [
     {
         "id": "fabric-scaffold",
         "name": "Fabric 工程搭建",
-        "description": "从零创建 Fabric 模组：fabric-loom、gradle 配置、入口类、注册、资源与开发环境启动。",
+        "description": "从零创建 Fabric 模组：fabric-loom、Yarn 映射、入口类、注册、资源与开发端运行。",
         "body": """# Fabric 工程搭建
 
 ## 先确认
 MC 版本、Mod ID、显示名、依赖、是否需要 Datagen、是否允许 Mixin。缺任何一项先问，不要猜。
 
 ## 版本要点
-- 1.20.1 及更早：Java 17，Yarn 映射，`fabric-loom` 0.10.x/1.0.x 皆可，注意 `FabricLoader` 与 `FabricAPI` 版本。
-- 1.20.5–1.21.1：Java 21，组件与数据包格式变化较大，注册仍走 `Registry`，但物品组件用 `DataComponentType`。
-- 1.21.2+：物品/方块注册与模型 JSON 有调整，先核对当前 Yarn 映射中的方法签名。
-- 永远使用选定 MC 版本对应的 Yarn 映射，不写 `class_1234` 这类混淆名。
+- 1.20.1：Java 17，Yarn 映射，fabric-loom 1.7.x 可用。
+- 1.20.5–1.21.1：Java 21，物品组件改用 `DataComponentType`。
+- 1.21.2+：注册与模型 JSON 有调整，先核对当前 Yarn 映射的方法签名。
+- 永远使用目标 MC 版本对应的 Yarn 映射，不写 `class_1234` 这类混淆名。
 
 ## 最小目录
 ```
 gradle.properties
 settings.gradle
 build.gradle
-src/main/java/<package>/<ModClass>.java
+src/main/java/<package>/ModMain.java
 src/main/resources/fabric.mod.json
 src/main/resources/assets/<modid>/lang/en_us.json
 src/main/resources/assets/<modid>/lang/zh_cn.json
 ```
 
 ## build.gradle 关键点
-- 插件：`fabric-loom` 版本必须与 Gradle 版本匹配。
+- 插件 `fabric-loom`，版本与 Gradle / MC 版本匹配。
 - `minecraft`、`yarn_mappings`、`loader_version`、`fabric_version` 从 `gradle.properties` 读取。
-- `JavaVersion.VERSION_17` 或 `VERSION_21` 必须与 MC 版本一致。
-- `processResources` 要把 `fabric.mod.json` 里的 `${version}` 等占位符展开。
-- 需要 Datagen 时加 `fabric-api` 的 datagen 依赖和 `fabricApi { configureDataGeneration() }`。
+- Java 版本必须与 MC 版本一致（1.20.1 用 17，1.20.5+ 用 21）。
+- `processResources` 展开 `fabric.mod.json` 里的 `${version}`。
+- Datagen 用 fabric-api 的 datagen 依赖和 `fabricApi { configureDataGeneration() }`。
 
-## 入口类
-- 实现 `ModInitializer`，在 `onInitialize()` 里注册物品、方块、事件、网络包。
+## 代码结构
+- 入口实现 `ModInitializer`，在 `onInitialize()` 注册物品、方块、事件、网络包。
 - 客户端入口实现 `ClientModInitializer`，只放渲染、按键、GUI、粒子。
 - `fabric.mod.json` 的 `entrypoints` 同时声明 `main` 与 `client`。
 
-## 交付
-- 完整文件路径 + 完整代码，不要省略 import。
-- 说明 `./gradlew build` 与 `./gradlew runClient`。
-- 给出进游戏后的验证步骤。
+## 验证
+- `./gradlew build`，再 `./gradlew runClient` / `runServer`。
+- Fabric 没有本工坊的 Forge 探针：用开发端日志、GameTest（`./gradlew runGametest`）和单元测试验证。
+- 不说“应该能跑”；以编译结果和真实日志为准。
+""",
+    },
+    {
+        "id": "forge-scaffold",
+        "name": "Forge 工程搭建",
+        "description": "Forge 模组：ForgeGradle、mods.toml、DeferredRegister、事件总线，以及 1.20.1 探针验证。",
+        "body": """# Forge 工程搭建
+
+## 1.20.1 基线
+- Minecraft 1.20.1，Forge 47.4.28（`47.x`），Java 17。
+- ForgeGradle `[6.0,6.2)`，Gradle 8.8，Mojang 官方映射（official）。
+- 新建工程用 `scaffold_project`（loader=Forge），不要手工从零写构建脚本。
+
+## 关键文件
+```
+build.gradle / settings.gradle / gradle.properties
+gradlew, gradlew.bat, gradle/wrapper/*
+src/main/java/<package>/ModMain.java
+src/main/resources/META-INF/mods.toml
+src/main/resources/pack.mcmeta
+```
+
+## build.gradle 要点
+- `minecraft { mappings channel: 'official', version: '1.20.1' }`。
+- `java.toolchain.languageVersion = JavaLanguageVersion.of(17)`。
+- 依赖：`minecraft "net.minecraftforge:forge:1.20.1-47.4.28"`。
+- `processResources` 用 `expand` 展开 `mods.toml` / `pack.mcmeta` 里的 `${...}`。
+- runs 保留 `client`、`server`、`gameTestServer`、`data`，工作目录分别是 `run-client`、`run-server`、`run-gametest`、`run-data`。
+
+## 代码结构
+- 入口 `@Mod(MODID)` 构造器里创建 `DeferredRegister` 并挂到 `modEventBus`。
+- 注册用 `DeferredRegister.Items` / `DeferredRegister.Blocks` / `DeferredRegister<EntityType<?>>`。
+- 生命周期用 `FMLCommonSetupEvent`、`FMLClientSetupEvent`；游戏事件用 `MinecraftForge.EVENT_BUS`。
+- 客户端专用类放 `client/` 包，并加 `@Mod.EventBusSubscriber(value = Dist.CLIENT, bus = Mod.EventBusSubscriber.Bus.MOD)` 或 `DistExecutor` 兜底。
+
+## 资源（1.20.1 用复数目录）
+- `assets/<mod_id>/models/item/<id>.json`
+- `assets/<mod_id>/textures/item/<id>.png`
+- `assets/<mod_id>/lang/en_us.json`、`zh_cn.json`
+- `data/<mod_id>/recipes/`、`loot_tables/`、`tags/`（1.21 才改成单数）
+
+## 验证
+- `mcdev_build` 编译，`mcdev_prepare` 启动开发端，再用探针状态、命令、UI 和场景断言验证。
+- Forge 1.20.1 是唯一支持游戏内探针的基线；其他 Forge 版本用日志和 GameTest。
 """,
     },
     {
         "id": "neoforge-scaffold",
         "name": "NeoForge 工程搭建",
-        "description": "从零创建 NeoForge 模组：NeoGradle、mods.toml、DeferredRegister、事件总线与客户端/服务端分离。",
+        "description": "从零创建 NeoForge 模组：NeoGradle / ModDevGradle、mods.toml、DeferredRegister 与事件总线。",
         "body": """# NeoForge 工程搭建
 
 ## 先确认
-MC 版本、Mod ID、显示名、依赖、是否允许 Mixin。NeoForge 只支持较新的 MC 版本，先确认目标版本有对应 NeoForge。
+MC 版本、Mod ID、显示名、依赖、是否允许 Mixin。先确认目标 MC 版本有对应 NeoForge。
 
 ## 版本要点
-- 1.20.1：NeoForge 早期版本，部分 API 仍沿用 Forge 写法。
-- 1.20.4+：`mods.toml` 迁移为 `META-INF/neoforge.mods.toml`。
-- 1.21+：注册、事件、网络包 API 有变化，使用 Mojmap 官方映射。
+- 1.20.1：NeoGradle 7.0.x，`META-INF/mods.toml`，部分 API 仍接近 Forge。
+- 1.20.5+：元数据改为 `META-INF/neoforge.mods.toml`。
+- 较新版本常用 ModDevGradle；构建插件必须与 MC 版本匹配。
 - 不写 SRG 名（`m_12345_`）或混淆名。
 
 ## 最小目录
@@ -104,27 +148,55 @@ MC 版本、Mod ID、显示名、依赖、是否允许 Mixin。NeoForge 只支�
 build.gradle
 gradle.properties
 settings.gradle
-src/main/java/<package>/<ModClass>.java
-src/main/resources/META-INF/neoforge.mods.toml
+src/main/java/<package>/ModMain.java
+src/main/resources/META-INF/mods.toml
 src/main/resources/assets/<modid>/lang/en_us.json
 src/main/resources/assets/<modid>/lang/zh_cn.json
 ```
 
-## 注册
-- 使用 `DeferredRegister.Items` / `DeferredRegister.Blocks` / `DeferredRegister<EntityType<?>>`。
-- 在模组构造函数里把 register 挂到 `modEventBus`。
-- 方块实体、菜单、网络包各自用对应的 DeferredRegister 或 `RegisterPayloadHandlersEvent`。
-- 客户端专用内容放 `@Mod(value = MODID, dist = Dist.CLIENT)` 或 `FMLClientSetupEvent`/`RegisterClientExtensionsEvent`。
+## 注册与事件
+- 用 `DeferredRegister` / `Registries` 注册，挂到构造器注入的 `IEventBus`。
+- 游戏逻辑事件走 `NeoForge.EVENT_BUS`；模组生命周期走 mod event bus。
+- 方块实体、菜单、网络包用对应的 DeferredRegister 或 `RegisterPayloadHandlersEvent`。
+- 客户端内容放 `@Mod(value = MODID, dist = Dist.CLIENT)` 或客户端事件，不要混进服务端。
 
-## 事件
-- 模组生命周期事件走 `modEventBus`。
-- 游戏逻辑事件走 `NeoForge.EVENT_BUS`。
-- 不要把所有监听器都塞进主类；按功能拆 `event/` 包。
-
-## 交付
-- 完整 build.gradle 与 mods.toml，不要漏 `modLoader="javafml"`、`loaderVersion`、`license`。
-- 说明 `./gradlew build`、`./gradlew runClient`、`./gradlew runServer`。
+## 验证
+- `./gradlew build`、`./gradlew runClient`、`./gradlew runServer`。
+- GameTest 任务用 `runGameTestServer`；本工坊没有 NeoForge 游戏内探针，验证以日志和 GameTest 为准。
 - 网络包、方块实体、库存同步必须标【⚠️人工复核】。
+""",
+    },
+    {
+        "id": "architectury-scaffold",
+        "name": "Architectury 多加载器工程",
+        "description": "用 Architectury 组织 common + Fabric + NeoForge 多加载器工程，处理平台差异与构建脚本。",
+        "body": """# Architectury 多加载器工程
+
+## 结构
+```
+settings.gradle
+build.gradle
+gradle.properties
+common/        # 通用代码
+fabric/        # Fabric 入口与平台实现
+neoforge/      # NeoForge 入口与平台实现
+```
+
+## 构建
+- 使用 architectury-loom / architectury plugin，版本与目标 MC 对齐。
+- `common` 只依赖 Architectury API 和原版，不直接依赖 Fabric API 或 NeoForge API。
+- `fabric` / `neoforge` 各自声明对应加载器依赖和入口。
+- 平台差异用 `@ExpectPlatform` 或接口 + 平台实现桥接。
+
+## 代码边界
+- common 放物品/方块注册抽象、事件抽象、网络包抽象。
+- 平台子项目放加载器入口、客户端初始化、平台专属 API 调用。
+- 不要在 common 里 import `net.fabricmc.*` 或 `net.neoforged.*`。
+
+## 验证
+- 分别构建 `:fabric:build` 与 `:neoforge:build`，再启动各自的开发端。
+- 没有内置 Architectury 骨架时，按官方模板生成，并先核对插件与 MC 版本。
+- 两个平台都要能编译；只通过一个平台不算完成。
 """,
     },
     {
@@ -176,27 +248,32 @@ src/main/resources/assets/<modid>/lang/zh_cn.json
     },
     {
         "id": "porting",
-        "name": "版本与加载器移植",
-        "description": "把模组移植到其他 MC 版本或 Fabric/NeoForge：映射、API、资源格式与构建脚本迁移清单。",
-        "body": """# 版本与加载器移植
+        "name": "从现有 JAR 参考实现",
+        "description": "把源 JAR 反编译成可读源码，按功能拆解后，用当前工程加载器的官方写法重写，不直接搬运混淆代码。",
+        "body": """# 从现有 JAR 参考实现
+
+## 目标
+目标加载器、MC 版本、映射以当前工程为准：Fabric 用 Yarn，Forge / NeoForge 用 Mojang 官方映射。参考 JAR 只用来确认行为、注册项和资源结构，最终代码必须能按当前工程编译。
 
 ## 流程
-1. 记录源版本/目标版本、源加载器/目标加载器。
-2. 对照官方迁移说明和当前映射，列出破坏性变更。
-3. 先迁构建脚本与元数据，再迁注册与事件，最后迁资源和数据包格式。
-4. 逐文件给出改动，不要一次性全量重写。
+1. `decompile_jar` 反编译源 JAR，读索引和目标类；不要凭记忆猜实现。
+2. 列出源 JAR 的注册项（物品/方块/实体/命令）、事件钩子、网络包、资源目录。
+3. 在现有工程里按“注册 → 交互 → 网络 → 客户端 → 数据/资源”顺序重写，每批都编译。
+4. 用 `build_project` 编译；Forge 1.20.1 再 `mcdev_prepare` 启动真实开发端并用探针验证，其他加载器用运行日志和 GameTest 验证。
+5. 涉及贴图、模型、语言文件时，逐项核对 `assets/<mod_id>/` 下的路径与注册名。
 
-## 常见迁移点
-- Yarn ↔ Mojmap：类名、方法名、字段名全部变化。
-- 注册 API：`Registry.register`、`DeferredRegister`、`RegisterEvent` 的时机与签名。
-- 物品组件：1.20.5+ 用 `DataComponentType` 替代大量 NBT。
-- 网络包：Fabric `PayloadTypeRegistry` / NeoForge `RegisterPayloadHandlersEvent`。
-- 资源包格式：`pack_format`、模型 JSON、方块状态 JSON。
-- Mixin：目标方法描述符随版本变化，必须重新核对。
+## 映射要点（按目标加载器选择）
+- 标识符：Fabric Yarn `Identifier`；Forge / NeoForge `ResourceLocation`（1.20.1 用 `new ResourceLocation(namespace, path)`）。
+- 注册：Fabric `Registry.register` + `Registries.*`；Forge / NeoForge `DeferredRegister` 挂到对应 event bus；Architectury 把公共注册放 common，平台差异用 `@ExpectPlatform`。
+- 事件：Fabric 回调 / `ServerLifecycleEvents`；Forge `MinecraftForge.EVENT_BUS` + mod event bus；NeoForge `NeoForge.EVENT_BUS` + `IEventBus`。
+- 文本：`Text` / `Component` 统一成目标版本的组件类型；1.20.1 是 `Component`。
+- 物品属性：Fabric `Item.Settings` → 目标加载器的 `Item.Properties`（1.20.1）。
+- 客户端：`net.minecraft.client` 相关代码只能放客户端入口或平台客户端子工程，专用服务端不能加载。
 
 ## 风险
-- 移植后必须实际编译；编译通过不代表运行正常。
-- 涉及世界生成、方块实体、网络同步的改动标【⚠️人工复核】。
+- 反编译代码只作参考，不要整段复制；许可证不兼容的代码不能用。
+- 编译通过不等于运行正常；能启动开发端就启动，不能就明确写“仅编译通过”。
+- 世界生成、方块实体、网络同步、Mixin 改动标【⚠️人工复核】。
 """,
     },
     {
@@ -459,56 +536,47 @@ src/main/resources/assets/<modid>/lang/zh_cn.json
     },
     {
         "id": "fabric-to-neoforge-port",
-        "name": "Fabric → NeoForge 移植",
-        "description": "把 Fabric 1.21.x 模组迁移到 NeoForge 1.21.1：资源目录、物品模型、注册、事件、网络包、构建脚本逐项对照。",
-        "body": """# Fabric → NeoForge 1.21.1 移植
+        "name": "Fabric 源实现 → Forge 1.20.1",
+        "description": "读 Fabric 源码或反编译 JAR，按 1.20.1 Forge 的 Mojang 映射重写：注册、事件、网络、资源目录逐项对照。",
+        "body": """# Fabric 源实现 → Forge 1.20.1
 
 ## 先做的事
-1. 用 port_from_jar 生成工程，不要手工从零搭。
-2. 读 PORT_PLAN.md、.dma/spec.json、reference/decompiled/<jar>/INDEX.md。
-3. 先列出源 JAR 的注册项（物品/方块/实体/命令）、网络包、客户端渲染类、数据包目录。
-4. 按“注册 → 交互 → 网络 → 客户端 → 数据包”的顺序迁移，每批都编译。
+1. 用 `decompile_jar` 或直接读源工程，确认注册项、事件钩子、网络包和客户端渲染类。
+2. 在现有 Forge 1.20.1 工程里重写；不要生成 Fabric 工程，也不要整段复制反编译代码。
+3. 按“注册 → 交互 → 网络 → 客户端 → 数据/资源”分批改，每批 `mcdev_build` 编译。
 
-## 映射表（1.21.1）
-- 入口：`ModInitializer` → `@Mod` 构造器 + `IEventBus`；`ClientModInitializer` → `@Mod(dist = Dist.CLIENT)`。
-- 注册：`Registry.register(Registries.ITEM, ...)` → `DeferredRegister.Items`；方块用 `DeferredRegister.Blocks`。
-- 标识符：`Identifier` → `ResourceLocation.fromNamespaceAndPath`。
-- 世界：`World` → `Level`；`ServerWorld` → `ServerLevel`。
-- 玩家：`PlayerEntity` → `Player`；`ServerPlayerEntity` → `ServerPlayer`。
-- 物品：`Item.Settings` → `Item.Properties`；`use(World, PlayerEntity, Hand)` → `use(Level, Player, InteractionHand)`。
-- 交互：`interactMob` → `interactLivingEntity(ItemStack, Player, LivingEntity, InteractionHand)`；`useOnBlock` → `useOn(UseOnContext)`。
-- 文本：`Text` → `Component`；`Text.translatable` → `Component.translatable`。
-- 网络：`PayloadTypeRegistry` + `ServerPlayNetworking` → `RegisterPayloadHandlersEvent` + `registrar.playToServer/playToClient` + `IPayloadContext`。
-- 事件：Fabric 的 `ServerTickEvents` 等 → `NeoForge.EVENT_BUS.addListener` 或 `@EventBusSubscriber`。
-- 资源：`FabricLoader.getInstance().getConfigDir()` → `FMLPaths.CONFIGDIR.get()`。
+## 映射表（到 Forge 1.20.1 / Mojang 官方映射）
+- 入口：`ModInitializer` → `@Mod` 构造器；`ClientModInitializer` → `Dist.CLIENT` 专用类 + `FMLClientSetupEvent`。
+- 注册：`Registry.register(Registries.ITEM, ...)` → `DeferredRegister.create(ForgeRegistries.ITEMS, MODID)`。
+- 标识符：`Identifier` → `new ResourceLocation(namespace, path)`。
+- 世界/玩家：`World` → `Level`，`PlayerEntity` → `Player`，`ServerPlayerEntity` → `ServerPlayer`。
+- 物品：`Item.Settings` → `new Item.Properties()`；`use(World, PlayerEntity, Hand)` → `use(Level, Player, InteractionHand)`。
+- 交互：`useOnBlock` → `useOn(UseOnContext)`。
+- 文本：`Text` → `Component`。
+- 网络：Fabric `PayloadTypeRegistry` / `ServerPlayNetworking` → Forge 1.20.1 的 `SimpleChannel` + `NetworkRegistry.newSimpleChannel`。
+- 事件：Fabric `ServerTickEvents` → `MinecraftForge.EVENT_BUS.addListener` 或 `@Mod.EventBusSubscriber`。
+- 配置目录：`FabricLoader.getInstance().getConfigDir()` → `FMLPaths.CONFIGDIR.get()`。
 
-## 资源转换（最容易出错）
-- 1.21.4+ 的 `assets/<ns>/items/<id>.json` 在 1.21.1 不生效，必须有 `assets/<ns>/models/item/<id>.json`。
-- `models/item` 的 `layer0` 必须指向真实 PNG；`generated_item` 这类通用 id 要确认模型引用的纹理确实存在。
-- 1.21.1 数据包目录是单数：`recipe/`、`advancement/`、`loot_table/`、`tags/item/`、`tags/block/`。
-- 配方 `result` 用 `{"id": "...", "count": n}`（1.20.5+ codec），不是 `{"item": "..."}`。
-- 中文 lang 如果是 GBK，必须转 UTF-8，否则游戏内乱码。
+## 资源（1.20.1）
+- 物品模型：`assets/<ns>/models/item/<id>.json`，`layer0` 指向真实 PNG。
+- 纹理：`assets/<ns>/textures/item/<id>.png`。
+- 数据包目录用复数：`data/<ns>/recipes/`、`loot_tables/`、`tags/`（1.21 才改单数）。
+- 配方格式是 1.20.1 的 `{"item": "...", "count": n}`，不是 1.20.5+ 的 `{"id": ...}`。
+- 中文 lang 如果是 GBK，先转 UTF-8。
 
-## 构建
-- NeoForge 1.21.1 使用 ModDevGradle 2.x，Java 21，`neo_version=21.1.265`。
-- `neoForge { mods { "<mod_id>" { sourceSet sourceSets.main } } }` 不能漏。
-- 本地前置 jar 放 `libs/`，`implementation files('libs/xxx.jar')`，然后 `fix_build_setup`。
-- 每迁完一批用 `port_status` 核对未迁移类，不要只搬主类就结束。
-- 编译通过后必须 verify_mod（未迁移源类会报 `source_classes_unmigrated`）。
-
-## 移植结束的验收
-- 源 JAR 的每个物品都能在 Java 注册里找到同名项。
-- 每个物品有 models/item 且纹理存在。
-- 中英文 lang 键齐全。
-- 客户端类不在公共包，服务端不引用 net.minecraft.client。
-- build/libs 有 JAR，neoforge.mods.toml 在 META-INF 下。
+## 验收
+- 源 JAR 的每个注册项在 Java 里都有对应注册，且资源路径一致。
+- 客户端类不在公共包，专用服务端不引用 `net.minecraft.client`。
+- 编译通过后用 `mcdev_prepare` 启动开发端，探针确认物品能拿到、界面能打开、交互生效。
 """,
     },
     {
         "id": "mca-reborn-compat",
         "name": "MCA Reborn 兼容",
         "description": "让作用于玩家 / 村民的道具在 MCA 村民上同样生效，并让玩家接管村民身份后继承姓名、关系与外观，可以代替村民与他人结婚生育。",
-        "body": """# MCA Reborn 1.21.1 NeoForge 兼容
+        "body": """# MCA Reborn 兼容（Forge 1.20.1 参考）
+
+> 下面是 MCA 的通用机制。实际类名和方法签名以当前工程依赖的 MCA 1.20.1 源码为准，写之前先用 `decompile_jar` 或 `github_file` 核对；1.21.x 的 `player.level()` 这类写法在 1.20.1 要换成 `player.level`。
 
 ## 判定目标
 - 村民实体实现 `VillagerLike<?>`；判断必须写 `entity instanceof VillagerLike<?> && !(entity instanceof Player)`。
@@ -520,9 +588,9 @@ src/main/resources/assets/<modid>/lang/zh_cn.json
 - 服务端执行真实逻辑，客户端返回 `InteractionResult.sidedSuccess(player.level().isClientSide)`。
 - MCA 村民的 `mobInteract` 会先消费右键（打开对话/交易），所以物品自己的 `interactLivingEntity` 不会被调用。必须在 `PlayerInteractEvent.EntityInteract` 里抢先处理：只接管本模组道具，调用 `item.interactLivingEntity`，结果 `consumesAction()` 时 `setCancellationResult` + `setCanceled(true)`。`event/ServerEvents` 里已有这份兜底，不要删。
 - 对玩家和对村民共用同一套身份同步函数，避免两套逻辑行为不一致。
-- `port_from_jar` 检测到 MCA 时会整建制生成：
+- 在现有工程里建议拆成：
   - `compat/McaCompat.java`：`possess(serverPlayer, target)`、`wear(serverPlayer, skinStack)`、`release(serverPlayer)`、`captureVillager(target)`、`tick(player)`。
-  - 源包检测到对应道具时生成 `item/*Item`：`interactLivingEntity` 已写好，不要改回 `Item::new`。
+  - 对应道具的 `item/*Item`：在 `interactLivingEntity` 里调用同一套同步函数。
   - `data/SkinData.java`、`client/ClientSkinCache.java`、`client/ClientEvents.java`、`event/ServerEvents.java`、`mixin/client/AbstractClientPlayerMixin.java`。
   - 快照存在玩家 `getPersistentData()`，服务器重启后仍能还原；每 20 tick 检查承载身份的道具是否还在装备栏，不在就自动还原。
 
@@ -570,7 +638,7 @@ src/main/resources/assets/<modid>/lang/zh_cn.json
         "body": """# 真实代码检索
 
 ## 顺序
-1. 目标加载器官方仓库（NeoForge / Fabric）。
+1. 目标加载器官方仓库（Forge 1.20.1 / MinecraftForge）。
 2. 目标模组本体仓库（例如 MCA：Luke100000/minecraft-comes-alive）。
 3. 同类模组的同类功能实现。
 4. grep.app 全局搜方法名/事件名。
@@ -591,7 +659,7 @@ src/main/resources/assets/<modid>/lang/zh_cn.json
 
 ## 使用原则
 - 查到源码后只提取 API 形状（类名、方法签名、事件名、字段），不要大段复制他人代码。
-- 以目标 MC 版本的 tag/branch 为准；1.21.1 的代码不能拿 1.21.11 的凑。
+- 以目标 MC 版本的 tag/branch 为准；1.20.1 的代码不能拿 1.21.x 的凑。
 - 引用来源写进答复，方便用户核对。
 """,
     },
@@ -601,8 +669,10 @@ src/main/resources/assets/<modid>/lang/zh_cn.json
 # 用户这句话命中哪些词时，优先把对应技能正文放进系统提示。
 # 技能目录始终完整，这里只决定“先加载哪几份正文”。
 SKILL_HINTS: dict[str, tuple[str, ...]] = {
-    "fabric-scaffold": ("fabric", "fabric-loom"),
+    "fabric-scaffold": ("fabric", "fabric-loom", "yarn"),
+    "forge-scaffold": ("forge", "forgegradle", "minecraftforge"),
     "neoforge-scaffold": ("neoforge", "neo forge"),
+    "architectury-scaffold": ("architectury", "多加载器", "双加载器"),
     "incremental-edit": ("修改", "新增功能", "加功能", "改功能", "现有工程"),
     "crash-triage": ("崩溃", "报错", "编译失败", "异常", "crash"),
     "porting": ("移植", "升级版本", "降级", "换加载器"),

@@ -1,42 +1,39 @@
 # 恶魔小猫工坊（Darkitten Mod Agent）
 
-只写 Minecraft Java 模组的独立桌面 Agent。基于 PySide6，自带对话工作台、技能、连接器和知识库，可从下载站、GitHub 与 Darkitten 启动器获取，并支持自动更新。
+只写 Minecraft Java 模组的桌面 Agent。界面用 PySide6，内置对话工作台、技能、连接器、知识库与反编译能力。模组开发闭环来自 [yan-mc/minecraft-mod-dev](https://github.com/yan-mc/minecraft-mod-dev)：真实开发端启动、回环 HTTP 探针、场景卡片断言和 GameTest。
 
-当前版本：`1.3.1`
+当前版本：`1.4.1`
+
+## 支持范围
+
+- **加载器**：Fabric、Forge、NeoForge、Architectury。新建工程时选择加载器和 Minecraft 版本，助手按选择写代码，不混用不同加载器的 API。
+- **可直接生成的骨架（Minecraft 1.20.1）**：
+  - Forge：ForgeGradle 6.0–6.2、Forge 47.4.28、官方映射、Gradle 8.8。
+  - Fabric：fabric-loom 1.7-SNAPSHOT、Yarn `1.20.1+build.10`、Fabric Loader 0.15.11、Fabric API 0.92.2+1.20.1。
+  - NeoForge：NeoGradle 7.0.171、NeoForge 47.1.106。
+  - Architectury：不内置骨架，由助手按官方模板生成 `common` / `fabric` / `neoforge` 多子工程。
+- **其他版本**：只记录工程元数据，构建脚本、映射和依赖版本由助手核对官方模板后生成，工坊不凭空猜测版本号。
+- **Java 17**、Gradle Wrapper **8.8**（内置骨架统一使用）。
 
 ## 功能
 
-- **Fabric → NeoForge 移植**：`port_from_jar` 扫描 JAR、转换 1.21.4+ 的 `items/` 模型、反编译参考源码、生成 Gradle / `mods.toml` / 规格 / 验收清单，并自动切换工程。用一个真实的 1.21.11 Fabric 模组（123 个源类、6 个道具）实测 verify 0 错误、`BUILD SUCCESSFUL`。
-- **MCA Reborn 兼容**：源模组引用 `net.conczin.mca`，或注册内容属于身份 / 外观类玩法时，自动复制 NeoForge 版 MCA 依赖，生成 `McaCompat`、`SkinData`、道具类、客户端皮肤缓存 / Mixin 与服务端事件。MCA 村民的 `mobInteract` 会先消费右键，所以用 `PlayerInteractEvent.EntityInteract` 抢先处理，村民和玩家共用一套逻辑。
-- **身份同步**：备份玩家原 `PlayerSaveData`，把目标村民的身体 NBT 写进 `setEntityData`，姓名、性别、职业、配偶、父母、子女写进 `FamilyTree`；解除时恢复并放回村民本体。同步后可以代替该村民结婚、生育，承载身份的道具离开装备栏会自动还原。
-- **先规划、再确认、后施工**：用一句话描述需求后，助手先一次性拆出完整规格（玩法、注册内容、获取方式、数值、美术、验收标准、风险），右侧「规格」页显示 10 项需求清单和说明书；必须点「确认规格并开始施工」才会写代码。
-- **施工任务与失败分析**：确认规格后自动拆成骨架、注册、玩法、纹理、配方、语言、编译、验收等任务，完成一项进度前进一项；编译失败会按真实日志归类为 Java 版本、依赖下载、Mixin、找不到符号、类型不匹配、缺少程序包、依赖变体、Gradle 任务或内存不足，并给出处理方式。
-- **成品说明书**：编译通过后直接读取 `build/libs` 里的 JAR，解析 `fabric.mod.json` / `neoforge.mods.toml`、物品与方块模型、blockstates、配方、掉落表、纹理、音效和语言文件，列出真实注册内容、配方数量、模型纹理数量、AI 推荐玩法和安装步骤。
-- **增量修改**：已有规格和成品后继续提要求，会保留源码、规格、记忆和贴图，只改必要文件；需求变化时用 `update_spec` 提交差异，改完重新编译并刷新成品说明书。
-- **Fabric / NeoForge / Architectury**：创建工程、增量修改、崩溃排查、跨版本移植。
-- **三项硬性前置**：MC 版本、加载器、Mod ID，缺一项就不会开始写代码。
-- **完整文件交付**：按工程相对路径输出完整文件，不用“其余不变”省略。
-- **图文教程**：侧边栏「教程」把配置模型、新建工程、描述需求、写入检查、编译运行、自动修复、出包安装做成 7 步演示，每一步带界面示意图和直达按钮，并提供常用需求模板。
-- **待写入确认**：生成的文件先进入右侧列表，确认后才落盘；覆盖前自动备份。也可以在对话页直接打开「自动写入」，生成后立即落盘并留下「已自动写入」记录。
-- **写入后自动编译**：打开「自动编译」后，每轮写完自动执行 `gradlew build`；失败时把 Gradle 日志直接交给助手修一轮，最多连续编译两次，仍失败就停下并把日志给你。助手改代码优先用 `edit_file` 精确替换，不再整份重写。
-- **技能**：内置 13 个模组开发工作流，含 3D 建模、绘图/纹理/GUI、代码工程与重构；会按当前这句话自动挑选相关技能正文，可停用、改写、恢复默认或新建自定义技能。
-- **像素纹理生成**：助手调用 `pixel_art` 工具，用调色板 + 字符网格直接写出 RGBA PNG，物品/方块图标和 GUI 素材不需要外部画图软件。
-- **连接器**：Modrinth、Fabric Meta、GitHub API 开箱可用，支持自定义 HTTP 接口与 `${ENV}` 密钥引用。
-- **一键准备**：自动挑 JDK（优先 21，缺了就下载 Temurin 21）、补齐 Wrapper、从中科大 / 华为云镜像装好 Gradle 发行包，不用手动配环境变量；大文件走多连接分段下载，断线可续传。
-- **本地依赖自动整理**：`build.gradle` 里写 `files('libs/xxx.jar')` 后，点「编译」或「一键准备」会自动从下载目录、桌面、其它盘符的「下载」文件夹和知识库来源目录找出同名 jar（带中文前缀也认），复制进工程并创建 `libs/`；找不到时才会提示缺哪个文件。
-- **助手自己编译**：对话里的助手可以直接调用 `build_project` 执行 `build` / `runClient` / `runServer` / 数据生成（NeoForge 用 `runData`，Fabric 用 `runDatagen`，按工程自动选择），自己准备 JDK、Wrapper、本地 jar 和镜像代理，自己读取日志、改代码、再次编译，直到出包；不需要用户手动执行 `gradlew` 或把日志贴回来。
-- **开发运行自动修复**：编译前自动补齐 NeoForge ModDevGradle 的 `mods { sourceSet sourceSets.main }`，修掉无效的 `clientData()` 数据生成运行并补上 `--mod / --output / --existing` 参数，避免「开发客户端 Mixin 找不到类」和「unknown run: clientData」；`ProcessResources` 用 `expand` 替换中文时自动加 `filteringCharset = 'UTF-8'`。
-- **Gradle 版本自适应**：识别到 ModDevGradle / NeoGradle 时自动把 Wrapper 切到 Gradle 8.10.2，其它工程默认 9.8.2；`gradle-wrapper.properties` 损坏会自动重写，编译报 `requires at least Gradle X` 时也会自动升级重试。
-- **NeoForge 依赖自动兜底**：`maven.neoforged.net` 返回 502、连接被拒、被 DNS 污染或证书校验失败时，自动启动本机 Maven 代理并重试；代理按需从国内镜像取文件并缓存，缺的 `neoform-runtime` 和 `minecraft-dependencies` 会在本机合成，不需要手动改 hosts 或配镜像源。
-- **删除工程**：对话页右上角的「删除工程」先把工程目录移到 Windows 回收站，再从最近列表里移除并清掉会话记录；有生成任务或 Gradle 任务在跑时会先拦住。
-- **环境自检**：检查 Java、JAVA_HOME、Gradle、Git、目录写入、资料源连通性和模型通道，给出缺失项与修复建议，可复制报告。
-- **编译运行**：没通过对话新建工程时，可以直接点「选择工程」打开磁盘上已有的工程，选中后编译 / 开发客户端 / 开发服务端 / 数据生成按钮立即恢复可用。点任务按钮时先自动准备环境，再执行 `gradlew build` / `runClient` / `runServer` / 数据生成（`runData` / `runDatagen` 按工程自动选择）；日志实时回显，可停止、复制日志、打开 `build/libs`。
-- **工具轮数**：默认 32 轮，可调到 999；填 0 表示不限制，适合大型工程。
-- **知识库**：导入 txt / md / docx / pdf / jar / 代码和配置文件，自动提取正文、分片；每轮对话前检索相关片段，也能让助手用 `search_knowledge` / `read_knowledge` 按需查。列表里点选文件只加载前 4 万字符预览，上千万字的大 JAR 也不会卡住界面。
-- **模组 JAR 分析**：直接导入现成模组，提取 `fabric.mod.json` / `mods.toml`、语言与资源 JSON、类结构，并用内置 Vineflower 反编译出 Java 源码；开头生成「模组速览 + 类索引」，中文问题也能对上英文类名，做兼容、移植或复刻功能时可直接参考实现。
-- **反编译到工程**：知识库页选中 JAR 点「反编译到工程」，把主 JAR 和 `META-INF/jars` 里的自有内嵌模块一起展开成 `.java`，写到 `reference/decompiled/<JAR 名>/`；按原包路径保存，生成 `INDEX.md`，不参与编译，方便让助手逐个文件迁移。对话里也可以直接让助手调用 `decompile_jar`。
-- **桌面快捷方式**：首次启动询问是否创建。
-- **自动更新**：读取 `mod_agent_release.json`，从 GitHub Release 下载 ZIP（自动走加速源）、校验 SHA-256，退出后由后台脚本替换程序文件并重启。
+- **先改代码，再用真实环境验证**：助手写完代码直接编译。Forge 1.20.1 工程还能启动真实开发服务端 / 客户端，用探针读取状态、背包、方块、界面和截图；其他加载器以编译结果、运行日志和 GameTest 为准，不伪造游戏内结果。
+- **开发端进程管理（Forge 1.20.1）**：启动双端 / 仅服务端 / 仅客户端，自动等待端口就绪；双端模式会先起服务端，再让客户端连接 `127.0.0.1:25566`。可以在运行面板看到 PID、探针端口、是否进入世界和启动日志。
+- **回环 HTTP 探针（Forge 1.20.1）**：只监听本机，服务端 `39001`、客户端 `39002`，请求头 `X-Mcdev-Token: mcdev`。支持状态、指令、UI 快照、点击、物品使用、截图、运行日志导出。其他加载器会自动跳过探针安装，并在运行面板提示改用编译与日志验证。
+- **场景卡片与断言（Forge 1.20.1）**：YAML 卡片可写状态、指令、放置/破坏方块、挖矿、合成、配方、战利品、物品、使用、界面点击、截图、日志导出和断言。断言支持 `eq / ne / contains / gt / gte / lt / lte / exists`，失败会带出真实数据和步骤编号。
+- **GameTest**：Fabric 执行 `gradlew runGametest`，Forge / NeoForge 执行 `gradlew runGameTestServer`，解析通过 / 失败汇总，适合纯服务端逻辑。
+- **多加载器工程骨架**：1.20.1 的 Forge / Fabric / NeoForge 新建即生成可编译骨架，包含入口类、元数据、语言与资源目录、Gradle Wrapper；Architectury 和其他版本由助手按官方模板生成，再由编译结果验证。
+- **按加载器写代码**：系统提示和技能会注入当前工程的加载器规范（Fabric 的 `ModInitializer` / Yarn；Forge 的 `DeferredRegister` / `mods.toml`；NeoForge 的 `IEventBus` / `mods.toml`；Architectury 的 `common` + 平台子工程），并禁止把 Forge 写法套到其他加载器。
+- **编译与产物**：编译执行 `gradlew build`，从 `build/libs` 读取真实 JAR；运行面板和「成品」区域都会显示产物。
+- **精确改文件**：优先用 `edit_file` 做单点替换，新建或整体重写才用 `write_file`；覆盖前自动备份。
+- **技能**：内置模组开发工作流，包含 Fabric / Forge / NeoForge / Architectury 工程搭建、从 JAR 参考实现、纹理 / GUI、Mixin 风险、崩溃排查等；可停用、改写、恢复默认或新建自定义技能。
+- **像素纹理生成**：助手调用 `pixel_art`，用调色板 + 字符网格直接写出 RGBA PNG。
+- **连接器**：Modrinth、GitHub API 开箱可用，也支持自定义 HTTP 接口与 `${ENV}` 密钥引用。
+- **知识库**：导入 txt / md / docx / pdf / jar / 代码和配置文件，自动提取正文与分片；对话前自动检索相关片段，也可用工具按需深挖。
+- **模组 JAR 分析**：解析 `mods.toml` / `fabric.mod.json`、语言与资源 JSON、类结构，并用内置 Vineflower 反编译 Java 源码；生成「模组速览 + 类索引」。
+- **反编译到工程**：选中 JAR 点「反编译到工程」，主 JAR 与 `META-INF/jars` 内的自有模块一起展开到 `reference/decompiled/<JAR 名>/`，不参与编译，只作迁移参考。
+- **环境自检**：检查 Java / Gradle / Git / 目录写入 / 资料源连通性和模型通道；优先选择 JDK 17。
+- **桌面快捷方式与自动更新**：首次启动询问创建快捷方式；更新包校验 SHA-256 后替换并重启。
 
 ## 直接运行（源码）
 
@@ -50,30 +47,74 @@ Windows 上也可以双击 `main.py`（需要已安装 Python 与依赖）。
 ## 使用流程
 
 1. 打开程序，在「设置」里配置模型通道；不熟悉流程可以先看「教程」页。
-2. 在右上角点「新建工程」，填写 MC 版本、加载器、运行端、Mod ID、依赖和补充要求。
-3. 创建后助手先做规划，把需求拆成完整规格；在右侧「规格」页检查说明书和 10 项需求，必要时补充要求让它更新，确认无误后点「确认规格并开始施工」。
-4. 施工阶段文件按「自动写入」设置直接落盘或进入「待写入」，任务清单会逐项完成；打开「自动编译」时每轮写完自动 build，失败会把日志回传给助手修一轮。
-5. 编译通过后右侧「成品」页生成成品说明书。之后继续提要求会走增量修改，不会重写已有源码和贴图。
-6. 需要让它接着上一轮继续做时，点输入框上方的「继续」，不用重新描述一遍。
+2. 右上角「新建工程」，填写模组名称、Mod ID、Minecraft 版本和加载器。1.20.1 的 Forge / Fabric / NeoForge 会直接生成可编译骨架。
+3. 在对话页描述需求，例如「做一个挖掉回血的发光矿石，挖一块验证掉落」。助手会按当前加载器读工程、改代码、补资源。
+4. 需要验证时，先编译；Forge 1.20.1 工程可以让助手启动开发端，或直接点对话页右侧「运行」，首次启动会编译并安装探针。其他加载器看编译结果与运行日志。
+5. 用 GameTest 或场景卡片断言结果。Forge 1.20.1 的卡片能读到真实背包、界面和日志；失败时助手会改完再跑。
+6. 编译产物在工程的 `build/libs`。发布前先停掉开发端，再把模组 jar 放进 `.minecraft/mods`。
 7. 不再需要的工程，点右上角「删除工程」。确认后目录进入回收站，最近记录和对话记录一并清除。
+
+## 探针与场景卡片
+
+探针是一个 Forge 1.20.1 模组，由工坊在首次运行时编译并安装到开发端的 `run/mods`。它只监听回环地址，不对外提供访问。Fabric、NeoForge、Architectury 和其他版本不支持探针，工坊会自动跳过安装，验证以编译、运行日志和 GameTest 为准。
+
+场景卡片示例：
+
+```yaml
+name: 星尘矿掉落
+setup:
+  commands:
+    - time set day
+actions:
+  - command: setblock 0 64 0 stardust_tools:stardust_ore
+  - wait: 500
+assert:
+  - block_state:
+      x: 0
+      y: 64
+      z: 0
+      block: stardust_tools:stardust_ore
+  - loot_break:
+      x: 0
+      y: 64
+      z: 0
+      block: stardust_tools:stardust_ore
+      item: stardust_tools:stardust
+      count: 1
+```
+
+`setup.commands` 先执行准备指令，`actions` 按顺序执行操作，`assert` 校验结果。助手也可以直接传步骤数组给 `mcdev_scenario`，不必写文件。第一步失败就会停下，并返回失败步骤、实际值和期望值。
+
+## 编译与运行
+
+侧边栏「编译运行」页和对话页右侧「运行」面板都能操作：
+
+- **编译**：`gradlew build`
+- **开发客户端**：`gradlew runClient`
+- **开发服务端**：`gradlew runServer`
+- **GameTest**：Fabric 用 `gradlew runGametest`，Forge / NeoForge 用 `gradlew runGameTestServer`
+- **启动双端（Forge 1.20.1）**：先服务端就绪，再客户端启动并自动连接
+
+任务日志逐行实时显示，可以停止编译、清空日志、打开 `build/libs`。关闭工坊会结束由工坊启动的开发端进程。Fabric / NeoForge / Architectury 不做探针注入，运行面板会提示以编译结果和日志为准。
+
+优先使用工程自带的 `gradlew` / `gradlew.bat`。Windows 上路径带空格时，宿主用 `cmd /d /s /c` 包住完整命令行，不会把目录名当成命令。Gradle 子进程固定注入 Java 17 的 `JAVA_HOME`，并默认使用 Windows 根证书库（`-Djavax.net.ssl.trustStoreType=Windows-ROOT`），避免本机加速器或杀毒软件的 HTTPS 拦截导致 `PKIX path building failed`。
+
+首次编译仍要下载 Minecraft、当前加载器和构建插件，速度取决于网络和源站；工坊不会伪造构建结果。
 
 ## 知识库
 
 侧边栏「知识库」用来放做模组时要参考的资料：开发规范、版本笔记、API 文档、以前的踩坑记录都可以导入。
 
 - **支持格式**：`txt` / `md` / `docx` / `pdf` / `jar`，以及 `json`、`yaml`、`toml`、`properties`、`gradle`、`java`、`kt`、`py`、`html`、`xml`、`csv` 等文本文件。
-- **模组 JAR**：导入 `.jar` 后会提取模组元数据、`lang` 语言文件、资源 JSON、包内 `.java` 源码和类结构，并在本机有 JDK 17+ 时调用内置的 Vineflower 1.12.0 反编译出 Java 源码。反编译结果按类拼接进同一份资料，助手可以直接检索方法体。
-- **JAR 速览**：每份 JAR 资料开头先写模组 ID、入口类、重点类和中文字符串提示，再按包列出完整类索引；末尾才是反编译源码。助手打开资料先拿到一张地图，不会只看到一堆方法体。
-- **中文检索**：提问里的「附身 / 皮肤 / 渲染 / 网络」等词会额外映射到 `Possession / Skin / Render / Packet` 等英文标识符；检索按整份源码文件返回，同一文件的多处命中会合并，并按类名、文件名和关键词出现次数排序，关键词没命中时还会自动把速览和类索引交给助手。
-- **旧资料**：0.3.3 之前导入的 JAR 没有速览和中文提示，程序会从旧的类结构里补一份类索引；想要完整反编译源码和新版提示，在知识库页对同一个 JAR 重新导入即可覆盖旧记录。
-- **JAR 限制**：Fabric 模组里常见 `class_1234` / `method_5678`，这是 intermediary 名称，不是反编译失败；需要可读名称时对照工程当前的 Yarn / Mojmap 映射，或再导入对应的 `-sources.jar`。反编译属于机器还原，变量名和部分控制流可能与作者原稿不同。
-- **JAR 上限**：最多展开 5000 个类和 2000 个文本条目，反编译源码最多 3000 万字符；单份资料上限 3000 万字符，正常模组不会被切掉后半段。旧版本导入的资料被截断时，读取会提示重新导入。
-- **反编译到工程**：选中 JAR 后点「反编译到工程」，会同时展开主 JAR 和它自己的 `META-INF/jars/*.jar` 内嵌模块（依赖库会跳过），默认写到 `reference/decompiled/<JAR 名>/`，按原包路径保存并生成 `INDEX.md`。这个目录不在 `src/main/java` 下，不参与编译，只作为迁移参考；目标已有 `.java` 时会先确认覆盖。助手在对话里也可以调用 `decompile_jar` 完成同样的事。
-- **导入范围**：默认所有工程共用；勾选「导入到当前工程」后只有当前工程能检索到。重复导入同一个文件会更新原条目。
-- **自动检索**：每轮对话前，助手会按用户这句话从知识库里挑最相关的片段放进系统提示，不需要手动复制粘贴。
-- **按需深挖**：资料不够时，助手会调用 `search_knowledge` 再搜，或用 `read_knowledge` 读整份文件。检索现在直接返回完整的 `## 源码：路径` 条目，不再只给 1200 字符的代码片段；读 JAR 源码时用 `read_knowledge` 的 `file` 参数（例如 `file="Hypnosis.java"`）一次拿整个 `.java`，单文件十几万字符也不截断。类结构摘要最多列 300 个方法，摘要里的「…还有 N 个」只是摘要截断，不代表源码缺失。
-- **管理**：列表可以搜索文件名、来源和正文；选中后看提取出的正文；删除只清知识库里的副本，不动原始文件。
-- **限制**：扫描版 PDF 没有文字层，提取不到内容；加密 PDF、旧版 `.doc` 也不支持，先转成 `.docx` 或带文字层的 PDF。
+- **模组 JAR**：导入后提取模组元数据、`lang` 语言文件、资源 JSON、包内 `.java` 源码和类结构；本机有 JDK 17+ 时调用内置 Vineflower 反编译。
+- **JAR 速览**：开头先写模组 ID、入口类、重点类和中文字符串提示，再按包列出完整类索引，末尾才是反编译源码。
+- **中文检索**：提问里的「附身 / 皮肤 / 渲染 / 网络」等词会映射到 `Possession / Skin / Render / Packet` 等英文标识符；检索按整份源码文件返回。
+- **JAR 限制**：Fabric 模组里常见 `class_1234` / `method_5678`，这是 intermediary 名称，不是反编译失败；需要可读名称时对照映射表。
+- **JAR 上限**：最多展开 5000 个类和 2000 个文本条目，反编译源码最多 3000 万字符。
+- **反编译到工程**：选中 JAR 后点「反编译到工程」，默认写到 `reference/decompiled/<JAR 名>/`，按原包路径保存并生成 `INDEX.md`。
+- **导入范围**：默认所有工程共用；勾选「导入到当前工程」后只有当前工程能检索到。
+- **管理**：列表可以搜索文件名、来源和正文；删除只清知识库里的副本，不动原始文件。
+- **限制**：扫描版 PDF 没有文字层，提取不到内容；加密 PDF、旧版 `.doc` 也不支持。
 
 导入的正文和分片存在 `data/knowledge.db`，原始文件仍留在你原来的位置。
 
@@ -85,95 +126,20 @@ Windows 上也可以双击 `main.py`（需要已安装 Python 与依赖）。
 - **OpenAI 兼容接口**：填写 Base URL、模型、API Key。
 - **本地 Ollama**：默认 `http://127.0.0.1:11434/v1`，例如 `qwen2.5-coder:7b`。
 
-API Key 只保存在本机 `data/config.json`，不会上传到本项目服务器。建议使用最低权限的 Key。
+API Key 只保存在本机 `data/config.json`，不会上传。
 
 ## 环境自检
 
 侧边栏「环境」页首次打开会自动检测：
 
-- Java 是否在 PATH / JAVA_HOME / 常见安装目录中，版本是否为 17 或 21；同时装了多个 JDK 时会优先选 21。
-- JAVA_HOME 是否指向 JDK 根目录。
-- 当前工程是否有可用的 Gradle Wrapper，系统是否安装 Gradle。
+- Java 是否在 PATH / JAVA_HOME / 常见安装目录中，版本是否为 17 或更高；同时装了多个 JDK 时优先 17。
+- 当前工程是否有可用的 Gradle Wrapper。
 - Git 是否可用（可选）。
 - 工程目录、数据目录是否可写。
-- Modrinth、Fabric Meta、GitHub API 是否连通。
+- Modrinth、GitHub API 是否连通。
 - 当前模型通道是否缺少 API Key。
 
-检测结果按「通过 / 注意 / 缺失 / 提示」分级，并给出下载页或修复命令。安装 JDK 或修改环境变量后点「重新检测」即可。
-
-环境页右上角的「一键准备」会把缺的东西直接装好：
-
-- **JDK**：扫描 JAVA_HOME、PATH、注册表和常见目录（`C:\Program Files\Java`、`D:\developer\Java`、`~/.jdks`、`~/.gradle/jdks` 等），优先选 Java 21；本机一个 17–25 的 JDK 都没有时，从中科大 Adoptium 镜像下载 Temurin 21，镜像不可用时退回华为云 OpenJDK 和 Adoptium 官方，校验 SHA-256 后解压到 `data/tools/jdk-*`，不写系统环境变量。
-- **Wrapper**：只补缺失的 `gradlew` / `gradlew.bat` / `gradle-wrapper.jar` / `gradle-wrapper.properties`，不覆盖工程里已有的 Gradle 版本。
-- **Gradle**：读取工程 Wrapper 里配置的版本，先看 `~/.gradle/wrapper/dists` 是否已安装；缺了就从华为云镜像、腾讯云镜像或 Gradle 官方下载，校验 SHA-256 后直接解压进 Wrapper 缓存。这样第一次编译不用再等 Wrapper 自己慢慢下 150 MB。
-
-JDK 和 Gradle 发行包这类大文件（≥ 8 MB）默认开 6 条连接分段下载，断线后从已下载的部分继续，合并后再校验一遍大小和 SHA-256。
-
-下载和安装进度会显示在「一键准备」下面的日志框里。执行 Gradle 和启动游戏仍在「编译运行」页。
-
-## 编译与运行
-
-侧边栏「编译运行」页直接对当前工程执行 Gradle：
-
-- **编译**：`gradlew build`，产物在 `build/libs`。
-- **开发客户端**：`gradlew runClient`，自动带上当前模组，游戏目录是工程下的 `run/`。
-- **开发服务端**：`gradlew runServer`。
-- **数据生成**：`gradlew runDatagen`。
-
-点任何一个任务按钮，工坊会先自动跑一遍「一键准备」：挑 JDK、补 Wrapper、装 Gradle，然后再执行任务。环境刚准备过（120 秒内、同一个工程）会直接启动，不重复扫描。准备过程写在运行日志里，和 Gradle 输出连在一起。
-
-优先使用工程自带的 `gradlew` / `gradlew.bat`，没有则回退到系统 PATH 里的 `gradle`。构建会把选中的 JDK 放进 `JAVA_HOME` 和 `PATH`，并用 `GRADLE_OPTS` 把 HTTP 超时放宽到 60 秒。程序装在带空格的目录（例如 `D:\Darkitten Launcher\...`）时也能正常启动 Wrapper，运行日志里显示的是实际执行的完整命令。依赖下载遇到 `Connection reset` / `Read timed out` / `Could not download` 时，会自动重试最多两次，已经下完的依赖会保留。
-
-日志逐行实时显示，可以停止任务、复制日志贴回对话页，或直接打开 `build/libs`。关闭工坊会结束正在运行的 Gradle 任务。首次运行仍要下载 Minecraft 和 Fabric / NeoForge 依赖，这部分速度取决于你的网络和源站；Fabric 的 `maven.fabricmc.net` 目前没有可用的国内镜像，工坊无法替它加速。
-
-页面底部有三个补配置的按钮：
-
-- **一键准备**：只装环境、不跑任务；适合第一次打开工程或换机器时先确认 JDK / Gradle 都就绪。
-- **让助手补全配置**：工程里没有 `build.gradle` / `settings.gradle` 时，自动切到对话页并发出构建脚本请求，按工程记录的 MC 版本、加载器和 mod id 生成这三个文件（`gradle.properties` 一并给出），加载器分别用 Fabric Loom、NeoGradle / ModDevGradle 或 Architectury 多模块写法。
-- **生成 Wrapper**：把内置的 Gradle 9.8.2 Wrapper 文件（`gradlew`、`gradlew.bat`、`gradle-wrapper.jar`、`gradle-wrapper.properties`）写进工程，本机不装 Gradle 也能编译；一键准备会预下载发行包，避免首次编译卡在下载。已有 Wrapper 时会先问是否覆盖。
-
-版本匹配：Fabric 的 `fabric-loom` 1.19.x 要求 Gradle 9.8.0 及以上，所以内置 Wrapper 用 9.8.2。工程里已有更旧的 Wrapper 时，编译会报 `requires at least Gradle X` / `Minimum supported Gradle version is X`；只要 X 不高于 9.8.2，工坊会自动把 Wrapper 重写成 9.8.2、装好对应发行包并重试一次。X 更高时才会提示你去降插件或手动升级。
-
-`assets/wrapper/` 里的 Wrapper 文件来自 [gradle/gradle v9.8.2](https://github.com/gradle/gradle/tree/v9.8.2)，遵循 Apache-2.0，出处与许可见该目录下的 `NOTICE.txt`。
-
-`assets/decompiler/vineflower.jar` 来自 [Vineflower 1.12.0](https://github.com/Vineflower/vineflower/releases/tag/1.12.0)，遵循 Apache-2.0；许可证与出处见同目录的 `LICENSE.txt`、`NOTICE.txt`。反编译只在本机运行，不会把 JAR 或生成的源码上传到任何服务器。
-
-### 证书与代理
-
-第一次用 Wrapper 时会下载 Gradle 发行包。如果日志里出现 `PKIX path building failed` / `unable to find valid certification path`，说明本机有程序在拦截 HTTPS：常见于 Watt Toolkit（SteamTools）的 GitHub 加速、公司代理，以及带 HTTPS 扫描的杀毒软件。它们会用自己的根证书重签流量，JDK 自带证书库不认，而 Windows 证书库里通常已经装了这张根证书。
-
-工坊的处理方式：
-
-- 检测到上述错误时，自动勾选「使用 Windows 证书库」并重试一次，通过 `JAVA_OPTS=-Djavax.net.ssl.trustStoreType=Windows-ROOT` 让 JVM 改用系统证书库。
-- 这个开关也可以在编译运行页手动勾选，设置会保存到 `config.json` 的 `gradle_windows_certs`，之后所有 Gradle 任务都生效。
-- 仍然失败时，先关掉加速器的 GitHub 加速，或把它的根证书导入 JDK 的 `lib/security/cacerts`。急着编译也可以手动下载对应 Gradle 发行包，解压后把 `bin` 目录临时加入 PATH，让工坊走系统 Gradle。
-
-### NeoForge 依赖镜像
-
-NeoForge 的 ModDevGradle 会从 `maven.neoforged.net` 拉 `neoform-runtime` 和一批构建工具。这个域名在国内经常出现 502、连接被拒或 DNS 污染，表现为编译到 `:createMinecraftArtifacts` 时失败。
-
-工坊的处理方式：
-
-- 启动编译前先探测 `maven.neoforged.net`；连不上时不打扰你，直接在本机 `127.0.0.1` 起一个 Maven 代理，用 Gradle init script 把 `maven.neoforged.net` 的仓库地址换到代理。
-- 代理并发尝试 bmclapi、南邮、Gradle 插件门户、Stellar、明坤等镜像，谁先返回可用数据就用谁，不用再逐个等超时；文件缓存在 `data/mirrors/repo/`，下次编译直接命中。
-- `net.neoforged:minecraft-dependencies` 在镜像上不存在，按 Mojang 的版本清单现场生成；`neoform-runtime` 的 `-all.jar` 用内置的 282KB 主 jar 合并依赖得到，不需要下载完整的合并包。
-- `neoform-runtime` 运行时依赖 `fabric-loom-native`，这个工件在所有公开镜像上都取不到。程序内置一个只实现 `LoomNativePlatform` 三个静态方法的空壳 jar，合并进 `-all.jar`；它只在 NeoFormRuntime 排查文件锁时被调用，不加载本地库。
-- 源的速度会按实测结果动态排序，连续失败的源短暂降权，恢复后自动放回；同一个文件换源时保留已下载的部分继续传。
-- 临时超时返回 503 让 Gradle 重试，只有确认 404 才会记成“不存在”。
-- 编译失败且日志里出现 `502 Bad Gateway`、`Connection refused`、`PKIX path building failed` 等关键字时，会自动启用代理并重试一次。
-
-代理只监听本机回环地址，不对外提供访问；缓存的都是公开的 Maven 构件。
-
-### 下载与更新加速
-
-- **大文件分段**：JDK、Gradle 发行包和更新包不小于 8 MB 时，自动拆成多段用 6 条连接并行下载；断线按 `.part` 续传，合并后校验大小和 SHA-256。
-- **自动更新**：GitHub Release 的 ZIP 先走 `gh-proxy.com` 加速，失败再回退直连；下载完仍然逐字节校验 SHA-256，校验失败会删掉重来。
-- **Mojang 元数据**：版本清单、版本 JSON 和 `libraries.minecraft.net` 依赖都会在 piston-meta / Mojang 直连失败时改走 BMCLAPI，构建不会卡在元数据阶段。
-- **JDK / Gradle 镜像**：JDK 依次尝试中科大 Adoptium、华为云 OpenJDK、Adoptium 官方；Gradle 使用华为云和腾讯云镜像，都失败才回官方地址。
-
-## 工具轮数
-
-设置页的「工具轮数上限」默认 32，可调到 999；填 0 表示不限制。大型工程可以调高，但轮数越多，模型调用次数、耗时和费用也越高。运行中随时可以点「停止」。
+检测结果按「通过 / 注意 / 缺失 / 提示」分级，并给出修复建议。
 
 ## 数据与安全
 
@@ -182,14 +148,15 @@ NeoForge 的 ModDevGradle 会从 `maven.neoforged.net` 拉 `neoform-runtime` 和
 ```
 data/
   config.json        模型与界面设置
-  memory.db          长期记忆（助手自动记录工程决策）
-  knowledge.db       知识库（导入文件的正文与分片）
+  memory.db          长期记忆
+  knowledge.db       知识库
   connectors.json    连接器与请求头
   skills/            技能 Markdown
-  projects/          默认工程目录（新建工程放在这里）
+  projects/          默认工程目录
   projects.json      最近工程
   sessions/          每个工程的对话记录
   backups/           覆盖文件前的自动备份
+  cache/             探针 JAR 等缓存
   trash/             回收站不可用时的备用删除目录
   updates/           更新包与更新日志
 ```
@@ -204,9 +171,10 @@ data/
 删除工程：
 
 - 必须二次确认，确认框里会显示完整目录；默认按钮是「取消」。
-- Windows 上走系统回收站（`SHFileOperation` + `FOF_ALLOWUNDO`），可以从回收站还原；回收站不可用时会移到 `data/trash/`，不会直接永久删除。
+- Windows 上走系统回收站，可以从回收站还原；回收站不可用时会移到 `data/trash/`，不会直接永久删除。
 - 磁盘根目录、用户主目录、程序目录、数据目录以及包含这些目录的上级目录会被拒绝删除。
-- 有助手生成任务或 Gradle 任务在运行时不能删除，需要先停止。
+
+探针只监听 `127.0.0.1`，不向任何服务器上传工程、日志或截图。
 
 ## 开发与测试
 
@@ -233,14 +201,23 @@ python build.py
 产物：
 
 - `dist/DarkittenModAgent/`：PyInstaller onedir 目录，包含 `DarkittenModAgent.exe` 和 `_internal/`。
-- `dist/DarkittenModAgent-<版本>.zip`：上传到下载站/GitHub Release 的更新包。
+- `dist/DarkittenModAgent-<版本>.zip`：上传到下载站 / GitHub Release 的更新包。
 - `dist/mod_agent_release.json`：更新清单，包含版本、大小、SHA-256 与更新说明。
 
-发布时把 ZIP 上传到 GitHub Release（标签 `mod-agent-v<版本>`），把清单放到站点根目录；清单里的 `download_url` 指向 Release 资源，启动器读取同一份清单即可下载和自动更新。
+发布时把 ZIP 上传到 GitHub Release（标签 `mod-agent-v<版本>`），把清单放到站点根目录；清单里的 `download_url` 指向 Release 资源。
 
 ## 边界
 
-- 「编译运行」页可以代跑 Gradle 和开发客户端，但不能判断游戏内表现；编译成功也不等于功能正常。
+- 探针能读游戏内状态和截图，但只支持 Forge 1.20.1；其他加载器没有游戏内断言，只能以编译结果、运行日志和 GameTest 为准。
+- 探针也不能代替人工判断美术、手感、平衡性。
+- 编译成功不等于游戏内正常；没有场景断言或 GameTest 结果时，助手必须明确写「仅编译通过」。
+- 内置骨架只覆盖 1.20.1 的 Forge / Fabric / NeoForge；Architectury 和其他版本由助手生成，必须用一次真实编译验证依赖和映射版本。
 - Gradle 构建脚本会执行本机代码，只在自己信任的工程里运行。
 - Mixin、自定义网络包、方块实体、世界生成等高风险改动会标注【⚠️人工复核】。
-- 首次使用建议先在测试工程里验证，再合并到正式工程。
+- 《我的世界》EULA 与 Mojang 映射许可仍然适用；工坊不打包游戏本体，也不分发模型或资源文件的原始素材。
+
+## 第三方许可
+
+本项目的探针、进程管理、场景卡片和游戏验证流程参考 [yan-mc/minecraft-mod-dev](https://github.com/yan-mc/minecraft-mod-dev)，遵循 MIT License，Copyright (c) 2026 yan-mc。许可证全文见 `LICENSE-minecraft-mod-dev.txt`，第三方组件与许可见 `THIRD_PARTY_NOTICES.txt`。
+
+`assets/decompiler/vineflower.jar` 来自 Vineflower 1.12.0，遵循 Apache-2.0；`assets/wrapper/` 内的 Wrapper 文件来自 gradle/gradle，遵循 Apache-2.0，各自目录下附有出处与许可说明。反编译只在本机运行，不会把 JAR 或生成的源码上传。

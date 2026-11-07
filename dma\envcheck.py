@@ -63,10 +63,10 @@ def java_major(version: str) -> int:
 
 
 def java_rank(major: int) -> int:
-    """给已安装的 JDK 排优先级：模组构建最想要 21，其次 17，再往后是其他 17–24。"""
-    if major == 21:
-        return 0
+    """给已安装的 JDK 排优先级：Forge 1.20.1 最想要 17，其次 21，再往后是其他 17–24。"""
     if major == 17:
+        return 0
+    if major == 21:
         return 1
     if 18 <= major <= 24:
         return 2

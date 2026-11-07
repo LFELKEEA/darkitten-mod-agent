@@ -8,23 +8,17 @@ import threading
 import zlib
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from PySide6.QtCore import QObject, Signal
 
 from . import (
     ai,
-    builder,
     connectors,
-    deps,
-    porting,
+    mcdev,
     project as project_mod,
     research,
-    toolchain,
-    wrapper,
 )
-from . import spec as spec_mod
-from . import workflow
 from .config import Config
 from .knowledge import (
     KnowledgeStore,
@@ -73,20 +67,6 @@ BUILD_TRIGGER_EXTS = {
     ".toml", ".xml", ".mcmeta", ".lang", ".yml", ".yaml", ".glsl", ".fsh",
     ".vsh", ".cfg", ".conf",
 }
-
-
-def _project_has_sources(root: Path) -> bool:
-    """已有 build.gradle 或 Java 源码的工程按“存量工程”处理，不强制先做规格。"""
-    base = Path(root)
-    if any((base / name).is_file() for name in ("build.gradle", "build.gradle.kts")):
-        return True
-    source = base / "src"
-    if source.is_dir():
-        try:
-            return any(source.rglob("*.java"))
-        except OSError:
-            return False
-    return False
 
 
 def _needs_build(paths: list[str]) -> bool:
@@ -307,11 +287,7 @@ INTENT_MARKER_RE = re.compile(
 
 
 def _looks_like_action_intent(text: str) -> bool:
-    """识别“我先读 / 让我看看 / 接下来检查”这类只写计划、没有工具调用的回复。
-
-    只看最后一段，不再限制整条回复的长度：模型经常先列三五个问题，
-    最后用一句“先读二个文件”收尾，然后整轮就停住了。
-    """
+    """识别“我先读 / 让我看看 / 接下来检查”这类只写计划、没有工具调用的回复。"""
     body = (text or "").strip()
     if not body:
         return False
@@ -351,11 +327,7 @@ def _history_window(history: list[dict[str, str]], turns: int) -> list[dict[str,
 
 
 def _compact_messages(messages: list[dict[str, Any]]) -> None:
-    """把本轮较早的大块工具结果折叠掉，保留最近几轮完整内容。
-
-    单次工具结果可以有 20 万字符，多轮读写堆起来会超过模型上下文。
-    这里只压缩旧的工具结果，不动系统提示和最近的对话。
-    """
+    """把本轮较早的大块工具结果折叠掉，保留最近几轮完整内容。"""
     total = sum(len(str(item.get("content") or "")) for item in messages)
     if total <= MESSAGE_CHAR_BUDGET:
         return
@@ -443,11 +415,7 @@ def _valid_loose_value(value: str) -> bool:
 
 
 def _loose_json_object(raw: str) -> dict[str, Any] | None:
-    """解析模型写坏了的 JSON：字符串值里的双引号没有转义。
-
-    edit_file 的 old / new 直接放 Java 代码时很常见，标准 json.loads 会失败。
-    这里按顶层 `"key":` 切成字段，值里的引号和换行原样保留。
-    """
+    """解析模型写坏了的 JSON：字符串值里的双引号没有转义。"""
     text = (raw or "").strip()
     if not (text.startswith("{") and text.endswith("}")):
         return None
@@ -591,8 +559,6 @@ class AgentWorker(QObject):
     status = Signal(str)
     assistant = Signal(str)
     pending_changed = Signal(object)
-    spec_changed = Signal(object)
-    workflow_changed = Signal(object)
     artifact_changed = Signal(object)
     project_created = Signal(str)
     done = Signal(str)
@@ -610,14 +576,12 @@ class AgentWorker(QObject):
         memory: MemoryStore,
         connector_store: connectors.ConnectorStore,
         knowledge: KnowledgeStore | None = None,
-        stage: str = "",
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
         self.user_text = user_text
         self.history = [dict(item) for item in history]
         self.project = project
-        self.stage = stage
         self.config = config
         self.skill_store = skill_store
         self.memory = memory
@@ -625,7 +589,8 @@ class AgentWorker(QObject):
         self.connector_store = connector_store
         self.pending: list[PendingFile] = []
         self.applied: list[str] = []
-        self._plan_submitted = False
+        self.mcdev = mcdev.shared()
+        self.mcdev.set_log(self._probe_log)
         self._cancel = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -661,30 +626,15 @@ class AgentWorker(QObject):
         finally:
             self.finished.emit()
 
+    # ------------------------------------------------------------------
+    def _probe_log(self, text: str) -> None:
+        line = (text or "").strip()
+        if line:
+            self.status.emit(line[-200:])
+
     def _loop(self) -> AgentRun:
         project = self.project
         project_key = str(project.root) if project is not None else ""
-        current_spec = spec_mod.load_spec(project.root) if project is not None else None
-        state = workflow.load_state(project.root, current_spec) if project is not None else None
-        if self.stage:
-            if state is None:
-                state = workflow.WorkflowState(stage=self.stage)
-            else:
-                state.stage = self.stage if self.stage in workflow.STAGES else state.stage
-        elif current_spec is not None or (state is not None and state.stage != "draft"):
-            self.stage = state.stage if state is not None else "review"
-        elif project is not None and _project_has_sources(project.root):
-            # 老工程没有规格文件时不要卡在规划阶段，直接按增量修改处理。
-            self.stage = "done"
-            if state is not None:
-                state.stage = "done"
-        else:
-            self.stage = "planning"
-            if state is not None:
-                state.stage = "planning"
-        if project is not None:
-            # 每次开工都从磁盘取，避免上一条消息里的规格已经被改过。
-            workflow.save_state(project.root, state)
         memory_items = []
         if project is not None:
             memory_items = self.memory.recall(project_key, self.user_text, limit=6)
@@ -706,9 +656,6 @@ class AgentWorker(QObject):
             max_steps=self.config.max_steps,
             knowledge_text=knowledge_context(knowledge_hits),
             query=self.user_text,
-            spec=current_spec,
-            workflow=state,
-            stage=self.stage,
         )
         messages: list[dict[str, Any]] = [{"role": "system", "content": system}]
         messages.extend(_history_window(self.history, self.config.context_turns))
@@ -723,7 +670,6 @@ class AgentWorker(QObject):
         applied_mark = 0
         pending_fix = False
         last_build_report = ""
-        plan_submitted = False
 
         while True:
             if limit > 0 and step >= limit:
@@ -746,7 +692,6 @@ class AgentWorker(QObject):
             if not calls:
                 if broken_tool_retries < 2 and _looks_like_tool_attempt(reply):
                     # 模型偶尔会漏掉 > 或闭合标签，任务会看起来“突然结束”。
-                    # 不发出去当最终答复，让它按完整格式重写一次。
                     broken_tool_retries += 1
                     self.status.emit("工具调用格式不完整，正在重试…")
                     messages.append({"role": "assistant", "content": reply})
@@ -763,7 +708,6 @@ class AgentWorker(QObject):
                     continue
                 if intent_retries < 2 and _looks_like_action_intent(visible or reply):
                     # 有些模型只回一句“我先读 xxx”，不发工具调用，循环会把它当最终答复。
-                    # 这里要求它把计划变成实际调用，最多催两次，避免死循环。
                     intent_retries += 1
                     self.status.emit("模型只描述了计划，正在要求它直接执行…")
                     messages.append({"role": "assistant", "content": reply})
@@ -845,14 +789,6 @@ class AgentWorker(QObject):
                 }
             )
             _compact_messages(messages)
-            plan_submitted = self._plan_submitted
-            if plan_submitted:
-                # 规划提交后必须停下来等用户确认，不能顺势开始写代码。
-                run.text = (
-                    visible.strip()
-                    or "规格已生成。请检查右侧说明书，确认后才会开始施工。"
-                )
-                return run
 
         final_text = final_text or "已达到工具调用轮数上限。请继续发送消息，让我接着完成剩余部分。"
         run.text = final_text
@@ -886,34 +822,6 @@ class AgentWorker(QObject):
         run.pending = list(self.pending)
         return True
 
-    def _known_jar_dirs(self) -> list[Path]:
-        """知识库里导入过的 JAR 所在目录，找 libs/ 依赖时优先看这些地方。"""
-        if self.knowledge is None:
-            return []
-        try:
-            documents = self.knowledge.list_documents(limit=500)
-        except Exception:  # noqa: BLE001 - 读不到知识库不影响构建
-            return []
-        dirs: list[Path] = []
-        seen: set[str] = set()
-        for item in documents:
-            source = str(item.get("source") or "").strip()
-            if not source:
-                continue
-            path = Path(source)
-            try:
-                if not path.is_file():
-                    continue
-                folder = path.parent
-                key = str(folder.resolve()).lower()
-            except OSError:
-                continue
-            if key in seen:
-                continue
-            seen.add(key)
-            dirs.append(folder)
-        return dirs
-
     def _build_log(self, text: str) -> None:
         line = (text or "").strip()
         if line:
@@ -932,76 +840,136 @@ class AgentWorker(QObject):
     def _auto_build(self) -> tuple[bool, str]:
         self.status.emit("文件已写入，正在自动编译…")
         try:
-            result = builder.build_project(
-                self.project.root,
-                "build",
-                extra_jar_dirs=self._known_jar_dirs(),
-                log=self._build_log,
-                timeout=900,
-                cancel=self._cancel,
-            )
-        except builder.BuilderError as exc:
-            return False, f"自动编译没有开始：{exc}"
+            result = _run_gradle(self.project.root, "build", 900, self._cancel, self._build_log)
         except Exception as exc:  # noqa: BLE001 - 自动编译失败不应吞掉本轮结果
-            return False, f"自动编译出错：{exc}"
+            return False, f"自动编译没有开始：{exc}"
         report = _build_report(result)
         if result.ok:
-            report += self._finalize_artifact()
-        else:
-            self._record_build_failure()
+            self._emit_artifact(result)
         return result.ok, report
 
-    def _finalize_artifact(self) -> str:
-        """编译成功后读取真实 JAR，生成成品说明书并刷新右侧面板。"""
-        if self.project is None:
-            return ""
+    def _emit_artifact(self, result: "BuildOutcome") -> None:
+        jars = [{"name": name, "size": size} for name, size in result.jars]
+        libs = self.project.root / "build" / "libs" if self.project else None
+        for item in jars:
+            item["path"] = str(libs / item["name"]) if libs else ""
+        payload = {
+            "jar": jars[0]["name"] if jars else "",
+            "jars": jars,
+            "ok": result.ok,
+            "summary": (
+                f"编译通过，{len(jars)} 个产物" if result.ok else "编译失败"
+            ),
+        }
+        self.artifact_changed.emit(payload)
+
+    # ------------------------------------------------------------------
+    def _scaffold(self, args: dict[str, Any]) -> str:
+        mod_name = str(args.get("name") or args.get("mod_name") or "").strip()
+        mod_id = str(args.get("mod_id") or "").strip()
+        if not mod_id:
+            mod_id = re.sub(r"[^a-z0-9_]", "_", (mod_name or "").lower()).strip("_")
+        if not mod_id:
+            return "scaffold_project 需要 mod_id 或 name。"
         try:
-            current = spec_mod.load_spec(self.project.root)
-            state, inventory, _manual = workflow.finalize_build(
-                self.project.root, True, current
-            )
-        except Exception as exc:  # noqa: BLE001 - 说明书失败不影响编译结果
-            return f"\n\n成品说明书生成失败：{exc}"
-        self.stage = state.stage
-        self.spec_changed.emit(current)
-        self.workflow_changed.emit(state)
-        self.artifact_changed.emit(
-            {
-                "jar": inventory.jar,
-                "summary": inventory.summary(),
-                "inventory": inventory.to_dict(),
-                "manual": "MANUAL.md",
-            }
-        )
-        self.status.emit("已读取最终 JAR，生成成品说明书")
-        if inventory.jar:
+            mod_id = project_mod.validate_mod_id(mod_id)
+        except project_mod.ProjectError as exc:
+            return f"Mod ID 不合法：{exc}"
+        mod_name = mod_name or mod_id
+        package = str(args.get("package") or "").strip()
+        loader = str(
+            args.get("loader")
+            or (getattr(self.project.meta, "loader", "") if self.project else "")
+            or "Forge"
+        ).strip()
+        canonical = {
+            "forge": "Forge",
+            "fabric": "Fabric",
+            "neoforge": "NeoForge",
+            "neo": "NeoForge",
+            "architectury": "Architectury",
+        }
+        loader = canonical.get(loader.lower(), loader)
+        mc_version = str(
+            args.get("mc_version")
+            or (getattr(self.project.meta, "mc_version", "") if self.project else "")
+            or mcdev.templates.MC_VERSION
+        ).strip()
+        forge_version = str(
+            args.get("forge_version") or mcdev.templates.FORGE_VERSION
+        ).strip()
+        mod_version = str(args.get("version") or "1.0.0").strip()
+        overwrite = bool(args.get("overwrite"))
+
+        raw_dest = str(args.get("dest") or args.get("path") or "").strip()
+        if raw_dest:
+            target = Path(raw_dest).expanduser()
+        elif self.project is not None:
+            target = self.project.root
+        else:
+            base = Path(self.config.project_root or Path.home()).expanduser()
+            target = base / mod_id
+        exists = (target / "build.gradle").is_file() or (
+            target / "settings.gradle"
+        ).is_file() or (target / "src").is_dir()
+        if exists and not overwrite:
             return (
-                "\n\n【成品巡检】\n"
-                f"- JAR：{inventory.jar}\n"
-                f"- 注册内容：{inventory.content_count()} 个"
-                f"（物品 {len(inventory.items)} / 方块 {len(inventory.blocks)} / "
-                f"实体 {len(inventory.entities)} / 命令 {len(inventory.commands)}）\n"
-                f"- 配方：{len(inventory.recipes)} 个\n"
-                f"- 纹理：{len(inventory.textures)} 张\n"
-                "已生成 MANUAL.md。"
+                f"{target} 里已经有工程文件。确认要覆盖时请传 overwrite=true，"
+                "或者换一个空目录。"
             )
-        return "\n\n编译通过，但 build/libs 里没有找到可巡检的 jar。"
-
-    def _record_build_failure(self) -> None:
-        if self.project is None:
-            return
         try:
-            current = spec_mod.load_spec(self.project.root)
-            state = workflow.load_state(self.project.root, current)
-            state.last_build_ok = False
-            if current is not None and current.confirmed():
-                state.stage = "building"
-            workflow.save_state(self.project.root, state)
-            self.stage = state.stage
-            self.workflow_changed.emit(state)
-        except Exception:
+            if loader == "Forge":
+                mcdev.templates.create_forge_project(
+                    target,
+                    mod_id=mod_id,
+                    mod_name=mod_name,
+                    package=package,
+                    mc_version=mc_version,
+                    forge_version=forge_version,
+                    mod_version=mod_version,
+                )
+            else:
+                mcdev.templates.create_scaffold(
+                    loader,
+                    target,
+                    mod_id=mod_id,
+                    mod_name=mod_name,
+                    package=package,
+                    mc_version=mc_version,
+                    mod_version=mod_version,
+                )
+            new_project = project_mod.load_project(target)
+        except Exception as exc:  # noqa: BLE001 - 生成失败要直接说明
+            return f"{loader} 工程创建失败：{exc}"
+        new_project.meta.name = mod_name
+        new_project.meta.mod_id = mod_id
+        new_project.meta.mc_version = mc_version
+        new_project.meta.loader = loader
+        new_project.meta.runtime = "双端"
+        try:
+            new_project.save()
+            project_mod.remember_project(new_project)
+        except Exception:  # noqa: BLE001 - 元数据保存失败不影响工程
             pass
+        self.project = new_project
+        self.project_created.emit(str(target))
+        package_name = package or f"com.example.{mod_id}"
+        probe_hint = (
+            "该版本/加载器支持游戏内探针，可以用 mcdev_prepare + mcdev_scenario 做断言验证。"
+            if loader == "Forge" and mc_version == mcdev.templates.MC_VERSION
+            else "该加载器/版本不使用游戏内探针：先 build_project，再用 mcdev_prepare 启动开发端，并查看运行日志 / GameTest。"
+        )
+        return (
+            f"{loader} 工程已创建。\n"
+            f"- 目录：{target}\n"
+            f"- Mod ID：{mod_id}\n"
+            f"- 包名：{package_name}\n"
+            f"- Minecraft：{mc_version} / {loader}\n"
+            f"- 入口类：src/main/java/{package_name.replace('.', '/')}/ModMain.java\n\n"
+            f"下一步：先改代码，再验证。{probe_hint}"
+        )
 
+    # ------------------------------------------------------------------
     def _execute(self, call: ToolCall, run: AgentRun) -> str:
         name = call.name.strip().lower()
         args = call.args
@@ -1016,29 +984,23 @@ class AgentWorker(QObject):
             "github_repo",
             "github_tree",
             "github_file",
-            "port_from_jar",
+            "scaffold_project",
+            "scaffold_forge_project",
+            "forge_scaffold",
+            "mcdev_prepare",
+            "mcdev_stop",
+            "mcdev_launch_status",
+            "mcdev_status",
+            "mcdev_command",
+            "mcdev_ui",
+            "mcdev_click",
+            "mcdev_screenshot",
+            "mcdev_run_dump",
+            "mcdev_use",
+            "mcdev_scenario",
         }
         if self.project is None and name not in allowed_without_project:
             return "当前没有打开工程，无法执行文件操作。请先在界面创建或打开工程。"
-        if (
-            self.stage in {"draft", "planning", "review"}
-            and not (name == "port_from_jar" and self.project is None)
-            and name in {
-            "write_file",
-            "edit_file",
-            "replace_in_file",
-            "apply_patch",
-            "pixel_art",
-            "build_project",
-            "fix_build_setup",
-            "decompile_jar",
-            "port_from_jar",
-            }
-        ):
-            return (
-                "规格还没有确认，现在不能修改工程。请先把完整规格提交给用户，"
-                "等用户点「确认规格并开始施工」后再写代码。"
-            )
         try:
             if name == "list_files":
                 root = self.project.root
@@ -1111,8 +1073,6 @@ class AgentWorker(QObject):
                     data, width, height = _encode_pixel_png(palette, rows)
                 except ValueError as exc:
                     return f"pixel_art 参数错误：{exc}"
-                if self.project is None:
-                    return "当前没有打开工程。"
                 try:
                     target = project_mod.write_bytes(self.project.root, relative, data)
                 except Exception as exc:  # noqa: BLE001 - 路径或写盘失败
@@ -1169,166 +1129,8 @@ class AgentWorker(QObject):
                 state = "已自动写入" if written else "已加入待写入列表"
                 delta = len(updated) - len(current)
                 return f"{state}：{relative}（替换 1 处，{delta:+d} 字符）"
-            if name in {"submit_spec", "submit_plan"}:
-                payload = args.get("spec")
-                if not isinstance(payload, dict):
-                    payload = {
-                        key: value
-                        for key, value in args.items()
-                        if key not in {"tool", "name"}
-                    }
-                existing = spec_mod.load_spec(self.project.root)
-                try:
-                    created = spec_mod.parse_spec(
-                        payload, project=self.project, base=existing
-                    )
-                except (ValueError, TypeError) as exc:
-                    return f"规格格式不正确：{exc}"
-                created.status = "draft"
-                created.revision = (existing.revision + 1) if existing else 1
-                if not created.title:
-                    created.title = self.project.meta.name or self.project.meta.mod_id
-                spec_mod.save_spec(self.project.root, created)
-                state = workflow.load_state(self.project.root, created)
-                state.stage = "review"
-                state.spec_revision = created.revision
-                state.tasks = []
-                state.jar = ""
-                state.manual = ""
-                workflow.save_state(self.project.root, state)
-                self.stage = "review"
-                self._plan_submitted = True
-                self.spec_changed.emit(created)
-                self.workflow_changed.emit(state)
-                passed, total = spec_mod.checklist_score(created)
-                missing = spec_mod.missing_items(created)
-                tail = (
-                    "\n缺少：" + "、".join(missing)
-                    if missing
-                    else "\n10 项需求已全部覆盖。"
-                )
-                return (
-                    f"规格已保存（第 {created.revision} 版），需求 {passed}/{total}。"
-                    f"{tail}\n用户确认后才会开始施工。"
-                )
-            if name == "update_spec":
-                payload = args.get("spec")
-                if not isinstance(payload, dict):
-                    payload = {
-                        key: value
-                        for key, value in args.items()
-                        if key not in {"tool", "name"}
-                    }
-                existing = spec_mod.load_spec(self.project.root)
-                if existing is None:
-                    return "还没有规格，请先用 submit_spec 提交完整规格。"
-                try:
-                    updated = spec_mod.apply_patch(
-                        existing, payload, project=self.project
-                    )
-                except (ValueError, TypeError) as exc:
-                    return f"规格格式不正确：{exc}"
-                changes = spec_mod.diff_spec(existing, updated)
-                if existing.confirmed():
-                    updated.status = "confirmed"
-                    state = workflow.load_state(self.project.root, updated)
-                    state.stage = "building"
-                    state.spec_revision = updated.revision
-                    if not state.tasks:
-                        state.tasks = workflow.plan_tasks(updated)
-                    self.stage = "building"
-                else:
-                    updated.status = "draft"
-                    state = workflow.load_state(self.project.root, updated)
-                    state.stage = "review"
-                    state.spec_revision = updated.revision
-                    self.stage = "review"
-                    self._plan_submitted = True
-                spec_mod.save_spec(self.project.root, updated)
-                workflow.save_state(self.project.root, state)
-                self.spec_changed.emit(updated)
-                self.workflow_changed.emit(state)
-                passed, total = spec_mod.checklist_score(updated)
-                return (
-                    f"规格已更新到第 {updated.revision} 版，需求 {passed}/{total}。\n"
-                    + "\n".join(f"- {line}" for line in changes)
-                    + (
-                        "\n用户确认后开始施工。"
-                        if updated.status == "draft"
-                        else "\n已保留现有工程，按新规格继续施工。"
-                    )
-                )
-            if name in {"complete_task", "finish_task"}:
-                task_id = str(
-                    args.get("id") or args.get("task") or args.get("task_id") or ""
-                ).strip()
-                if not task_id:
-                    return "complete_task 缺少 id。"
-                state = workflow.load_state(
-                    self.project.root, spec_mod.load_spec(self.project.root)
-                )
-                known = {item.get("id") for item in state.tasks}
-                if task_id not in known:
-                    return (
-                        f"任务清单里没有 {task_id}。可用："
-                        + "、".join(sorted(str(item) for item in known))
-                    )
-                workflow.complete_task(self.project.root, state, task_id)
-                self.workflow_changed.emit(state)
-                done, total = state.task_counts()
-                remaining = [
-                    item.get("id")
-                    for item in state.tasks
-                    if item.get("status") != "done"
-                ]
-                nxt = ("；下一项：" + remaining[0]) if remaining else "；全部完成"
-                return f"任务 {task_id} 已完成，进度 {done}/{total}{nxt}。"
-            if name in {"start_task", "begin_task"}:
-                task_id = str(args.get("id") or args.get("task") or "").strip()
-                if not task_id:
-                    return "start_task 缺少 id。"
-                state = workflow.load_state(
-                    self.project.root, spec_mod.load_spec(self.project.root)
-                )
-                workflow.start_task(self.project.root, state, task_id)
-                self.workflow_changed.emit(state)
-                return f"开始任务：{task_id}"
-            if name == "inspect_artifact":
-                inventory = workflow.inspect_artifacts(self.project.root)
-                current = spec_mod.load_spec(self.project.root)
-                manual = workflow.render_artifact_manual(current, inventory)
-                try:
-                    (self.project.root / "MANUAL.md").write_text(
-                        manual, encoding="utf-8", newline="\n"
-                    )
-                except OSError as exc:
-                    return f"成品说明书写入失败：{exc}"
-                state = workflow.load_state(self.project.root, current)
-                if inventory.jar:
-                    state.jar = inventory.jar
-                    state.manual = "MANUAL.md"
-                    state.stage = "done"
-                    self.stage = "done"
-                    workflow.save_state(self.project.root, state)
-                self.artifact_changed.emit(
-                    {
-                        "jar": inventory.jar,
-                        "summary": inventory.summary(),
-                        "inventory": inventory.to_dict(),
-                        "manual": "MANUAL.md",
-                    }
-                )
-                self.workflow_changed.emit(state)
-                if not inventory.jar:
-                    return (
-                        "build/libs 里还没有 jar。先让编译通过，再读取最终产物。\n\n"
-                        + manual[:4000]
-                    )
-                return (
-                    f"成品巡检完成：{inventory.summary()}\n"
-                    f"JAR：{inventory.jar}\n已写入 MANUAL.md。\n\n"
-                    + manual[:12000]
-                )
+            if name in {"scaffold_project", "scaffold_forge_project", "forge_scaffold"}:
+                return self._scaffold(args)
             if name == "read_skill":
                 skill = self.skill_store.get(str(args.get("id") or ""))
                 if skill is None:
@@ -1497,7 +1299,7 @@ class AgentWorker(QObject):
             if name in {"github_repo", "github_tree", "github_file"}:
                 repo = str(args.get("repo") or args.get("url") or "").strip()
                 if not repo:
-                    return f"{name} 缺少 repo，例如 Luke100000/minecraft-comes-alive。"
+                    return f"{name} 缺少 repo，例如 yan-mc/minecraft-mod-dev。"
                 if name == "github_repo":
                     info = research.repo_info(repo)
                     return json.dumps(info, ensure_ascii=False, indent=2)[:MAX_TOOL_RESULT]
@@ -1515,149 +1317,6 @@ class AgentWorker(QObject):
                 return research.repo_file(
                     repo, path, ref=str(args.get("ref") or "")
                 )[:MAX_TOOL_RESULT]
-            if name == "port_from_jar":
-                raw_jar = str(args.get("jar") or args.get("path") or "").strip()
-                source_doc = None
-                document_id = args.get("knowledge_id") or args.get("id")
-                if not raw_jar and self.knowledge is not None:
-                    if document_id:
-                        try:
-                            source_doc = self.knowledge.get_document(int(document_id))
-                        except (TypeError, ValueError):
-                            source_doc = None
-                    if source_doc is None and args.get("name"):
-                        source_doc = self.knowledge.find_document(
-                            str(args.get("name") or ""),
-                            project=str(self.project.root) if self.project else "",
-                        )
-                    if source_doc is not None:
-                        raw_jar = str(source_doc.get("source") or "")
-                if not raw_jar:
-                    return (
-                        "port_from_jar 需要 jar 参数（绝对路径），"
-                        "或 knowledge_id + 对应的知识库 JAR。"
-                    )
-                jar = Path(raw_jar).expanduser()
-                if not jar.is_file():
-                    return f"找不到 JAR：{jar}"
-                if self.project is not None:
-                    dest_parent = Path(str(args.get("dest") or self.project.root.parent))
-                else:
-                    base = self.config.project_root or str(Path.home())
-                    dest_parent = Path(str(args.get("dest") or base))
-                self.status.emit("正在扫描 JAR 并生成 NeoForge 移植工程…")
-                result = porting.create_port_project(
-                    jar,
-                    dest_parent,
-                    mod_id=str(args.get("mod_id") or ""),
-                    mod_name=str(args.get("name") or args.get("mod_name") or ""),
-                    package=str(args.get("package") or ""),
-                    target_mc=str(args.get("target_mc") or "1.21.1"),
-                    dependencies=str(args.get("dependencies") or ""),
-                    extra_dirs=self._known_jar_dirs(),
-                    progress=self.status.emit,
-                )
-                try:
-                    new_project = project_mod.load_project(Path(result["root"]))
-                except Exception as exc:  # noqa: BLE001 - 工程已生成，切换失败只提示
-                    return f"移植工程已生成，但无法加载：{exc}\n目录：{result['root']}"
-                self.project = new_project
-                self.stage = "building"
-                try:
-                    current_spec = spec_mod.load_spec(new_project.root)
-                    state = workflow.load_state(new_project.root, current_spec)
-                    self.spec_changed.emit(current_spec)
-                    self.workflow_changed.emit(state)
-                except Exception:
-                    pass
-                self.project_created.emit(result["root"])
-                verify = result.get("verify") or {}
-                errors = [
-                    item
-                    for item in (verify.get("issues") or [])
-                    if item.get("level") == "error"
-                ]
-                lines = [
-                    "移植工程已生成并自动切换到该工程。",
-                    f"- 目录：{result['root']}",
-                    f"- Mod ID：{result['mod_id']}",
-                    f"- 包名：{result['package']}",
-                    f"- 源 JAR 物品：{', '.join(result.get('item_ids') or []) or '无'}",
-                    f"- 反编译参考：{result.get('class_count', 0)} 个 Java 文件"
-                    f"（reference/decompiled）",
-                    f"- 资源：{result.get('written_resources', 0)} 个文件",
-                ]
-                if result.get("mca_jar"):
-                    lines.append(f"- 已复制 MCA 依赖：libs/{result['mca_jar']}")
-                for note in (result.get("notes") or []):
-                    if "MCA" in note:
-                        lines.append(f"- {note}")
-                        break
-                if errors:
-                    lines.append("")
-                    lines.append(f"当前验收未通过（{len(errors)} 个错误），必须继续施工：")
-                    for item in errors[:12]:
-                        lines.append(f"- [{item.get('code')}] {item.get('title')}")
-                lines.append("")
-                lines.append(
-                    "下一步：先用 read_file 读 reference/decompiled 里的关键类，"
-                    "再按 PORT_PLAN.md 和规格逐类迁移到 src/main/java；"
-                    "不要直接复制反编译源码。"
-                )
-                return "\n".join(lines)[:MAX_TOOL_RESULT]
-            if name == "audit_project":
-                scan = porting.scan_project(self.project.root)
-                registrations = scan.get("registrations") or []
-                lines = [
-                    f"工程：{scan.get('root')}",
-                    f"- 包名：{scan.get('package') or '未识别'}",
-                    f"- Java 文件：{len(scan.get('java_files') or [])}",
-                    f"- 注册项：{len(registrations)}",
-                    f"- 物品：{', '.join(scan.get('item_ids') or []) or '无'}",
-                    f"- 方块：{', '.join(scan.get('block_ids') or []) or '无'}",
-                    f"- 实体：{', '.join(scan.get('entity_ids') or []) or '无'}",
-                    f"- 资源文件：{len(scan.get('resource_files') or [])}",
-                ]
-                return "\n".join(lines)[:MAX_TOOL_RESULT]
-            if name == "port_status":
-                status = porting.write_port_status(self.project.root)
-                if not status.get("source_count"):
-                    return (
-                        "没有 reference/decompiled 参考源码，无法统计迁移进度。"
-                        "先用 port_from_jar 生成移植工程。"
-                    )
-                pending = [
-                    item for item in status.get("classes") or []
-                    if item.get("status") == "pending"
-                ]
-                lines = [
-                    f"源类：{status['source_count']}，已迁移：{status['migrated']}，"
-                    f"已排除：{status['excluded']}，未处理：{status['pending']}",
-                ]
-                groups: dict[str, list[str]] = {}
-                for item in pending:
-                    groups.setdefault(item.get("package") or ".", []).append(item["class"])
-                for package in sorted(groups):
-                    names = groups[package]
-                    preview = "、".join(names[:8])
-                    more = f" 等 {len(names)} 个" if len(names) > 8 else ""
-                    lines.append(f"- {package or '.'}：{preview}{more}")
-                if pending:
-                    lines.append(
-                        "逐个迁移到 src/main/java（保持类名），或在 PORT_EXCLUDE.md "
-                        "写 `- 路径/类名.java：原因`。"
-                    )
-                lines.append(f"完整清单：{porting.PORT_STATUS_MD}")
-                return "\n".join(lines)[:MAX_TOOL_RESULT]
-            if name == "verify_mod":
-                report = porting.verify_project(
-                    self.project.root,
-                    target_mc=str(args.get("target_mc") or ""),
-                    target_loader=str(args.get("target_loader") or ""),
-                    write=True,
-                )
-                head = "验收通过。" if report.ok() else "验收未通过，必须修完再结束。"
-                return (head + "\n\n" + report.render())[:MAX_TOOL_RESULT]
             if name == "decompile_jar":
                 if self.knowledge is None:
                     return "知识库不可用。"
@@ -1711,68 +1370,250 @@ class AgentWorker(QObject):
                     limit = 1800.0
                 limit = min(max(limit, 60.0), 3600.0)
                 try:
-                    result = builder.build_project(
-                        self.project.root,
-                        task,
-                        extra_jar_dirs=self._known_jar_dirs(),
-                        log=self._build_log,
-                        timeout=limit,
-                        cancel=self._cancel,
+                    result = _run_gradle(
+                        self.project.root, task, limit, self._cancel, self._build_log
                     )
-                except builder.BuilderError as exc:
+                except mcdev.gradle.GradleError as exc:
                     return f"编译没有开始：{exc}"
                 report = _build_report(result)
                 if task == "build":
-                    if result.ok:
-                        report += self._finalize_artifact()
-                    else:
-                        self._record_build_failure()
+                    self._emit_artifact(result)
                 return report
-            if name == "fix_build_setup":
-                root = self.project.root
-                report: list[str] = []
-                try:
-                    written = toolchain.ensure_wrapper_files(root)
-                    if written:
-                        report.append("补齐 Wrapper 文件：" + "、".join(written))
-                except Exception as exc:  # noqa: BLE001 - 逐项报告
-                    report.append(f"补齐 Wrapper 失败：{exc}")
-                try:
-                    changed, before, after, reason = wrapper.ensure_compatible(root)
-                    if changed:
-                        report.append(
-                            f"Gradle Wrapper：{before or '缺失/损坏'} → {after}（{reason}）"
-                        )
-                    else:
-                        report.append(
-                            f"Gradle Wrapper 保持 {after or before or '当前配置'}，无需调整"
-                        )
-                except Exception as exc:  # noqa: BLE001 - 逐项报告
-                    report.append(f"调整 Gradle 版本失败：{exc}")
-                try:
-                    jars = deps.ensure_local_jars(root)
-                    report.append(jars.summary())
-                except Exception as exc:  # noqa: BLE001 - 逐项报告
-                    report.append(f"整理本地 jar 失败：{exc}")
-                return "\n".join(report)
             if name == "fetch_url":
                 url = str(args.get("url") or "").strip()
                 if not url:
                     return "fetch_url 缺少 url。"
                 return connectors.fetch_url(url)[:MAX_FETCH_RESULT]
+            if name.startswith("mcdev_"):
+                return self._execute_mcdev(name, args)
             return (
                 f"未知工具：{name}。可用工具：list_files、read_file、search_text、write_file、"
-                "edit_file、pixel_art、submit_spec、update_spec、start_task、complete_task、"
-                "inspect_artifact、read_skill、remember、recall、search_knowledge、"
-                "read_knowledge、decompile_jar、build_project、fix_build_setup、fetch_url、"
-                "search_code、github_repo、github_tree、github_file、port_from_jar、"
-                "port_status、audit_project、verify_mod。"
+                "edit_file、pixel_art、scaffold_project、build_project、"
+                "read_skill、remember、recall、search_knowledge、read_knowledge、"
+                "decompile_jar、fetch_url、search_code、github_repo、github_tree、github_file、"
+                "mcdev_prepare、mcdev_stop、mcdev_launch_status、mcdev_status、"
+                "mcdev_command、mcdev_ui、mcdev_click、mcdev_screenshot、mcdev_run_dump、"
+                "mcdev_use、mcdev_install_probe、mcdev_scenario、mcdev_build、"
+                "mcdev_gametest、mcdev_build_probe。"
             )
         except Exception as exc:
             return f"工具执行失败：{exc}"
 
+    # ------------------------------------------------------------------
+    def _execute_mcdev(self, name: str, args: dict[str, Any]) -> str:
+        root = self.project.root if self.project is not None else None
+        needs_project = {
+            "mcdev_prepare",
+            "mcdev_build",
+            "mcdev_gametest",
+            "mcdev_install_probe",
+            "mcdev_build_probe",
+        }
+        if root is None and name in needs_project:
+            return "这个工具需要先打开工程。"
+        if name == "mcdev_prepare":
+            kind = str(args.get("kind") or args.get("side") or "both").strip().lower()
+            if kind not in {"server", "client", "both"}:
+                return "kind 只能是 server、client 或 both。"
+            try:
+                timeout_ms = int(args.get("timeout_ms") or 180_000)
+            except (TypeError, ValueError):
+                timeout_ms = 180_000
+            try:
+                join_port = int(args.get("join_port") or 25566)
+            except (TypeError, ValueError):
+                join_port = 25566
+            result = self.mcdev.prepare(
+                root,
+                kind,
+                timeout_ms=max(30_000, min(timeout_ms, 1_800_000)),
+                wait_join=bool(args.get("wait_join", True)),
+                join_port=join_port,
+                install_probe=bool(args.get("install_probe", True)),
+            )
+            return json.dumps(result, ensure_ascii=False, indent=2)[:MAX_TOOL_RESULT]
+        if name == "mcdev_stop":
+            side = str(args.get("side") or "all").strip().lower()
+            if side not in {"server", "client", "all"}:
+                return "side 只能是 server、client 或 all。"
+            return json.dumps(self.mcdev.stop(side), ensure_ascii=False, indent=2)
+        if name == "mcdev_launch_status":
+            return json.dumps(self.mcdev.launch_status(), ensure_ascii=False, indent=2)
+        if name == "mcdev_install_probe":
+            jar = str(args.get("probe_jar") or "").strip()
+            run_dirs = args.get("run_dirs")
+            if jar:
+                targets = (
+                    [str(item) for item in run_dirs]
+                    if isinstance(run_dirs, list) and run_dirs
+                    else [str(item) for item in mcdev.run_dirs(root)]
+                )
+                info = self.mcdev.install_probe(jar, targets)
+            else:
+                info = self.mcdev.ensure_probe(root)
+            return json.dumps(info, ensure_ascii=False, indent=2)[:MAX_TOOL_RESULT]
+        if name == "mcdev_build_probe":
+            jar = mcdev.templates.build_probe(
+                root, log=self._probe_log, cancel=self._cancel
+            )
+            return f"探针已编译：{jar}"
+        if name == "mcdev_scenario":
+            steps = args.get("steps")
+            if not isinstance(steps, list):
+                steps = None
+            card = str(args.get("card") or "").strip()
+            if not card and args.get("path"):
+                card = str(args.get("path"))
+            result = self.mcdev.scenario(
+                steps,
+                card=card or None,
+                dry_run=bool(args.get("dry_run")),
+            )
+            return json.dumps(result, ensure_ascii=False, indent=2)[:MAX_TOOL_RESULT]
+        if name == "mcdev_build":
+            code, output = mcdev.gradle.build(
+                root, log=self._probe_log, timeout=1800, cancel=self._cancel
+            )
+            tail = output[-MAX_BUILD_RESULT:]
+            head = "编译成功（退出码 0）。" if code == 0 else f"编译失败（退出码 {code}）。"
+            return f"{head}\n\n{tail}"[:MAX_TOOL_RESULT]
+        if name == "mcdev_gametest":
+            code, output = mcdev.gradle.gametest(
+                root,
+                loader=getattr(self.project.meta, "loader", ""),
+                log=self._probe_log,
+                timeout=1800,
+                cancel=self._cancel,
+            )
+            summary = mcdev.gradle.gametest_summary(code, output)
+            head = "GameTest 通过。" if code == 0 else f"GameTest 失败（退出码 {code}）。"
+            return f"{head}\n{summary}\n\n{output[-MAX_BUILD_RESULT:]}"[:MAX_TOOL_RESULT]
 
-def _build_report(result: builder.BuildResult) -> str:
+        side = str(args.get("side") or "server").strip().lower()
+        if side not in {"server", "client"}:
+            return "side 只能是 server 或 client。"
+        port = args.get("port")
+        try:
+            port = int(port) if port else None
+        except (TypeError, ValueError):
+            port = None
+        if name == "mcdev_status":
+            return json.dumps(
+                mcdev.probe.probe_json(side, "/status", port=port),
+                ensure_ascii=False,
+                indent=2,
+            )[:MAX_TOOL_RESULT]
+        if name == "mcdev_command":
+            cmd = str(args.get("cmd") or args.get("command") or "").strip()
+            if not cmd:
+                return "mcdev_command 缺少 cmd。"
+            return json.dumps(
+                mcdev.probe.probe_json(
+                    side, "/command", method="POST", payload={"cmd": cmd}, port=port
+                ),
+                ensure_ascii=False,
+                indent=2,
+            )[:MAX_TOOL_RESULT]
+        if name == "mcdev_ui":
+            return json.dumps(
+                mcdev.probe.probe_json(side, "/ui/snapshot", port=port),
+                ensure_ascii=False,
+                indent=2,
+            )[:MAX_TOOL_RESULT]
+        if name == "mcdev_click":
+            body: dict[str, Any] = {
+                "button": int(args.get("button") or 0),
+            }
+            slot = args.get("slot")
+            if isinstance(slot, int) and slot >= 0:
+                body["slot"] = slot
+            else:
+                body["x"] = int(args.get("x") or 0)
+                body["y"] = int(args.get("y") or 0)
+            if args.get("shift"):
+                body["shift"] = True
+            return json.dumps(
+                mcdev.probe.probe_json(
+                    side, "/ui/click", method="POST", payload=body, port=port
+                ),
+                ensure_ascii=False,
+                indent=2,
+            )[:MAX_TOOL_RESULT]
+        if name == "mcdev_screenshot":
+            return mcdev.probe.probe(
+                side, "/screenshot", port=port, timeout=30.0
+            )[:MAX_TOOL_RESULT]
+        if name == "mcdev_run_dump":
+            try:
+                count = int(args.get("n") or 200)
+            except (TypeError, ValueError):
+                count = 200
+            return mcdev.probe.probe(
+                side, f"/run/dump?n={max(1, min(count, 2000))}", port=port
+            )[:MAX_TOOL_RESULT]
+        if name == "mcdev_use":
+            payload = {
+                "x": args.get("x"),
+                "y": args.get("y"),
+                "z": args.get("z"),
+                "face": args.get("face") or "up",
+            }
+            return json.dumps(
+                mcdev.probe.probe_json(
+                    side, "/player/use", method="POST", payload=payload, port=port
+                ),
+                ensure_ascii=False,
+                indent=2,
+            )[:MAX_TOOL_RESULT]
+        return f"未知的 mcdev 工具：{name}"
+
+
+@dataclass
+class BuildOutcome:
+    ok: bool
+    code: int
+    output: str = ""
+    jars: list[tuple[str, int]] = field(default_factory=list)
+    message: str = ""
+
+
+def _build_jars(root: Path) -> list[tuple[str, int]]:
+    libs = root / "build" / "libs"
+    rows: list[tuple[str, int]] = []
+    if not libs.is_dir():
+        return rows
+    try:
+        files = sorted(item for item in libs.glob("*.jar") if item.is_file())
+    except OSError:
+        return rows
+    for item in files:
+        try:
+            rows.append((item.name, item.stat().st_size))
+        except OSError:
+            rows.append((item.name, 0))
+    return rows
+
+
+def _run_gradle(
+    root: Path,
+    task: str,
+    timeout: float,
+    cancel: threading.Event,
+    log,
+) -> BuildOutcome:
+    """执行 Gradle，并把 build/libs 里的真实产物带回给模型。"""
+    code, output = mcdev.gradle.run_gradle(
+        root,
+        task,
+        timeout=int(timeout),
+        cancel=cancel,
+        log=log,
+    )
+    jars = _build_jars(root) if task == "build" and code == 0 else []
+    return BuildOutcome(ok=code == 0, code=code, output=output, jars=jars)
+
+
+def _build_report(result: BuildOutcome) -> str:
     if result.ok:
         head = "编译成功（退出码 0）。"
     else:
@@ -1784,7 +1625,7 @@ def _build_report(result: builder.BuildResult) -> str:
         )
         parts.append("产物：\n" + listing)
     elif result.ok:
-        parts.append("没有在 build/libs 里找到 jar；如果这是数据生成或运行任务，可以忽略。")
+        parts.append("没有在 build/libs 里找到 jar；如果这是运行或测试任务，可以忽略。")
     output = (result.output or "").strip()
     if output:
         limit = MAX_BUILD_RESULT if not result.ok else MAX_BUILD_SUCCESS
@@ -1794,13 +1635,6 @@ def _build_report(result: builder.BuildResult) -> str:
         parts.append(f"Gradle 日志：\n{tail}")
     if result.message:
         parts.append(f"启动信息：{result.message}")
-    if not result.ok:
-        try:
-            parts.append(
-                workflow.analyze_build_failure(result.output, result.code).render()
-            )
-        except Exception:
-            pass
     return "\n\n".join(parts)[:MAX_TOOL_RESULT]
 
 
@@ -1814,6 +1648,10 @@ def _tool_status(call: ToolCall) -> str:
     if call.name == "build_project":
         task = str(call.args.get("task") or "build")
         return f"正在执行 Gradle {task}…"
+    if call.name == "mcdev_prepare":
+        return f"正在启动开发端（{call.args.get('kind') or 'both'}）…"
+    if call.name == "mcdev_scenario":
+        return "正在执行场景卡片…"
     return f"执行 {call.name}…"
 
 

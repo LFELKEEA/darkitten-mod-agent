@@ -1,0 +1,8 @@
+Gradle Wrapper
+Copyright the Gradle authors
+Licensed under the Apache License, Version 2.0
+https://github.com/gradle/gradle
+
+这些文件来自 Gradle v9.8.2 仓库的 gradlew、gradlew.bat 和
+gradle/wrapper/gradle-wrapper.jar，仅用于给新建工程补齐 Wrapper。
+gradle-wrapper.jar 内的 META-INF/LICENSE 保留了原始许可证。

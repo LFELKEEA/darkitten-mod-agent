@@ -1,0 +1,10 @@
+本工坊的探针协议、进程启动流程、卡片 YAML 解析与场景执行器参考并移植自：
+
+  yan-mc/minecraft-mod-dev
+  https://github.com/yan-mc/minecraft-mod-dev
+  MIT License, Copyright (c) 2026 yan-mc
+
+原始 MIT 许可证全文见同目录 LICENSE-minecraft-mod-dev.txt。
+
+本仓库中的 Java 探针源码（dma/resources/mcdev-probe）与 Forge 1.20.1 工程骨架
+（dma/resources/forge-1.20.1）同样保留上述版权与许可声明。

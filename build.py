@@ -22,10 +22,10 @@ BUILD = ROOT / "build"
 APP_DIST = DIST / "DarkittenModAgent"
 ZIP_NAME = f"DarkittenModAgent-{APP_VERSION}.zip"
 NOTES = [
-    "工坊文案改为通用能力描述：技能、提示词、验收提示和下载页不再引用具体模组、道具或测试工程，只保留可复用的移植、交互兜底与关系同步能力。",
-    "清理测试数据：知识库里导入的测试 JAR 与最近工程列表里的测试记录不再显示，已有工程目录和备份不受影响。",
-    "移植与 MCA Reborn 兼容能力保持不变：port_from_jar、PlayerInteractEvent.EntityInteract 兜底、身份 / 家庭关系同步和 verify_mod 门禁照常工作。",
-    "修复道具贴图与编译按钮：1.21.1 物品模型、纹理、语言、配方在移植时逐项校验，缺模型会直接报 item_model_missing；编译页「选择工程」打开已有工程后，编译 / 开发客户端 / 开发服务端 / 数据生成按钮立即可用。",
+    "保留 Fabric / Forge / NeoForge / Architectury 多加载器能力：按工程加载器写代码、生成骨架、执行对应的编译与 GameTest 任务。",
+    "1.20.1 的 Forge / Fabric / NeoForge 新建即生成可编译骨架；Architectury 和其他版本由助手按官方模板生成并编译验证。",
+    "学习 yan-mc/minecraft-mod-dev 的自动化验证：Forge 1.20.1 启动真实开发服务端 / 客户端，AI 用回环探针读取状态、背包、方块、界面和截图。",
+    "补充场景卡片断言与 GameTest：其他加载器以编译结果、运行日志和 GameTest 为准，不伪造游戏内结果。",
 ]
 
 
@@ -66,6 +66,8 @@ def run_pyinstaller() -> None:
             str(icon),
             "--add-data",
             f"{ROOT / 'assets'}{os.pathsep}assets",
+            "--add-data",
+            f"{ROOT / 'dma' / 'resources'}{os.pathsep}dma/resources",
             "--add-data",
             f"{version_file}{os.pathsep}.",
             "--collect-submodules",

@@ -29,7 +29,7 @@ from .. import paths
 from ..project import ProjectError, create_project
 from . import theme
 
-LOADERS = ["Fabric", "NeoForge", "Architectury"]
+LOADERS = ["Forge", "Fabric", "NeoForge", "Architectury"]
 RUNTIMES = ["双端", "客户端", "服务端"]
 TASKS = [
     "创建全新模组",
@@ -39,12 +39,11 @@ TASKS = [
     "重构/优化已有代码",
 ]
 MC_VERSIONS = [
-    "1.21.4",
-    "1.21.1",
-    "1.21",
-    "1.20.6",
-    "1.20.4",
     "1.20.1",
+    "1.20.4",
+    "1.20.6",
+    "1.21.1",
+    "1.21.4",
     "1.19.4",
     "1.19.2",
     "1.18.2",
@@ -163,7 +162,11 @@ class NewProjectDialog(QDialog):
         title.setObjectName("H1")
         layout.addWidget(title)
         layout.addWidget(
-            tiny("MC 版本、加载器、Mod ID 是硬性前置信息，创建后助手才会开始写代码。")
+            tiny(
+                "支持 Fabric / Forge / NeoForge / Architectury。"
+                "1.20.1 会直接生成对应的可编译骨架；其他版本由 AI 核对官方模板后生成构建脚本。"
+                "运行验证：Forge 1.20.1 可走游戏内探针断言，其他加载器以编译结果、运行日志和 GameTest 为准。"
+            )
         )
 
         form = QFormLayout()
@@ -173,9 +176,8 @@ class NewProjectDialog(QDialog):
         self.mod_id = QLineEdit()
         self.mod_id.setPlaceholderText("例如：stardust_tools（小写字母/数字/下划线）")
         self.mc_version = QComboBox()
-        self.mc_version.setEditable(True)
         self.mc_version.addItems(MC_VERSIONS)
-        self.mc_version.setCurrentText("1.21.1")
+        self.mc_version.setCurrentText("1.20.1")
         self.loader = QComboBox()
         self.loader.addItems(LOADERS)
         self.runtime = QComboBox()
@@ -183,7 +185,7 @@ class NewProjectDialog(QDialog):
         self.task = QComboBox()
         self.task.addItems(TASKS)
         self.deps = QLineEdit()
-        self.deps.setPlaceholderText("例如：Fabric API 0.115.0+1.21.1；没有就留空")
+        self.deps.setPlaceholderText("例如：MCA Reborn 7.7.x；没有就留空")
 
         root_row = QWidget()
         root_layout = QHBoxLayout(root_row)
@@ -211,11 +213,10 @@ class NewProjectDialog(QDialog):
         layout.addWidget(QLabel("补充要求"))
         layout.addWidget(self.notes)
 
-        self.auto_start = QCheckBox("创建后立即让 AI 拆解完整规格（确认后才开始施工）")
+        self.auto_start = QCheckBox("创建后立即让 AI 实现需求并验证")
         self.auto_start.setChecked(True)
         self.auto_start.setToolTip(
-            "勾选后不再追问版本信息，直接按工程信息生成规格说明书和需求清单；"
-            "你确认规格后才会写代码、执行 Gradle。"
+            "勾选后直接改代码并执行 Gradle；运行时用真实开发端探针验证，不再先做规格确认。"
         )
         layout.addWidget(self.auto_start)
 

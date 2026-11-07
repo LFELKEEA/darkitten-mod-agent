@@ -1,30 +1,24 @@
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QBrush
+from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
-    QProgressBar,
+    QPlainTextEdit,
     QPushButton,
-    QTextBrowser,
-    QTreeWidget,
-    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
-from ..spec import ModSpec, checklist, checklist_score, render_manual
-from ..workflow import STAGE_HINTS, STAGE_LABELS, WorkflowState
-
 from .widgets import tiny
 
 
-class SpecPanel(QWidget):
-    """规格确认面板：阶段、需求 n/10、说明书、确认按钮。"""
+class RunPanel(QWidget):
+    """开发运行面板：启动真实服务端/客户端，显示进程与探针状态。"""
 
-    confirm_requested = Signal()
-    replan_requested = Signal()
+    prepare_requested = Signal(str)
+    stop_requested = Signal(str)
+    refresh_requested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -34,91 +28,135 @@ class SpecPanel(QWidget):
 
         head = QHBoxLayout()
         head.setSpacing(6)
-        self.stage_label = QLabel("需求采集")
-        self.stage_label.setObjectName("H2")
-        self.score_label = tiny("需求 0/10")
-        head.addWidget(self.stage_label)
+        self.title = QLabel("开发运行")
+        self.title.setObjectName("H2")
+        self.state_label = tiny("未启动")
+        head.addWidget(self.title)
         head.addStretch(1)
-        head.addWidget(self.score_label)
+        head.addWidget(self.state_label)
         layout.addLayout(head)
 
-        self.hint = tiny(STAGE_HINTS["draft"])
+        self._probe_support = True
+        self.hint = tiny(
+            "启动的是真实开发端。Forge 1.20.1 首次运行会先编译并安装开发探针，可能要几分钟。"
+        )
         layout.addWidget(self.hint)
 
-        self.progress = QProgressBar()
-        self.progress.setRange(0, 10)
-        self.progress.setValue(0)
-        self.progress.setTextVisible(False)
-        self.progress.setFixedHeight(7)
-        layout.addWidget(self.progress)
+        row1 = QHBoxLayout()
+        row1.setSpacing(6)
+        self.server_btn = QPushButton("启动双端")
+        self.server_btn.setObjectName("Primary")
+        self.server_btn.setToolTip("启动开发服务端，再启动客户端并自动连接。")
+        self.server_btn.clicked.connect(lambda: self.prepare_requested.emit("both"))
+        self.only_server_btn = QPushButton("仅服务端")
+        self.only_server_btn.setObjectName("Ghost")
+        self.only_server_btn.clicked.connect(lambda: self.prepare_requested.emit("server"))
+        self.client_btn = QPushButton("仅客户端")
+        self.client_btn.setObjectName("Ghost")
+        self.client_btn.clicked.connect(lambda: self.prepare_requested.emit("client"))
+        row1.addWidget(self.server_btn, 1)
+        row1.addWidget(self.only_server_btn)
+        row1.addWidget(self.client_btn)
+        layout.addLayout(row1)
 
-        self.checklist = QTreeWidget()
-        self.checklist.setHeaderLabels(["需求", "状态"])
-        self.checklist.setRootIsDecorated(False)
-        self.checklist.setColumnWidth(0, 250)
-        self.checklist.setMaximumHeight(190)
-        layout.addWidget(self.checklist)
+        row2 = QHBoxLayout()
+        row2.setSpacing(6)
+        self.stop_btn = QPushButton("停止全部")
+        self.stop_btn.setObjectName("Danger")
+        self.stop_btn.clicked.connect(lambda: self.stop_requested.emit("all"))
+        self.refresh_btn = QPushButton("刷新状态")
+        self.refresh_btn.setObjectName("Ghost")
+        self.refresh_btn.clicked.connect(self.refresh_requested)
+        row2.addWidget(self.stop_btn)
+        row2.addWidget(self.refresh_btn, 1)
+        layout.addLayout(row2)
 
-        self.manual = QTextBrowser()
-        self.manual.setOpenExternalLinks(False)
-        self.manual.setPlaceholderText("规格提交后会显示在这里。")
-        layout.addWidget(self.manual, 1)
+        self.status_view = QPlainTextEdit()
+        self.status_view.setReadOnly(True)
+        self.status_view.setPlaceholderText("进程、端口和就绪状态会显示在这里。")
+        layout.addWidget(self.status_view, 1)
 
-        buttons = QHBoxLayout()
-        buttons.setSpacing(6)
-        self.replan_btn = QPushButton("重新规划")
-        self.replan_btn.setObjectName("Ghost")
-        self.replan_btn.setToolTip("回到输入框，补充要求后重新生成规格。")
-        self.replan_btn.clicked.connect(self.replan_requested)
-        self.confirm_btn = QPushButton("确认规格并开始施工")
-        self.confirm_btn.setObjectName("Primary")
-        self.confirm_btn.clicked.connect(self.confirm_requested)
-        buttons.addWidget(self.replan_btn)
-        buttons.addWidget(self.confirm_btn, 1)
-        layout.addLayout(buttons)
+        self.log = QPlainTextEdit()
+        self.log.setReadOnly(True)
+        self.log.setPlaceholderText("启动日志")
+        self.log.setFixedHeight(150)
+        layout.addWidget(self.log)
 
-        self._spec: ModSpec | None = None
-        self._state = WorkflowState()
-        self.update_view(None, WorkflowState())
-
-    def update_view(self, spec: ModSpec | None, state: WorkflowState | None) -> None:
-        self._spec = spec
-        self._state = state or WorkflowState()
-        stage = self._state.stage if self._state.stage in STAGE_LABELS else "draft"
-        self.stage_label.setText(STAGE_LABELS[stage])
-        self.hint.setText(STAGE_HINTS.get(stage, ""))
-        passed, total = checklist_score(spec) if spec is not None else (0, 10)
-        self.score_label.setText(f"需求 {passed}/{total}")
-        self.progress.setRange(0, total)
-        self.progress.setValue(passed)
-
-        self.checklist.clear()
-        for item in checklist(spec) if spec is not None else []:
-            row = QTreeWidgetItem([item.label, "已覆盖" if item.ok else "待补充"])
-            row.setToolTip(0, item.detail)
-            row.setToolTip(1, item.detail)
-            if not item.ok:
-                row.setForeground(1, QBrush(Qt.gray))
-            self.checklist.addTopLevelItem(row)
-
-        if spec is None or spec.empty():
-            self.manual.setMarkdown(
-                "还没有规格。\n\n在左下角用一句话描述你想做的模组，"
-                "AI 会先拆成完整规格，确认后才会开始写代码。"
+    def set_probe_support(self, supported: bool) -> None:
+        self._probe_support = supported
+        if supported:
+            self.hint.setText(
+                "启动的是真实开发端。Forge 1.20.1 首次运行会先编译并安装开发探针，可能要几分钟。"
             )
-            self.confirm_btn.setVisible(False)
-            self.replan_btn.setVisible(False)
+        else:
+            self.hint.setText(
+                "当前加载器/版本不安装游戏内探针。开发端会正常启动，"
+                "请用任务日志、mcdev_run_dump 的启动日志和 GameTest 判断结果。"
+            )
+
+    def set_busy(self, busy: bool, text: str = "") -> None:
+        for button in (self.server_btn, self.only_server_btn, self.client_btn):
+            button.setEnabled(not busy)
+        self.state_label.setText(text or ("启动中…" if busy else "未启动"))
+        if busy:
+            self.hint.setText(
+                "正在准备开发端：先编译工程，再安装探针并等待端口就绪。"
+                if self._probe_support
+                else "正在编译并启动开发端；首次运行要下载依赖，请留意日志。"
+            )
+        elif self._probe_support:
+            self.hint.setText(
+                "启动的是真实开发端。Forge 1.20.1 首次运行会先编译并安装开发探针，可能要几分钟。"
+            )
+        else:
+            self.hint.setText(
+                "当前加载器/版本不安装游戏内探针。开发端会正常启动，"
+                "请用任务日志、mcdev_run_dump 的启动日志和 GameTest 判断结果。"
+            )
+
+    def append_log(self, text: str) -> None:
+        if not text:
             return
-        self.manual.setMarkdown(render_manual(spec))
-        review = stage == "review" and not spec.confirmed()
-        self.confirm_btn.setVisible(review)
-        self.confirm_btn.setEnabled(review)
-        self.replan_btn.setVisible(True)
-        self.replan_btn.setEnabled(True)
+        self.log.appendPlainText(text[-2000:])
+
+    def update_status(self, payload: dict | None) -> None:
+        processes = (payload or {}).get("processes") or []
+        if not processes:
+            self.status_view.setPlainText("当前没有由工坊启动的开发端进程。")
+            self.state_label.setText("未启动")
+            return
+        lines: list[str] = []
+        running = 0
+        for item in processes:
+            kind = str(item.get("kind") or "")
+            alive = bool(item.get("running"))
+            running += 1 if alive else 0
+            joined = item.get("joined")
+            screen = str(item.get("lastScreen") or "")
+            lines.append(
+                f"{kind}: {'运行中' if alive else '已退出'}"
+                f" · PID {item.get('pid') or '-'}"
+                + (
+                    f" · 探针端口 {item.get('port') or '-'}"
+                    if self._probe_support
+                    else ""
+                )
+                + (f" · 已进服" if joined else "")
+                + (f" · 当前界面 {screen}" if screen else "")
+            )
+            if item.get("exitCode") not in (None, 0):
+                lines.append(f"  退出码：{item.get('exitCode')}")
+            if item.get("error"):
+                lines.append(f"  错误：{item.get('error')}")
+            log_path = str(item.get("logPath") or "")
+            if log_path:
+                lines.append(f"  日志：{log_path}")
+        self.status_view.setPlainText("\n".join(lines))
+        self.state_label.setText(f"{running} 个进程运行中" if running else "已退出")
 
 
 class ArtifactPanel(QWidget):
-    """成品面板：真实 JAR 巡检结果与说明书。"""
+    """成品面板：build/libs 里的真实产物。"""
 
     open_requested = Signal()
 
@@ -128,16 +166,16 @@ class ArtifactPanel(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
 
-        self.title = QLabel("成品说明书")
+        self.title = QLabel("构建产物")
         self.title.setObjectName("H2")
         layout.addWidget(self.title)
 
-        self.summary = tiny("编译通过后会读取最终 JAR，识别真实注册内容、配方和纹理。")
+        self.summary = tiny("编译通过后，这里会列出 build/libs 里的真实 JAR。")
         layout.addWidget(self.summary)
 
-        self.view = QTextBrowser()
-        self.view.setPlaceholderText("还没有成品。")
-        self.view.setOpenExternalLinks(False)
+        self.view = QPlainTextEdit()
+        self.view.setReadOnly(True)
+        self.view.setPlaceholderText("还没有产物。")
         layout.addWidget(self.view, 1)
 
         row = QHBoxLayout()
@@ -150,25 +188,21 @@ class ArtifactPanel(QWidget):
 
     def update_view(
         self,
-        inventory: dict | None = None,
-        manual: str = "",
+        jars: list[dict] | None = None,
+        summary: str = "",
         jar: str = "",
     ) -> None:
-        if not inventory and not manual:
-            self.summary.setText(
-                "编译通过后会读取最终 JAR，识别真实注册内容、配方和纹理。"
-            )
-            self.view.setMarkdown("还没有成品。")
+        jars = list(jars or [])
+        if not jars:
+            self.summary.setText("编译通过后，这里会列出 build/libs 里的真实 JAR。")
+            self.view.setPlainText("还没有产物。")
             self.open_btn.setEnabled(False)
             return
-        if inventory:
-            self.summary.setText(
-                f"{inventory.get('mod_name') or inventory.get('mod_id') or '模组'} · "
-                f"{inventory.get('content_count', 0)} 个注册内容 · "
-                f"{len(inventory.get('recipes') or [])} 个配方 · "
-                f"{len(inventory.get('textures') or [])} 张纹理"
-            )
-        else:
-            self.summary.setText("已生成成品说明书。")
-        self.view.setMarkdown(manual or "还没有成品说明书。")
-        self.open_btn.setEnabled(bool(jar))
+        self.summary.setText(summary or f"{len(jars)} 个产物")
+        lines = []
+        for item in jars:
+            name = str(item.get("name") or "")
+            size = item.get("size")
+            lines.append(f"- {name}" + (f"（{size} 字节）" if size is not None else ""))
+        self.view.setPlainText("\n".join(lines))
+        self.open_btn.setEnabled(bool(jar or jars))
