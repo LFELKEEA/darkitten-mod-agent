@@ -80,6 +80,23 @@ for rel in files:
     entries.append({"path": rel, "mode": mode, "type": "blob", "sha": blob["sha"]})
     print("blob", rel, blob["sha"][:8], mode)
 
+# 旧脚本在 Windows 上把反斜杠写进了仓库路径，这里顺手清掉这些坏条目。
+base_entries = api("GET", f"repos/{REPO}/git/trees/{base_tree}?recursive=1")
+removed = 0
+for item in base_entries.get("tree", []):
+    if "\\" in str(item.get("path") or ""):
+        entries.append(
+            {
+                "path": item["path"],
+                "mode": item.get("mode") or "100644",
+                "type": item.get("type") or "blob",
+                "sha": None,
+            }
+        )
+        removed += 1
+if removed:
+    print("cleanup", removed, "windows path entries")
+
 tree = api("POST", f"repos/{REPO}/git/trees", {"base_tree": base_tree, "tree": entries})
 new_commit = api(
     "POST",
