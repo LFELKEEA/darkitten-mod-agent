@@ -95,17 +95,21 @@ _MAX_POM_BYTES = 4 * 1024 * 1024
 
 
 def cache_path(maven_path: str) -> Path:
-    base = repo_cache().resolve()
+    raw_base = repo_cache()
+    base = raw_base.resolve()
     # pathlib 遇到绝对路径会丢掉左边的基址，'..' 也能穿出去；镜像路径
     # 全部来自网络元数据，必须限制在 repo_cache 内。
     cleaned = str(maven_path or "").replace("\\", "/").lstrip("/")
     target = (base / cleaned).resolve()
     if not target.is_relative_to(base):
         raise ValueError(f"非法的 Maven 缓存路径：{maven_path}")
+    # 返回未解析的路径：Windows 的 8.3 短文件名（RUNNER~1）只在 resolve()
+    # 后出现，调用方和测试都期望看到 repo_cache() 原本的写法。
+    plain = raw_base / cleaned
     if len(str(target)) + len(".part") <= _MAX_CACHE_PATH:
-        return target
+        return plain
     digest = hashlib.sha1(maven_path.encode("utf-8"), usedforsecurity=False).hexdigest()
-    return base / "_long" / digest[:2] / f"{digest}.bin"
+    return raw_base / "_long" / digest[:2] / f"{digest}.bin"
 
 
 def _gradle_cache_find(maven_path: str) -> Path | None:
