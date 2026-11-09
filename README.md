@@ -23,7 +23,7 @@
 - **可直接生成的骨架（Minecraft 1.20.1）**：
   - Forge：ForgeGradle 6.0–6.2、Forge 47.4.28、官方映射、Gradle 8.8。
   - Fabric：fabric-loom 1.7-SNAPSHOT、Yarn `1.20.1+build.10`、Fabric Loader 0.15.11、Fabric API 0.92.2+1.20.1。
-  - NeoForge：NeoGradle 7.0.171、NeoForge 47.1.106。
+  - NeoForge：ModDevGradle legacyforge 2.0.91、`net.neoforged:forge:1.20.1-47.1.106`（仍用 Forge 包名与事件总线）。
   - Architectury：不内置骨架，由助手按官方模板生成 `common` / `fabric` / `neoforge` 多子工程。
 - **其他版本**：只记录工程元数据，构建脚本、映射和依赖版本由助手核对官方模板后生成，工坊不凭空猜测版本号。
 - **Java 17**、Gradle Wrapper **8.8**（内置骨架统一使用）。
