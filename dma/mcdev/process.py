@@ -17,7 +17,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
-from . import gradle as gradle_mod, probe as probe_mod
+from ..gradle import windows_command
+from . import gradle as gradle_mod, probe as probe_mod, server_files
 
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
@@ -114,17 +115,30 @@ class LaunchManager:
         timeout = _clamp_timeout(timeout_ms)
         results: list[dict] = []
         if kind in {"server", "both"}:
-            results.append(self.launch("server", root, timeout))
+            # 服务器首次启动必须有 eula.txt；端口与离线模式也要和客户端对齐。
+            changed = server_files.ensure_server_files(root, join_port)
+            if changed:
+                self._emit(f"[mcdev] 已准备服务端运行文件：{'、'.join(changed)}")
+            results.append(self.launch("server", root, timeout, join_port=join_port))
+        ok = True
         if kind in {"client", "both"}:
             if kind == "both":
                 # 服务端启动后还有一段世界加载，先让客户端等两秒再握手。
                 self._sleep(2.0)
             client = self.launch("client", root, timeout)
             if not wait_join:
+                # 没有握手就无法确认已经进世界，不能谎报就绪。
+                client["joined"] = False
+                client["joinVerified"] = False
+                client["note"] = "wait_join=false：未验证客户端是否进入世界"
                 results.append(client)
+                ok = False
             else:
-                results.append(self._join_client(root, client, timeout, join_port))
-        return {"ok": True, "results": results}
+                joined = self._join_client(root, client, timeout, join_port)
+                joined["joinVerified"] = True
+                results.append(joined)
+                ok = bool(joined.get("joined") or joined.get("alreadyRunning"))
+        return {"ok": ok, "results": results}
 
     def _join_client(
         self, root: Path, client: dict, timeout: int, join_port: int
@@ -170,11 +184,21 @@ class LaunchManager:
         }
 
     # ------------------------------------------------------------------
-    def launch(self, kind: str, project_dir: str | Path, timeout_ms: int) -> dict:
+    def launch(
+        self,
+        kind: str,
+        project_dir: str | Path,
+        timeout_ms: int,
+        *,
+        join_port: int = 25566,
+    ) -> dict:
         root = Path(str(project_dir)).expanduser()
         port = probe_mod.probe_port(kind)
         if probe_mod.probe_status_once(kind, port, 1.0):
             return {"kind": kind, "alreadyRunning": True, "port": port}
+        if kind == "server":
+            # 直接点「启动服务端」也要补齐 eula / server.properties。
+            server_files.ensure_server_files(root, join_port)
         gradlew = root / ("gradlew.bat" if os.name == "nt" else "gradlew")
         if not gradlew.is_file():
             raise LaunchError(
@@ -186,9 +210,8 @@ class LaunchManager:
         log_path = log_dir / f"launch-{kind}-{stamp}.log"
         task = "runServer" if kind == "server" else "runClient"
         argv = [str(gradlew), task, "--console=plain"]
-        if os.name == "nt":
-            argv = ["cmd.exe", "/c"] + argv
         self._log_line(f"[mcdev] 启动 {kind}：{' '.join(argv)}")
+        argv = windows_command(argv)
         try:
             process = subprocess.Popen(
                 argv,

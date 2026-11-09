@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+from . import paths
+
 GRADLE_TASKS = {
     "build": "编译",
     "runClient": "开发客户端",
@@ -111,6 +113,11 @@ def build_env(
       这张根证书，所以这里通过 JAVA_OPTS 让 JVM 改用 Windows 证书库。
     """
     env = dict(os.environ if base is None else base)
+    # 默认把 Gradle 用户目录和临时文件放进程序自己的 data 下。
+    env.setdefault("GRADLE_USER_HOME", str(paths.gradle_home()))
+    temp = str(paths.temp_dir())
+    env["TEMP"] = temp
+    env["TMP"] = temp
 
     options = SLOW_HTTP_TIMEOUT_OPTS if slow else HTTP_TIMEOUT_OPTS
     opts = env.get("GRADLE_OPTS", "").strip()
@@ -149,6 +156,20 @@ class Launch:
     task: str
     source: str
     command: str | None = None
+
+
+def windows_command(argv: list[str]) -> list[str] | str:
+    """Windows 下把整条命令行原样交给 cmd.exe。
+
+    ``cmd /c "带空格的 gradlew.bat" task`` 会把第一个引号当成命令边界，
+    工程路径含空格时就被截断成 ``'D:\\Darkitten' 不是内部或外部命令``。
+    用 ``/d /s /c`` 再加一层外层引号，cmd 会先剥掉最外层引号，
+    剩下的 ``list2cmdline`` 命令行就能完整执行。
+    """
+    if os.name != "nt" or not argv:
+        return argv
+    inner = subprocess.list2cmdline([str(item) for item in argv])
+    return f'cmd.exe /d /s /c "{inner}"'
 
 
 def find_wrapper(project_root: Path | None) -> Path | None:
@@ -220,17 +241,13 @@ def resolve_launch(
     wrapper = find_wrapper(root)
     if wrapper is not None:
         if os.name == "nt":
-            # cmd /c 遇到多个带引号的参数时会把第一个引号当成命令边界，
-            # 路径里有空格就会报「'D:\Darkitten' 不是内部或外部命令」。
-            # 用 /s 加一层外层引号，把完整命令行原样交给 cmd。
-            inner = subprocess.list2cmdline([str(wrapper), *extra, task])
-            argv = ["cmd", "/d", "/s", "/c", str(wrapper), *extra, task]
+            argv = [str(wrapper), *extra, task]
             return Launch(
                 argv=argv,
                 cwd=root,
                 task=task,
                 source="wrapper",
-                command=f'cmd /d /s /c "{inner}"',
+                command=windows_command(argv),
             )
         argv = [str(wrapper), *extra, task]
         return Launch(argv=argv, cwd=root, task=task, source="wrapper")

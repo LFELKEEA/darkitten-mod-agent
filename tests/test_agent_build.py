@@ -65,7 +65,7 @@ class BuildToolTests(TempDataCase):
         self.assertIn("BUILD SUCCESSFUL", text)
         self.assertEqual(run.call_args.args[0], self.project.root)
         self.assertEqual(run.call_args.args[1], "build")
-        self.assertEqual(run.call_args.kwargs["timeout"], 1800)
+        self.assertEqual(run.call_args.kwargs["timeout"], 900)
         self.assertIs(run.call_args.kwargs["cancel"], self.worker._cancel)
 
     def test_build_tool_clamps_timeout(self) -> None:
@@ -80,7 +80,7 @@ class BuildToolTests(TempDataCase):
             self.worker._execute(
                 ToolCall(name="build_project", args={"timeout": 99999}), AgentRun()
             )
-            self.assertEqual(run.call_args.kwargs["timeout"], 3600)
+            self.assertEqual(run.call_args.kwargs["timeout"], 1800)
 
     def test_build_tool_reports_start_failure(self) -> None:
         with mock.patch(

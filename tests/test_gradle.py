@@ -89,7 +89,7 @@ class GradleResolveTests(TempDataCase):
         init.write_text("", encoding="utf-8")
         launch = gradle.resolve_launch(root, "build", init_script=init)
         self.assertIsNotNone(launch.command)
-        self.assertTrue(launch.command.startswith('cmd /d /s /c "'))
+        self.assertTrue(launch.command.startswith('cmd.exe /d /s /c "'))
         self.assertTrue(launch.command.endswith('"'))
         result = subprocess.run(
             launch.command,
@@ -156,6 +156,14 @@ class GradleResolveTests(TempDataCase):
         else:
             env = gradle.build_env(True, base=base)
             self.assertEqual(env["JAVA_OPTS"], "-Xmx2g")
+
+    def test_build_env_slow_timeouts_for_mirror(self) -> None:
+        """镜像代理可能要几十秒才回首个字节，Gradle 超时必须一起放宽。"""
+        normal = gradle.build_env(False, base={"GRADLE_OPTS": ""})
+        self.assertIn("socketTimeout=60000", normal["GRADLE_OPTS"])
+        slow = gradle.build_env(False, base={"GRADLE_OPTS": ""}, slow=True)
+        self.assertIn("socketTimeout=300000", slow["GRADLE_OPTS"])
+        self.assertIn("connectionTimeout=120000", slow["GRADLE_OPTS"])
 
     def test_required_gradle(self) -> None:
         text = (

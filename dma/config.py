@@ -64,11 +64,13 @@ class Config:
     ai: AIConfig = field(default_factory=AIConfig)
     project_root: str = ""
     last_project: str = ""
-    auto_apply: bool = False
+    auto_apply: bool = True
     auto_build: bool = True
     max_steps: int = DEFAULT_MAX_STEPS
     context_turns: int = 32
     context_turns_upgraded: bool = False
+    native_tools: bool = False
+    native_tools_upgraded: bool = False
     shortcut_offered: bool = False
     update_url: str = UPDATE_MANIFEST_URL
     window_width: int = 1320
@@ -81,6 +83,10 @@ class Config:
         if not self.context_turns_upgraded and turns <= 12:
             # 0.3.16 之前默认 12 轮，老配置里基本都停在这个值；统一提高到 32。
             turns = 32
+        native_tools = bool(self.native_tools)
+        if not self.native_tools_upgraded:
+            # 2.0 起默认走原生 function calling；升级前的配置没有这个字段。
+            native_tools = True
         root = self.project_root.strip()
         if not root:
             root = str(paths.default_project_root())
@@ -104,6 +110,8 @@ class Config:
             max_steps=normalize_max_steps(self.max_steps),
             context_turns=max(2, min(200, turns)),
             context_turns_upgraded=True,
+            native_tools=native_tools,
+            native_tools_upgraded=True,
             shortcut_offered=bool(self.shortcut_offered),
             update_url=(self.update_url or UPDATE_MANIFEST_URL).strip(),
             window_width=max(980, int(self.window_width or 1320)),

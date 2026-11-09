@@ -178,6 +178,16 @@ STEPS = [
         "action": ("现在新建", "new"),
     },
     {
+        "kind": "project",
+        "title": "或者：一句话直接生成整包",
+        "text": "打开「快速生成」，写一句模组构思，选加载器、MC 版本和规模。生成器会先产出 "
+                "mod-spec.json 与 GDD.md，再落地注册代码、纹理、模型、语言、配方、战利品、世界生成和社交系统，"
+                "并可按需继续审计、编译、启动服务端验证和打包。",
+        "tip": "生成器负责结构完整和可编译；具体玩法仍可以回到对话页继续细化。"
+                "不支持的加载器/版本组合会直接提示，不会假装可用。",
+        "action": ("去快速生成", "studio"),
+    },
+    {
         "kind": "chat",
         "title": "用一句话描述需求",
         "text": "在输入框写清要什么：物品、方块、机器、生物、事件都行，按 Ctrl+Enter 发送。"
@@ -332,6 +342,9 @@ class TutorialPage(QWidget):
             return
         if name == "settings":
             self.main.go_to(self.main.settings_page)
+            return
+        if name == "studio":
+            self.main.go_to(self.main.studio_page)
             return
         if name == "chat":
             self.main.go_to(self.main.chat_page)

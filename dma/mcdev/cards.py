@@ -114,13 +114,39 @@ def _is_float(text: str) -> bool:
     return left.isdigit() and right.isdigit()
 
 
+def strip_comment(line: str) -> str:
+    """去掉行内注释：引号里的 # 和紧贴文字的 a#b 都保留。"""
+    quote = ""
+    for index, char in enumerate(line):
+        if quote:
+            if char == quote and line[index - 1] != "\\":
+                quote = ""
+            continue
+        if char in {'"', "'"}:
+            quote = char
+            continue
+        if char == "#" and (index == 0 or line[index - 1] in " \t"):
+            return line[:index].rstrip()
+    return line
+
+
+def _reject_unsupported(value: str) -> None:
+    """手写解析器不支持的 YAML 语法要明确报错，不能静默给出错误值。"""
+    head = value.strip()
+    if head in {"|", "|-", "|+", ">", ">-", ">+"}:
+        raise ValueError("卡片 YAML 暂不支持多行块（| / >），请写成单行字符串。")
+    if head.startswith(("&", "*")):
+        raise ValueError("卡片 YAML 暂不支持锚点/引用（& / *）。")
+
+
 def parse_yaml(text: str):
     lines: list[dict] = []
     for raw in str(text).splitlines():
-        if not raw.strip() or raw.strip().startswith("#"):
+        cooked = strip_comment(raw)
+        if not cooked.strip():
             continue
-        stripped = raw.lstrip(" ")
-        indent = len(raw) - len(stripped)
+        stripped = cooked.lstrip(" ")
+        indent = len(cooked) - len(stripped)
         lines.append({"indent": indent, "content": stripped.strip()})
     if not lines:
         return {}
@@ -143,24 +169,26 @@ def parse_yaml(text: str):
             if line["indent"] != indent or not line["content"].startswith("-"):
                 break
             rest = line["content"][1:].strip()
+            _reject_unsupported(rest)
             state["index"] += 1
             if rest == "":
                 nxt = lines[state["index"]] if state["index"] < len(lines) else None
                 result.append(parse_block(nxt["indent"]) if nxt and nxt["indent"] > indent else None)
-            elif rest.startswith("{") or rest.startswith("["):
+                continue
+            if rest.startswith("{") or rest.startswith("["):
                 result.append(parse_inline_value(rest))
-            elif split_key_value(rest) is not None:
-                pair = split_key_value(rest)
-                assert pair is not None
-                item: dict = {unquote(pair[0]): parse_inline_value(pair[1])}
-                # 支持 `- key:` 后面跟缩进子块的写法。
-                if str(pair[1]).strip() == "":
-                    nxt = lines[state["index"]] if state["index"] < len(lines) else None
-                    if nxt and nxt["indent"] > indent:
-                        item[unquote(pair[0])] = parse_block(nxt["indent"])
-                result.append(item)
-            else:
+                continue
+            pair = split_key_value(rest)
+            if pair is None:
                 result.append(parse_inline_value(rest))
+                continue
+            item: dict = {unquote(pair[0]): parse_inline_value(pair[1])}
+            # 支持 `- key:` 后面跟缩进子块的写法。
+            if str(pair[1]).strip() == "":
+                nxt = lines[state["index"]] if state["index"] < len(lines) else None
+                if nxt and nxt["indent"] > indent:
+                    item[unquote(pair[0])] = parse_block(nxt["indent"])
+            result.append(item)
         return result
 
     def parse_mapping(indent: int) -> dict:
@@ -174,6 +202,7 @@ def parse_yaml(text: str):
                 break
             key = unquote(pair[0])
             rest = pair[1].strip()
+            _reject_unsupported(rest)
             state["index"] += 1
             if rest == "":
                 nxt = lines[state["index"]] if state["index"] < len(lines) else None
@@ -208,6 +237,8 @@ def map_card_op(op: object) -> str:
 
 
 def card_to_steps(card: dict) -> dict:
+    if not isinstance(card, dict):
+        return {"steps": [], "warnings": ["卡片必须是对象（mapping）"]}
     steps: list[dict] = []
     warnings: list[str] = []
 

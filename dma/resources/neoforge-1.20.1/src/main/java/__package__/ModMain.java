@@ -1,8 +1,8 @@
 package {{package}};
 
-import net.neoforged.bus.api.IEventBus;
-import net.neoforged.fml.common.Mod;
-import net.neoforged.neoforge.common.NeoForge;
+import net.minecraftforge.common.MinecraftForge;
+import net.minecraftforge.eventbus.api.IEventBus;
+import net.minecraftforge.fml.common.Mod;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -13,6 +13,6 @@ public class {{class_name}} {
 
     public {{class_name}}(IEventBus modEventBus) {
         LOGGER.info("{} initialized", MOD_ID);
-        NeoForge.EVENT_BUS.register(this);
+        MinecraftForge.EVENT_BUS.register(this);
     }
 }

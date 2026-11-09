@@ -171,7 +171,11 @@ def _registry_homes() -> list[Path]:
 
 
 def _search_roots() -> list[Path]:
-    roots = [Path.home() / ".jdks", Path.home() / ".gradle" / "jdks"]
+    roots = [
+        Path.home() / ".jdks",
+        paths.gradle_home() / "jdks",
+        Path.home() / ".gradle" / "jdks",
+    ]
     if os.name != "nt":
         return roots
     program_dirs = (

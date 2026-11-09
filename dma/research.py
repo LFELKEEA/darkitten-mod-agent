@@ -179,8 +179,10 @@ def grep_search(query: str, limit: int = 15) -> list[dict[str, Any]]:
     for item in hits or []:
         if not isinstance(item, dict):
             continue
-        repo = str(item.get("repo", {}).get("raw") or item.get("repo", {}).get("name") or "")
-        path = str(item.get("path", {}).get("raw") or item.get("path", {}).get("name") or "")
+        raw_repo = item.get("repo") or {}
+        raw_path = item.get("path") or {}
+        repo = str(raw_repo.get("raw") or raw_repo.get("name") or "") if isinstance(raw_repo, dict) else str(raw_repo)
+        path = str(raw_path.get("raw") or raw_path.get("name") or "") if isinstance(raw_path, dict) else str(raw_path)
         content = str(item.get("content", {}).get("snippet") or "")
         content = re.sub(r"<[^>]+>", "", content)
         result.append({"repo": repo, "path": path, "snippet": content.strip()})

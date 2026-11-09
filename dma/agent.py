@@ -5,6 +5,7 @@ import os
 import re
 import struct
 import threading
+import time
 import zlib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -16,10 +17,36 @@ from . import (
     ai,
     connectors,
     mcdev,
+    paths,
     project as project_mod,
     research,
+    studio_bridge,
 )
 from .config import Config
+from .kernel import mappings as kernel_mappings
+from .kernel import symbols as kernel_symbols
+from .kernel.edit import (
+    FileCache,
+    diff_text,
+    insert_member_text,
+    replace_body_text,
+    replace_symbol,
+)
+from .kernel.tools import blockbench as tool_blockbench
+from .kernel.tools import cache as tool_cache
+from .kernel.tools import configgen as tool_configgen
+from .kernel.tools import crash as tool_crash
+from .kernel.tools import diagnostics as tool_diagnostics
+from .kernel.tools import impact as tool_impact
+from .kernel.tools import library as tool_library
+from .kernel.tools import matrix as tool_matrix
+from .kernel.tools import migration as tool_migration
+from .kernel.tools import screenshot as tool_screenshot
+from .kernel.tools import templates as tool_templates
+from .kernel.tools import testgen as tool_testgen
+from .kernel.tools import texture as tool_texture
+from .kernel.tools import vision as tool_vision
+from .kernel_bridge import KernelBridge
 from .knowledge import (
     KnowledgeStore,
     decompile_jar_sources,
@@ -29,6 +56,7 @@ from .knowledge import (
 from .memory import MemoryStore, memory_context
 from .prompt import build_system_prompt
 from .skills import SkillStore
+from .tool_schema import TOOL_DEFINITIONS
 
 TOOL_FENCE_RE = re.compile(r"```(?:tool|dma-tool)[ \t]*\r?\n(.*?)\r?\n?```", re.S)
 TOOL_TAG_START_RE = re.compile(r"<tool\b", re.I)
@@ -67,6 +95,26 @@ BUILD_TRIGGER_EXTS = {
     ".toml", ".xml", ".mcmeta", ".lang", ".yml", ".yaml", ".glsl", ".fsh",
     ".vsh", ".cfg", ".conf",
 }
+KERNEL_TOOLS = {
+    "lint_project", "symbol_query", "mapping_translate", "impact_analysis",
+    "log_parse", "snapshot", "snapshot_list", "rollback", "asset_lint",
+    "texture_gen", "vision_review", "blockbench", "testgen", "migration_plan",
+    "screenshot_collect", "offline_cache", "asset_library", "config_gen",
+    "matrix_plan", "debug_scaffold",
+}
+
+
+def _split_symbol(symbol: str) -> tuple[str, str]:
+    text = (symbol or "").strip()
+    if not text:
+        return "", ""
+    if "#" in text:
+        left, right = text.split("#", 1)
+        return left.strip(), right.strip().split("(")[0].strip()
+    if "." in text:
+        left, right = text.rsplit(".", 1)
+        return left.strip(), right.strip().split("(")[0].strip()
+    return "", text.split("(")[0].strip()
 
 
 def _needs_build(paths: list[str]) -> bool:
@@ -155,6 +203,7 @@ class ToolCall:
     name: str
     args: dict[str, Any]
     raw: str = ""
+    call_id: str = ""
 
 
 @dataclass
@@ -337,7 +386,11 @@ def _compact_messages(messages: list[dict[str, Any]]) -> None:
             break
         item = messages[index]
         content = str(item.get("content") or "")
-        if item.get("role") != "user" or not content.startswith("[工具结果："):
+        role = item.get("role")
+        if role == "user":
+            if not content.startswith("[工具结果："):
+                continue
+        elif role != "tool":
             continue
         if len(content) <= 1800:
             continue
@@ -530,6 +583,27 @@ def extract_file_blocks(text: str) -> list[PendingFile]:
     return files
 
 
+def _arg_int(args: dict[str, Any], key: str, default: int) -> int:
+    """把工具参数转成整数；模型传了非数字时给出可读错误，而不是 traceback。"""
+    raw = args.get(key)
+    if raw is None or raw == "":
+        return default
+    try:
+        return int(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"参数 {key} 必须是整数，收到：{raw!r}") from exc
+
+
+def _arg_float(args: dict[str, Any], key: str, default: float) -> float:
+    raw = args.get(key)
+    if raw is None or raw == "":
+        return default
+    try:
+        return float(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"参数 {key} 必须是数字，收到：{raw!r}") from exc
+
+
 def _depth_ok(path: Path, root: Path, depth: int) -> bool:
     try:
         relative = path.relative_to(root)
@@ -593,6 +667,11 @@ class AgentWorker(QObject):
         self.mcdev.set_log(self._probe_log)
         self._cancel = threading.Event()
         self._thread: threading.Thread | None = None
+        self.kernel: KernelBridge | None = None
+        self._file_cache = FileCache()
+        self._read_offsets: dict[str, int] = {}
+        self._native_disabled = False
+        self._symbol_index = None
 
     @property
     def cancelled(self) -> bool:
@@ -632,6 +711,50 @@ class AgentWorker(QObject):
         if line:
             self.status.emit(line[-200:])
 
+    def _chat(self, messages: list[dict[str, Any]]) -> tuple[str, list[ToolCall], dict | None]:
+        """Native function calling first, text protocol only as a fallback."""
+        # 模型接口没有流式进度，等待期间每 5 秒报一次心跳，避免界面看起来像死机。
+        stop = threading.Event()
+        started = time.time()
+
+        def beat() -> None:
+            while not stop.wait(5):
+                self.status.emit(
+                    f"正在等待模型响应…已用 {int(time.time() - started)} 秒"
+                )
+
+        threading.Thread(target=beat, daemon=True).start()
+        try:
+            return self._chat_once(messages)
+        finally:
+            stop.set()
+
+    def _chat_once(
+        self, messages: list[dict[str, Any]]
+    ) -> tuple[str, list[ToolCall], dict | None]:
+        if getattr(self.config, "native_tools", False) and not self._native_disabled:
+            try:
+                result = ai.request_chat_tools(
+                    self.config.ai, messages, TOOL_DEFINITIONS, cancel=self._cancel
+                )
+            except ai.AIToolsUnsupported:
+                self._native_disabled = True
+                self.status.emit("当前通道不支持原生工具调用，回退到文本协议。")
+            except ai.AIError:
+                raise
+            else:
+                calls = [
+                    ToolCall(
+                        name=item["name"],
+                        args=item.get("arguments") or {},
+                        call_id=item.get("id") or "",
+                    )
+                    for item in result.get("tool_calls") or []
+                ]
+                return result.get("content") or "", calls, result.get("message") or {}
+        reply = ai.request_chat(self.config.ai, messages, cancel=self._cancel)
+        return reply, parse_tool_calls(reply), None
+
     def _loop(self) -> AgentRun:
         project = self.project
         project_key = str(project.root) if project is not None else ""
@@ -648,6 +771,15 @@ class AgentWorker(QObject):
                 knowledge_hits = self.knowledge.overview_hits(
                     project=project_key, limit=1
                 )
+        self.kernel = KernelBridge(
+            project.root if project is not None else None,
+            idea=self.user_text,
+            loader=getattr(getattr(project, "meta", None), "loader", "") or "NeoForge",
+            mc=getattr(getattr(project, "meta", None), "mc_version", "") or "1.21.1",
+            modid=getattr(getattr(project, "meta", None), "mod_id", "") or "",
+            package="",
+            side="both",
+        )
         system = build_system_prompt(
             project,
             self.skill_store,
@@ -656,6 +788,7 @@ class AgentWorker(QObject):
             max_steps=self.config.max_steps,
             knowledge_text=knowledge_context(knowledge_hits),
             query=self.user_text,
+            kernel_text=self.kernel.prompt_block(),
         )
         messages: list[dict[str, Any]] = [{"role": "system", "content": system}]
         messages.extend(_history_window(self.history, self.config.context_turns))
@@ -682,8 +815,7 @@ class AgentWorker(QObject):
                 self.status.emit(f"正在请求模型（第 {step} 轮，不限制）…")
             else:
                 self.status.emit(f"正在请求模型（第 {step}/{limit} 轮）…")
-            reply = ai.request_chat(self.config.ai, messages)
-            calls = parse_tool_calls(reply)
+            reply, calls, native_message = self._chat(messages)
 
             visible = strip_tool_blocks(reply)
             for item in extract_file_blocks(visible or reply):
@@ -730,10 +862,14 @@ class AgentWorker(QObject):
                     ok, report = self._auto_build()
                     base = (visible or reply.strip()).strip()
                     if ok:
-                        final_text = (base + "\n\n自动编译通过。\n" + report).strip()
+                        final_text = self._finalize_text(
+                            (base + "\n\n自动编译通过。\n" + report).strip()
+                        )
                         run.text = final_text
                         return run
-                    if auto_builds >= 2:
+                    if auto_builds >= 2 or (
+                        self.kernel is not None and self.kernel.guard.should_stop()
+                    ):
                         final_text = (
                             base + "\n\n自动编译失败，已停止自动修复。\n\n" + report
                         ).strip()
@@ -768,31 +904,59 @@ class AgentWorker(QObject):
                     ).strip()
                 if intent_retries >= 2 and _looks_like_action_intent(final_text):
                     final_text += "\n\n（这次没有实际执行工具调用。再发送「继续」我会接着执行。）"
+                final_text = self._finalize_text(final_text)
                 run.text = final_text
                 return run
 
             if visible:
                 self.assistant.emit(visible)
 
-            messages.append({"role": "assistant", "content": reply})
-            results: list[str] = []
-            for call in calls:
-                if self.cancelled:
-                    raise AgentError("已取消")
-                self.status.emit(_tool_status(call))
-                result = self._execute(call, run)
-                results.append(f"[工具结果：{call.name}]\n{result}")
-            messages.append(
-                {
-                    "role": "user",
-                    "content": "\n\n".join(results)[:MAX_STEP_RESULT],
-                }
-            )
+            if native_message is not None:
+                assistant_message: dict[str, Any] = {"role": "assistant", "content": reply}
+                if native_message.get("tool_calls"):
+                    assistant_message["tool_calls"] = native_message["tool_calls"]
+                messages.append(assistant_message)
+                for call in calls:
+                    if self.cancelled:
+                        raise AgentError("已取消")
+                    self.status.emit(_tool_status(call))
+                    result = self._execute(call, run)
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": call.call_id or call.name,
+                            "content": result[:MAX_TOOL_RESULT],
+                        }
+                    )
+            else:
+                messages.append({"role": "assistant", "content": reply})
+                results: list[str] = []
+                for call in calls:
+                    if self.cancelled:
+                        raise AgentError("已取消")
+                    self.status.emit(_tool_status(call))
+                    result = self._execute(call, run)
+                    results.append(f"[工具结果：{call.name}]\n{result}")
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": "\n\n".join(results)[:MAX_STEP_RESULT],
+                    }
+                )
             _compact_messages(messages)
 
         final_text = final_text or "已达到工具调用轮数上限。请继续发送消息，让我接着完成剩余部分。"
-        run.text = final_text
+        run.text = self._finalize_text(final_text)
         return run
+
+    def _finalize_text(self, final_text: str) -> str:
+        if self.kernel is None or self.kernel.last_build_ok is None:
+            return final_text
+        try:
+            gate = self.kernel.finalize(build_ok=self.kernel.last_build_ok)
+        except Exception as exc:  # noqa: BLE001 - 验收输出失败不能吞掉主结果
+            return final_text + f"\n\n（验收自检失败：{exc}）"
+        return (final_text + "\n\n" + gate).strip() if gate else final_text
 
     def _stage_file(self, item: PendingFile, run: AgentRun) -> bool:
         if self.project is None:
@@ -803,6 +967,10 @@ class AgentWorker(QObject):
             self.status.emit(f"跳过不安全路径 {item.path}：{exc}")
             return False
         relative = target.relative_to(self.project.root.resolve()).as_posix()
+        if self.kernel is not None:
+            feature_id = self.kernel.record_edit(relative)
+            if feature_id and not item.reason:
+                item.reason = f"feature:{feature_id}"
         staged = PendingFile(path=relative, content=item.content, reason=item.reason)
         if self.config.auto_apply:
             try:
@@ -839,11 +1007,21 @@ class AgentWorker(QObject):
 
     def _auto_build(self) -> tuple[bool, str]:
         self.status.emit("文件已写入，正在自动编译…")
+        if self.kernel is not None:
+            self.kernel.before_build("auto-build")
         try:
             result = _run_gradle(self.project.root, "build", 900, self._cancel, self._build_log)
         except Exception as exc:  # noqa: BLE001 - 自动编译失败不应吞掉本轮结果
             return False, f"自动编译没有开始：{exc}"
         report = _build_report(result)
+        if self.kernel is not None:
+            verdict = self.kernel.record_build(result.ok, result.output)
+            if verdict.get("action") == "stop":
+                report = (
+                    report
+                    + "\n\n"
+                    + str(verdict.get("advice") or "已停止自动修复，建议人工介入。")
+                )
         if result.ok:
             self._emit_artifact(result)
         return result.ok, report
@@ -959,15 +1137,131 @@ class AgentWorker(QObject):
             if loader == "Forge" and mc_version == mcdev.templates.MC_VERSION
             else "该加载器/版本不使用游戏内探针：先 build_project，再用 mcdev_prepare 启动开发端，并查看运行日志 / GameTest。"
         )
+        # Fabric / NeoForge 的公开类名是 <Mod>Mod，文件名必须跟着改；
+        # Forge 1.20.1 的入口类本身就叫 ModMain。
+        entry_file = "ModMain.java"
+        if loader != "Forge":
+            entry_file = (
+                "".join(part.capitalize() for part in mod_id.split("_")) + "Mod.java"
+            )
         return (
             f"{loader} 工程已创建。\n"
             f"- 目录：{target}\n"
             f"- Mod ID：{mod_id}\n"
             f"- 包名：{package_name}\n"
             f"- Minecraft：{mc_version} / {loader}\n"
-            f"- 入口类：src/main/java/{package_name.replace('.', '/')}/ModMain.java\n\n"
+            f"- 入口类：src/main/java/{package_name.replace('.', '/')}/{entry_file}\n\n"
             f"下一步：先改代码，再验证。{probe_hint}"
         )
+
+    # ------------------------------------------------------------------
+    def _studio_plan(self, args: dict[str, Any]) -> str:
+        idea = str(args.get("idea") or args.get("prompt") or "").strip()
+        loader = str(
+            args.get("loader")
+            or (self.project.meta.loader if self.project else "")
+            or "Forge"
+        ).strip()
+        mc = str(
+            args.get("mc")
+            or args.get("mc_version")
+            or (self.project.meta.mc_version if self.project else "")
+            or "1.20.1"
+        ).strip()
+        try:
+            spec = studio_bridge.plan(
+                idea,
+                loader,
+                mc,
+                name=str(args.get("name") or "").strip(),
+                modid=str(args.get("modid") or args.get("mod_id") or "").strip(),
+                package=str(args.get("package") or "").strip(),
+                scope=str(args.get("scope") or "medium").strip(),
+                author=str(args.get("author") or "").strip(),
+            )
+        except studio_bridge.StudioError as exc:
+            return f"规格生成失败：{exc}"
+        markdown = studio_bridge.spec_markdown(spec)
+        prefix = ""
+        if self.project is not None:
+            try:
+                project_mod.write_text(
+                    self.project.root,
+                    "mod-spec.json",
+                    json.dumps(spec, ensure_ascii=False, indent=2) + "\n",
+                )
+                project_mod.write_text(self.project.root, "GDD.md", markdown)
+                self.project.meta.notes = (
+                    f"规格驱动：{len(spec.get('content', []))} 个内容节点，主题 "
+                    + "、".join(spec.get("themes", []))
+                )
+                self.project.save()
+                prefix = (
+                    f"规格已写入 {self.project.root}\\mod-spec.json 和 GDD.md。"
+                    "接下来可以用 studio_build 或 build_project 编译。\n\n"
+                )
+            except Exception as exc:  # noqa: BLE001 - 写规格失败不应阻止返回规格内容
+                prefix = f"规格已生成，但写入工程失败：{exc}\n\n"
+        return (prefix + markdown)[:MAX_TOOL_RESULT]
+
+    def _studio_generate(self, args: dict[str, Any]) -> str:
+        idea = str(args.get("idea") or args.get("prompt") or "").strip()
+        loader = str(
+            args.get("loader")
+            or (self.project.meta.loader if self.project else "")
+            or "Forge"
+        ).strip()
+        mc = str(
+            args.get("mc")
+            or args.get("mc_version")
+            or (self.project.meta.mc_version if self.project else "")
+            or "1.20.1"
+        ).strip()
+        raw_dest = str(args.get("dest") or args.get("path") or "").strip()
+        if raw_dest:
+            base = Path(raw_dest).expanduser()
+        elif self.project is not None:
+            base = self.project.root.parent
+        else:
+            base = Path(self.config.project_root or paths.default_project_root()).expanduser()
+        try:
+            result = studio_bridge.generate(
+                idea=idea,
+                loader=loader,
+                mc=mc,
+                dest_root=base,
+                name=str(args.get("name") or "").strip(),
+                modid=str(args.get("modid") or args.get("mod_id") or "").strip(),
+                package=str(args.get("package") or "").strip(),
+                scope=str(args.get("scope") or "medium").strip(),
+                author=str(args.get("author") or "").strip(),
+                force=bool(args.get("overwrite")),
+                use_mdk=bool(args.get("use_mdk", True)),
+                audit_after=bool(args.get("audit", True)),
+                build_after=bool(args.get("build")),
+                verify_after=bool(args.get("verify")),
+                package_after=bool(args.get("package")),
+                progress=self._build_log,
+            )
+        except Exception as exc:  # noqa: BLE001 - 生成失败要把原因带回对话
+            return f"规格驱动生成失败：{exc}"
+        target = Path(result["project"])
+        try:
+            new_project = project_mod.load_project(target)
+            new_project.save()
+        except Exception:  # noqa: BLE001 - 登记失败不影响工程本身
+            new_project = None
+        if new_project is not None:
+            self.project = new_project
+            self.project_created.emit(str(target))
+        summary = studio_bridge.summarize(result)
+        return (
+            f"{summary}\n\n"
+            f"工程目录：{target}\n"
+            "规格文件：mod-spec.json，设计文档：GDD.md。\n"
+            "下一步：读 GDD.md 和关键注册类，按用户需求用 write_file / edit_file 继续细化；"
+            "改动后用 studio_build 或 build_project 编译，再按加载器选择 studio_verify / mcdev_prepare 验证。"
+        )[:MAX_TOOL_RESULT]
 
     # ------------------------------------------------------------------
     def _execute(self, call: ToolCall, run: AgentRun) -> str:
@@ -987,6 +1281,8 @@ class AgentWorker(QObject):
             "scaffold_project",
             "scaffold_forge_project",
             "forge_scaffold",
+            "studio_plan",
+            "studio_generate",
             "mcdev_prepare",
             "mcdev_stop",
             "mcdev_launch_status",
@@ -1007,9 +1303,10 @@ class AgentWorker(QObject):
                 return _list_files(
                     root,
                     str(args.get("path") or "."),
-                    int(args.get("depth") or 2),
+                    _arg_int(args, "depth", 2),
                 )
             if name == "read_file":
+                relative = str(args.get("path") or "").strip()
                 try:
                     offset = max(0, int(args.get("offset") or 0))
                 except (TypeError, ValueError):
@@ -1019,21 +1316,39 @@ class AgentWorker(QObject):
                 except (TypeError, ValueError):
                     window = 14000
                 window = max(1000, min(MAX_TOOL_RESULT, window))
+                target = project_mod.safe_path(self.project.root, relative)
+                current_hash = self._file_cache.hash(target)
+                since = str(args.get("since_hash") or "").strip()
+                if since and since == current_hash:
+                    return f"文件未变化：{relative}（hash={current_hash}）"
                 text = project_mod.read_text(
                     self.project.root,
-                    str(args.get("path") or ""),
-                    max_chars=min(MAX_TOOL_RESULT, offset + window),
+                    relative,
+                    max_chars=MAX_TOOL_RESULT + offset,
                 )
                 if offset:
                     if offset >= len(text):
                         return f"offset={offset} 超过可读长度（{len(text)} 字符）。"
                     text = text[offset:]
-                return text[:MAX_TOOL_RESULT]
+                piece = text[:window]
+                self._read_offsets[relative] = offset + len(piece)
+                end = offset + len(piece)
+                total = len(text) + offset
+                hint = ""
+                if end < total:
+                    hint = (
+                        f"\n\n（本次 {offset}～{end}/{total} 字符；继续读请带 offset={end}，"
+                        f"文件未改时 since_hash={current_hash} 会直接返回“未变化”。）"
+                    )
+                return (
+                    f"[read_file] path={relative} hash={current_hash} "
+                    f"range={offset}-{end}/{total}\n{piece}{hint}"
+                )[:MAX_TOOL_RESULT]
             if name == "search_text":
                 hits = project_mod.search_text(
                     self.project.root,
                     str(args.get("query") or ""),
-                    max_results=int(args.get("limit") or 40),
+                    max_results=_arg_int(args, "limit", 40),
                 )
                 return "\n".join(hits) if hits else "没有找到匹配内容。"
             if name == "write_file":
@@ -1100,10 +1415,11 @@ class AgentWorker(QObject):
                     new = str(args.get("new"))
                 else:
                     new = str(args.get("replacement") or "")
+                symbol = str(args.get("symbol") or args.get("method") or "").strip()
+                member = str(args.get("member") or "").strip()
+                mode = str(args.get("mode") or "auto").strip().lower()
                 if not relative:
                     return "edit_file 缺少 path。"
-                if not old:
-                    return "edit_file 缺少 old（要替换的原文）。"
                 try:
                     current = project_mod.read_text(
                         self.project.root, relative, max_chars=2 * 1024 * 1024
@@ -1112,15 +1428,57 @@ class AgentWorker(QObject):
                     return f"读取失败：{exc}"
                 if "…（已截断" in current:
                     return "文件太大，edit_file 需要完整内容，请改用 write_file 重写整份文件。"
-                if old not in current:
-                    return (
-                        f"没有在 {relative} 里找到要替换的原文。"
-                        "请先用 read_file 确认内容，old 必须和文件里的字符完全一致。"
-                    )
-                updated = current.replace(old, new, 1)
+                updated = ""
+                detail = ""
+                if symbol or member:
+                    class_name, method = _split_symbol(symbol)
+                    if not class_name:
+                        match = re.search(r"\b(?:class|enum|record|interface)\s+(\w+)", current)
+                        class_name = match.group(1) if match else ""
+                    if member or mode == "insert":
+                        code = member or new
+                        if not code.strip():
+                            return "edit_file symbol 插入模式需要 member 或 new。"
+                        updated, result = insert_member_text(
+                            current,
+                            class_name=class_name,
+                            code=code,
+                            source=relative,
+                        )
+                        detail = f"插入成员到 {class_name or '类'}"
+                    elif method:
+                        if not new.strip():
+                            return "edit_file 需要 new（新的方法体）。"
+                        updated, result = replace_body_text(
+                            current,
+                            class_name=class_name,
+                            method=method,
+                            body=new,
+                            source=relative,
+                        )
+                        detail = f"替换方法体 {class_name}#{method}"
+                    else:
+                        result = None
+                    if updated is None:
+                        message = result.message if result is not None else "symbol 格式应为 Class 或 Class.method"
+                        return (
+                            f"AST 定位失败：{relative}（{message}）。"
+                            "可以改用 old/new 精确替换，或先用 read_file 确认类名/方法名。"
+                        )
+                else:
+                    if not old:
+                        return "edit_file 缺少 old（要替换的原文）。"
+                    if old not in current:
+                        return (
+                            f"没有在 {relative} 里找到要替换的原文。"
+                            "请先用 read_file 确认内容，old 必须和文件里的字符完全一致。"
+                        )
+                    updated = current.replace(old, new, 1)
+                    detail = "替换 1 处"
                 item = PendingFile(path=relative, content=updated, reason="edit")
                 if not self._stage_file(item, run):
                     return f"修改失败：路径不合法（{relative}）。"
+                self._file_cache.invalidate(project_mod.safe_path(self.project.root, relative))
                 written = any(
                     entry.applied
                     for entry in self.pending
@@ -1128,7 +1486,13 @@ class AgentWorker(QObject):
                 )
                 state = "已自动写入" if written else "已加入待写入列表"
                 delta = len(updated) - len(current)
-                return f"{state}：{relative}（替换 1 处，{delta:+d} 字符）"
+                diff = diff_text(current, updated, relative)
+                hunks = sum(1 for line in diff.splitlines() if line.startswith("@@"))
+                return (
+                    f"{state}：{relative}（{detail}，{delta:+d} 字符"
+                    + (f"，{hunks} 个差异块" if hunks else "")
+                    + "）"
+                )
             if name in {"scaffold_project", "scaffold_forge_project", "forge_scaffold"}:
                 return self._scaffold(args)
             if name == "read_skill":
@@ -1153,7 +1517,7 @@ class AgentWorker(QObject):
                 items = self.memory.recall(
                     project_key,
                     str(args.get("query") or ""),
-                    limit=int(args.get("limit") or 8),
+                    limit=_arg_int(args, "limit", 8),
                 )
                 return memory_context(items) or "没有找到相关记忆。"
             if name == "search_knowledge":
@@ -1163,8 +1527,8 @@ class AgentWorker(QObject):
                 hits = self.knowledge.search(
                     str(args.get("query") or ""),
                     project=project_key,
-                    limit=int(args.get("limit") or 8),
-                    budget=int(args.get("budget") or MAX_TOOL_RESULT),
+                    limit=_arg_int(args, "limit", 8),
+                    budget=_arg_int(args, "budget", MAX_TOOL_RESULT),
                 )
                 if not hits:
                     overview = self.knowledge.overview_hits(
@@ -1308,7 +1672,7 @@ class AgentWorker(QObject):
                         repo,
                         ref=str(args.get("ref") or ""),
                         path=str(args.get("path") or ""),
-                        limit=int(args.get("limit") or 260),
+                        limit=_arg_int(args, "limit", 260),
                     )
                     return "\n".join(rows) if rows else "仓库目录为空。"[:MAX_TOOL_RESULT]
                 path = str(args.get("path") or "").strip()
@@ -1365,10 +1729,12 @@ class AgentWorker(QObject):
             if name == "build_project":
                 task = str(args.get("task") or "build").strip()
                 try:
-                    limit = float(args.get("timeout") or 1800)
+                    limit = float(args.get("timeout") or 900)
                 except (TypeError, ValueError):
-                    limit = 1800.0
-                limit = min(max(limit, 60.0), 3600.0)
+                    limit = 900.0
+                limit = min(max(limit, 60.0), 1800.0)
+                if self.kernel is not None and task == "build":
+                    self.kernel.before_build("tool-build")
                 try:
                     result = _run_gradle(
                         self.project.root, task, limit, self._cancel, self._build_log
@@ -1376,6 +1742,10 @@ class AgentWorker(QObject):
                 except mcdev.gradle.GradleError as exc:
                     return f"编译没有开始：{exc}"
                 report = _build_report(result)
+                if self.kernel is not None and task == "build":
+                    verdict = self.kernel.record_build(result.ok, result.output)
+                    if verdict.get("action") == "stop":
+                        report += "\n\n" + str(verdict.get("advice") or "")
                 if task == "build":
                     self._emit_artifact(result)
                 return report
@@ -1384,20 +1754,431 @@ class AgentWorker(QObject):
                 if not url:
                     return "fetch_url 缺少 url。"
                 return connectors.fetch_url(url)[:MAX_FETCH_RESULT]
+            if name == "studio_plan":
+                return self._studio_plan(args)
+            if name == "studio_generate":
+                return self._studio_generate(args)
+            if name == "studio_audit":
+                report = studio_bridge.audit_project(
+                    self.project.root, progress=self._build_log
+                )
+                return studio_bridge.audit_mod.summarize(report)
+            if name == "studio_build":
+                try:
+                    limit = int(float(args.get("timeout") or 1800))
+                except (TypeError, ValueError):
+                    limit = 1800
+                report = studio_bridge.build_project(
+                    self.project.root, timeout=min(max(limit, 120), 3600),
+                    fix=bool(args.get("fix", True)), progress=self._build_log,
+                )
+                summary = studio_bridge.build_mod.summarize(report)
+                errors = report.get("errors") or []
+                if errors:
+                    detail = "\n".join(
+                        f"- {item.get('file', '')}:{item.get('line', '')} {item.get('message', '')}"
+                        for item in errors[:20]
+                    )
+                    summary += "\n" + detail
+                if self.kernel is not None:
+                    self.kernel.before_build("studio-build")
+                    self.kernel.record_build(bool(report.get("ok")), summary)
+                return summary
+            if name == "studio_verify":
+                try:
+                    limit = int(float(args.get("timeout") or 600))
+                except (TypeError, ValueError):
+                    limit = 600
+                report = studio_bridge.verify_project(
+                    self.project.root, timeout=min(max(limit, 120), 1800),
+                    progress=self._build_log,
+                )
+                if self.kernel is not None and not report.get("skipped"):
+                    self.kernel.record_runtime(bool(report.get("ok")))
+                return studio_bridge.verify_mod.summarize(report)
+            if name == "studio_package":
+                report = studio_bridge.package_project(
+                    self.project.root, progress=self._build_log
+                )
+                return studio_bridge.package_mod.summarize(report)
+            if name in KERNEL_TOOLS:
+                return self._execute_kernel(name, args)
             if name.startswith("mcdev_"):
                 return self._execute_mcdev(name, args)
             return (
                 f"未知工具：{name}。可用工具：list_files、read_file、search_text、write_file、"
                 "edit_file、pixel_art、scaffold_project、build_project、"
+                "studio_plan、studio_generate、studio_audit、studio_build、"
+                "studio_verify、studio_package、"
                 "read_skill、remember、recall、search_knowledge、read_knowledge、"
                 "decompile_jar、fetch_url、search_code、github_repo、github_tree、github_file、"
                 "mcdev_prepare、mcdev_stop、mcdev_launch_status、mcdev_status、"
                 "mcdev_command、mcdev_ui、mcdev_click、mcdev_screenshot、mcdev_run_dump、"
                 "mcdev_use、mcdev_install_probe、mcdev_scenario、mcdev_build、"
-                "mcdev_gametest、mcdev_build_probe。"
+                "mcdev_gametest、mcdev_build_probe、"
+                "lint_project、symbol_query、mapping_translate、impact_analysis、"
+                "log_parse、snapshot、snapshot_list、rollback、asset_lint、"
+                "texture_gen、vision_review、blockbench、testgen、migration_plan、"
+                "screenshot_collect、offline_cache。"
             )
         except Exception as exc:
             return f"工具执行失败：{exc}"
+
+    # ------------------------------------------------------------------
+    def _execute_kernel(self, name: str, args: dict[str, Any]) -> str:
+        root = self.project.root
+        if name == "lint_project":
+            levels = {str(args.get("level"))} if args.get("level") else None
+            from .kernel.checks import run_checks
+
+            report = run_checks(
+                root,
+                levels=levels,
+                only={str(args["checker"])} if args.get("checker") else None,
+            )
+            if self.kernel is not None:
+                self.kernel.last_lint = report
+            return report.markdown()[:MAX_TOOL_RESULT]
+        if name == "symbol_query":
+            if self._symbol_index is None or args.get("refresh"):
+                index = kernel_symbols.SymbolIndex()
+                class_paths = sorted((root / ".dma" / "classpath").glob("*.jar"))
+                index.build(root, class_paths=class_paths)
+                self._symbol_index = index
+            query = str(args.get("query") or "").strip()
+            kind = str(args.get("kind") or "auto").strip().lower()
+            limit = max(1, min(_arg_int(args, "limit", 20), 100))
+            if not query:
+                return "symbol_query 缺少 query。"
+            if kind == "callers":
+                rows = self._symbol_index.callers_of(query, limit=limit)
+            elif kind == "listeners":
+                rows = self._symbol_index.listeners_for(query, limit=limit)
+            elif kind == "overrides":
+                owner, method = _split_symbol(query)
+                rows = [
+                    item.to_dict() for item in self._symbol_index.overrides_of(owner, method)
+                ] if owner else []
+            else:
+                rows = self._symbol_index.lookups(query, limit=limit)
+            return json.dumps(rows, ensure_ascii=False, indent=2)[:MAX_TOOL_RESULT]
+        if name == "mapping_translate":
+            source_name = str(args.get("name") or "").strip()
+            if not source_name:
+                return "mapping_translate 缺少 name。"
+            target = str(args.get("to") or "mojmap")
+            kind = str(args.get("kind") or "auto")
+            info = kernel_mappings.detect_project(root)
+            if kind == "method":
+                translated = kernel_mappings.normalize_method(source_name, target)
+            elif kind == "class":
+                translated = kernel_mappings.normalize_class(source_name, target)
+            else:
+                translated = (
+                    kernel_mappings.normalize_method(source_name, target)
+                    if source_name[:1].islower()
+                    else kernel_mappings.normalize_class(source_name, target)
+                )
+            return json.dumps(
+                {
+                    "project": info.to_dict(),
+                    "input": source_name,
+                    "target": target,
+                    "translated": translated,
+                    "detectedNamespace": kernel_mappings.classify_namespace(source_name),
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        if name == "impact_analysis":
+            changed = args.get("paths")
+            if isinstance(changed, str):
+                changed = [changed]
+            if not changed and args.get("git", True):
+                changed = tool_impact.changed_from_git(root)
+            if not changed:
+                return "没有待分析的改动；请传 paths，或在 Git 工程里先修改文件。"
+            report = tool_impact.analyze(root, [str(item) for item in changed])
+            return report.markdown()[:MAX_TOOL_RESULT]
+        if name == "log_parse":
+            raw = str(args.get("text") or "")
+            path = str(args.get("path") or "").strip()
+            if path:
+                target = project_mod.safe_path(root, path)
+                raw = target.read_text(encoding="utf-8", errors="replace")
+            if not raw.strip():
+                return "log_parse 需要 text 或 path。"
+            report = tool_crash.parse(raw, source=path)
+            causes = tool_crash.classify(report)
+            clusters = tool_crash.cluster([report])
+            return (
+                report.markdown()
+                + "\n\n### 分类\n"
+                + json.dumps(causes, ensure_ascii=False, indent=2)
+                + "\n\n### 聚类\n"
+                + json.dumps(clusters, ensure_ascii=False, indent=2)
+            )[:MAX_TOOL_RESULT]
+        if name == "snapshot":
+            if self.kernel is None or self.kernel.snapshots is None:
+                return "没有工程，无法创建快照。"
+            snap = self.kernel.snapshots.create(
+                str(args.get("label") or "manual"), str(args.get("note") or "")
+            )
+            return json.dumps(snap.to_dict(), ensure_ascii=False, indent=2)[:MAX_TOOL_RESULT]
+        if name == "snapshot_list":
+            return json.dumps(
+                self.kernel.list_snapshots() if self.kernel else {"snapshots": []},
+                ensure_ascii=False,
+                indent=2,
+            )[:MAX_TOOL_RESULT]
+        if name == "rollback":
+            if self.kernel is None:
+                return "没有工程，无法回滚。"
+            result = self.kernel.rollback(
+                str(args.get("snapshot") or ""), dry_run=bool(args.get("dry_run"))
+            )
+            return json.dumps(result, ensure_ascii=False, indent=2)[:MAX_TOOL_RESULT]
+        if name == "asset_lint":
+            from .kernel.checks import run_checks
+
+            report = run_checks(root, only={"assets"})
+            return report.markdown()[:MAX_TOOL_RESULT]
+        if name == "texture_gen":
+            relative = str(args.get("path") or "").strip()
+            if not relative.lower().endswith(".png"):
+                return "texture_gen 只支持 .png。"
+            target = project_mod.safe_path(root, relative)
+            size = _arg_int(args, "size", 16)
+            style = str(args.get("style") or args.get("kind") or "noise")
+            base = str(args.get("base") or args.get("palette") or "#7a7a7a")
+            try:
+                if style in {"ingot", "gem", "stick", "sword", "dust"}:
+                    tool_texture.generate_item(target, style, base=base, size=size)
+                else:
+                    tool_texture.generate(
+                        target,
+                        tool_texture.TextureSpec(
+                            size=(size, size), style=style, base=base,
+                            accent=str(args.get("accent") or "#4a4a4a"),
+                            seed=_arg_int(args, "seed", 0),
+                        ),
+                    )
+                check = tool_texture.validate(target)
+            except Exception as exc:  # noqa: BLE001 - 缺 Pillow 或参数错误
+                return f"贴图生成失败：{exc}"
+            return json.dumps(
+                {"path": relative, "validation": check}, ensure_ascii=False, indent=2
+            )[:MAX_TOOL_RESULT]
+        if name == "vision_review":
+            relative = str(args.get("path") or "").strip()
+            target = project_mod.safe_path(root, relative)
+            review = tool_vision.review(target, style=str(args.get("kind") or "item"))
+            return json.dumps(review.to_dict(), ensure_ascii=False, indent=2)[:MAX_TOOL_RESULT]
+        if name == "blockbench":
+            action = str(args.get("action") or "create").lower()
+            relative = str(args.get("path") or "").strip()
+            target = project_mod.safe_path(root, relative)
+            if action in {"create", "export"}:
+                shape = str(args.get("shape") or "full")
+                model = (
+                    tool_blockbench.cross_model(target.stem)
+                    if shape == "cross"
+                    else tool_blockbench.full_block(target.stem)
+                )
+                tool_blockbench.save_bbmodel(model, target)
+                if action == "export":
+                    exported = tool_blockbench.export(model, target.with_suffix(".json"))
+                    return f"已生成 {relative}，导出模型 {exported}"
+                return f"已生成 {relative}（{len(model.cubes)} 个立方体）"
+            if action == "load":
+                model = tool_blockbench.load_bbmodel(target)
+                return json.dumps(tool_blockbench.summary(model), ensure_ascii=False, indent=2)
+            if action == "validate":
+                model = tool_blockbench.load_bbmodel(target)
+                issues = tool_blockbench.validate(model)
+                return json.dumps({"issues": issues}, ensure_ascii=False, indent=2)
+            if action == "preview":
+                model = tool_blockbench.load_bbmodel(target)
+                output = target.with_suffix(".png")
+                tool_blockbench.preview(model, output)
+                return f"预览图已生成：{output.relative_to(root).as_posix()}"
+            return "blockbench action 只能是 create / export / load / validate / preview。"
+        if name == "testgen":
+            if self.kernel is None or self.kernel.spec is None:
+                return "没有规格，无法生成测试。"
+            feature = str(args.get("feature") or "").strip()
+            written = tool_testgen.write_suite(
+                root, self.kernel.spec, features=[feature] if feature else None
+            )
+            return "已生成测试：\n" + "\n".join(str(item.relative_to(root)) for item in written)
+        if name == "migration_plan":
+            modid = self.kernel.spec.modid if self.kernel and self.kernel.spec else "unknown"
+            migration = tool_migration.Migration(
+                modid=modid,
+                from_version=str(args.get("from_mc") or ""),
+                to_version=str(args.get("to_mc") or ""),
+            )
+            path = tool_migration.write(root, migration)
+            plan = tool_migration.plan(migration)
+            if args.get("apply"):
+                rows = tool_migration.apply(root, migration, dry_run=True)
+                plan += "\n\n预览：\n" + json.dumps(rows, ensure_ascii=False, indent=2)
+            return f"{plan}\n\n迁移表：{path.relative_to(root)}"[:MAX_TOOL_RESULT]
+        if name == "screenshot_collect":
+            game_dir = Path(str(args.get("path") or root))
+            out = root / ".dma" / "screenshots"
+            result = tool_screenshot.collect(
+                game_dir, out, limit=_arg_int(args, "limit", 5)
+            )
+            return json.dumps(result, ensure_ascii=False, indent=2)[:MAX_TOOL_RESULT]
+        if name == "offline_cache":
+            cache = tool_cache.OfflineCache(root)
+            action = str(args.get("action") or "summary")
+            if action == "verify":
+                result = cache.verify()
+            elif action == "prune":
+                result = {"removed": cache.prune()}
+            elif action == "export":
+                target = project_mod.safe_path(
+                    root, str(args.get("path") or ".dma/cache-export")
+                )
+                result = {"path": str(cache.export_tree("bundle", target))}
+            else:
+                result = cache.summary()
+            return json.dumps(result, ensure_ascii=False, indent=2)[:MAX_TOOL_RESULT]
+        if name == "asset_library":
+            library = tool_library.AssetLibrary(root)
+            action = str(args.get("action") or "summary").lower()
+            if action == "bootstrap":
+                created = library.bootstrap()
+                return json.dumps(
+                    {"created": [item.to_dict() for item in created]},
+                    ensure_ascii=False, indent=2,
+                )
+            if action == "list":
+                return json.dumps(
+                    [item.to_dict() for item in library.list(
+                        validated_only=bool(args.get("validated", True))
+                    )],
+                    ensure_ascii=False, indent=2,
+                )
+            if action == "clone":
+                library.bootstrap()
+                target = project_mod.safe_path(root, str(args.get("path") or ""))
+                rotation = args.get("rotation")
+                offset = args.get("offset")
+                result = library.clone(
+                    str(args.get("name") or ""),
+                    target,
+                    texture=str(args["texture"]) if args.get("texture") else None,
+                    scale=float(args.get("scale") or 1.0),
+                    rotation=tuple(float(item) for item in rotation) if isinstance(rotation, list) else None,
+                    offset=tuple(float(item) for item in offset) if isinstance(offset, list) else None,
+                )
+                return json.dumps(result, ensure_ascii=False, indent=2)
+            if action == "import":
+                source = project_mod.safe_path(root, str(args.get("path") or ""))
+                entry = library.import_asset(source, validated=bool(args.get("validated")))
+                return json.dumps(entry.to_dict(), ensure_ascii=False, indent=2)
+            if action == "promote":
+                entry = library.promote(str(args.get("name") or ""))
+                return json.dumps(entry.to_dict(), ensure_ascii=False, indent=2)
+            return json.dumps(library.summary(), ensure_ascii=False, indent=2)
+        if name == "config_gen":
+            modid = (
+                self.kernel.spec.modid
+                if self.kernel is not None and self.kernel.spec is not None
+                else getattr(getattr(self.project, "meta", None), "mod_id", "")
+            )
+            if not modid:
+                return "无法确定 modid，请先打开工程。"
+            package = str(args.get("package") or "").strip() or tool_templates._detect_package(root)
+            relative = str(args.get("schema_path") or f"config/{modid}.schema.json")
+            schema_path = project_mod.safe_path(root, relative)
+            if not schema_path.is_file():
+                return f"找不到配置 schema：{relative}"
+            try:
+                raw = json.loads(schema_path.read_text(encoding="utf-8"))
+            except ValueError as exc:
+                return f"配置 schema 不是合法 JSON：{exc}"
+            fields = tool_configgen.parse_schema(raw)
+            if not fields:
+                return "配置 schema 里没有可生成的字段。"
+            result = tool_configgen.write(
+                root,
+                package=package,
+                modid=modid,
+                fields=fields,
+                class_name=str(args.get("class_name") or "ModConfigScreen"),
+                mc=(
+                    self.kernel.spec.mc
+                    if self.kernel is not None and self.kernel.spec is not None
+                    else getattr(getattr(self.project, "meta", None), "mc_version", "1.20.1")
+                ),
+            )
+            return json.dumps(result, ensure_ascii=False, indent=2)
+        if name == "debug_scaffold":
+            modid = (
+                self.kernel.spec.modid
+                if self.kernel is not None and self.kernel.spec is not None
+                else getattr(getattr(self.project, "meta", None), "mod_id", "")
+            )
+            if not modid:
+                return "无法确定 modid，请先打开工程。"
+            package = str(args.get("package") or "").strip() or tool_templates._detect_package(root)
+            version = str(args.get("version") or "").strip()
+            if not version:
+                properties = root / "gradle.properties"
+                if properties.is_file():
+                    match = re.search(
+                        r"^\s*mod_version\s*[=:]\s*(\S+)",
+                        properties.read_text(encoding="utf-8", errors="replace"),
+                        re.MULTILINE,
+                    )
+                    if match:
+                        version = match.group(1).strip()
+            raw_kinds = args.get("kinds")
+            kinds = [str(item) for item in raw_kinds] if isinstance(raw_kinds, list) else None
+            try:
+                result = tool_diagnostics.write(
+                    root,
+                    package=package,
+                    modid=modid,
+                    version=version or "0.0.0",
+                    kinds=kinds,
+                    command=str(args.get("command") or "dump"),
+                )
+            except ValueError as exc:
+                return f"生成调试模板失败：{exc}"
+            return json.dumps(result, ensure_ascii=False, indent=2)
+        if name == "matrix_plan":
+            action = str(args.get("action") or "plan").lower()
+
+            def values(key: str) -> list[str] | None:
+                raw = args.get(key)
+                return [str(item) for item in raw] if isinstance(raw, list) and raw else None
+
+            matrix = tool_matrix.plan(
+                mc_versions=values("mc"),
+                loaders=values("loader"),
+                java_versions=values("java"),
+                os_list=values("os"),
+            )
+            if action == "workflow":
+                target = tool_matrix.write_workflow(
+                    root,
+                    matrix,
+                    relative=str(args.get("path") or ".github/workflows/dma-matrix.yml"),
+                )
+                return f"已生成 CI 工作流：{target.relative_to(root).as_posix()}"
+            if action == "report":
+                return tool_matrix.report(matrix)[:MAX_TOOL_RESULT]
+            if action == "version":
+                return json.dumps(
+                    tool_matrix.git_version(root), ensure_ascii=False, indent=2
+                )
+            return tool_matrix.summary(matrix)[:MAX_TOOL_RESULT]
+        return f"未知的内核工具：{name}"
 
     # ------------------------------------------------------------------
     def _execute_mcdev(self, name: str, args: dict[str, Any]) -> str:
@@ -1416,9 +2197,9 @@ class AgentWorker(QObject):
             if kind not in {"server", "client", "both"}:
                 return "kind 只能是 server、client 或 both。"
             try:
-                timeout_ms = int(args.get("timeout_ms") or 180_000)
+                timeout_ms = int(args.get("timeout_ms") or 900_000)
             except (TypeError, ValueError):
-                timeout_ms = 180_000
+                timeout_ms = 900_000
             try:
                 join_port = int(args.get("join_port") or 25566)
             except (TypeError, ValueError):
@@ -1469,13 +2250,22 @@ class AgentWorker(QObject):
                 card=card or None,
                 dry_run=bool(args.get("dry_run")),
             )
+            if self.kernel is not None and not args.get("dry_run"):
+                has_assert = any(
+                    str(item.get("type")) == "assert" for item in result.get("steps") or []
+                )
+                self.kernel.record_runtime(bool(result.get("ok")) and has_assert)
             return json.dumps(result, ensure_ascii=False, indent=2)[:MAX_TOOL_RESULT]
         if name == "mcdev_build":
+            if self.kernel is not None:
+                self.kernel.before_build("mcdev-build")
             code, output = mcdev.gradle.build(
                 root, log=self._probe_log, timeout=1800, cancel=self._cancel
             )
             tail = output[-MAX_BUILD_RESULT:]
             head = "编译成功（退出码 0）。" if code == 0 else f"编译失败（退出码 {code}）。"
+            if self.kernel is not None:
+                self.kernel.record_build(code == 0, output)
             return f"{head}\n\n{tail}"[:MAX_TOOL_RESULT]
         if name == "mcdev_gametest":
             code, output = mcdev.gradle.gametest(
@@ -1487,6 +2277,8 @@ class AgentWorker(QObject):
             )
             summary = mcdev.gradle.gametest_summary(code, output)
             head = "GameTest 通过。" if code == 0 else f"GameTest 失败（退出码 {code}）。"
+            if self.kernel is not None:
+                self.kernel.record_test(code == 0, summary)
             return f"{head}\n{summary}\n\n{output[-MAX_BUILD_RESULT:]}"[:MAX_TOOL_RESULT]
 
         side = str(args.get("side") or "server").strip().lower()
@@ -1522,14 +2314,14 @@ class AgentWorker(QObject):
             )[:MAX_TOOL_RESULT]
         if name == "mcdev_click":
             body: dict[str, Any] = {
-                "button": int(args.get("button") or 0),
+                "button": _arg_int(args, "button", 0),
             }
             slot = args.get("slot")
             if isinstance(slot, int) and slot >= 0:
                 body["slot"] = slot
             else:
-                body["x"] = int(args.get("x") or 0)
-                body["y"] = int(args.get("y") or 0)
+                body["x"] = _arg_int(args, "x", 0)
+                body["y"] = _arg_int(args, "y", 0)
             if args.get("shift"):
                 body["shift"] = True
             return json.dumps(
@@ -1602,6 +2394,10 @@ def _run_gradle(
     log,
 ) -> BuildOutcome:
     """执行 Gradle，并把 build/libs 里的真实产物带回给模型。"""
+    try:
+        mcdev.templates.restore_incompatible_scaffold(root, log=log)
+    except Exception:  # noqa: BLE001 - 骨架修复失败不应挡住构建
+        pass
     code, output = mcdev.gradle.run_gradle(
         root,
         task,

@@ -35,6 +35,12 @@ def _install_excepthook() -> None:
 
 
 def run() -> int:
+    # Gradle 和镜像代理统一使用程序目录下的缓存，不往 C 盘用户目录里放。
+    os.environ.setdefault("GRADLE_USER_HOME", str(paths.gradle_home()))
+    temp = str(paths.temp_dir())
+    for name in ("TEMP", "TMP", "TMPDIR"):
+        os.environ[name] = temp
+
     QApplication.setApplicationName(APP_NAME)
     QApplication.setApplicationDisplayName(APP_NAME_CN)
     QApplication.setOrganizationName(APP_AUTHOR)

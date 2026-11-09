@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import builtins
 import json
 import sqlite3
 import threading
@@ -97,7 +98,7 @@ class MemoryStore:
         project: str = "",
         query: str = "",
         limit: int = 200,
-    ) -> list[dict[str, Any]]:
+    ) -> builtins.list[dict[str, Any]]:
         clauses: list[str] = []
         args: list[Any] = []
         if project:
@@ -115,7 +116,7 @@ class MemoryStore:
             rows = self._conn.execute(sql, args).fetchall()
         return [dict(row) for row in rows]
 
-    def recall(self, project: str, query: str = "", limit: int = 8) -> list[dict[str, Any]]:
+    def recall(self, project: str, query: str = "", limit: int = 8) -> builtins.list[dict[str, Any]]:
         items = self.list(project=project, query=query, limit=limit) if query else []
         if len(items) < limit:
             seen = {item["id"] for item in items}

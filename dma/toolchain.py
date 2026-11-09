@@ -651,8 +651,7 @@ def default_distribution_url(version: str | None = None) -> str:
 
 
 def gradle_user_home() -> Path:
-    value = os.environ.get("GRADLE_USER_HOME", "").strip()
-    return Path(value).expanduser() if value else Path.home() / ".gradle"
+    return paths.gradle_home()
 
 
 def distribution_for(url: str, user_home: Path | None = None) -> Distribution | None:

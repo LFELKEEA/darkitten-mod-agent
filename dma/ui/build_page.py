@@ -321,6 +321,15 @@ class BuildPage(QWidget):
         if not self._run_busy:
             self.run_panel.set_busy(False, "")
 
+    def is_busy(self) -> bool:
+        """Gradle 任务或开发端进程是否还占用着当前工程。
+
+        ``_thread`` 结束后仍保留线程对象，所以不能用是否为 None 判断，
+        必须看 ``is_alive()``。
+        """
+        thread = self._thread
+        return bool(self._run_busy or (thread is not None and thread.is_alive()))
+
     # ------------------------------------------------------------------
     def _append(self, line: str) -> None:
         text = str(line).rstrip()

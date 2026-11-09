@@ -272,7 +272,6 @@ class TextPreviewDialog(QDialog):
         buttons = QDialogButtonBox(QDialogButtonBox.Close)
         buttons.button(QDialogButtonBox.Close).setText("关闭")
         buttons.rejected.connect(self.reject)
-        buttons.clicked.connect(self.accept)
         layout.addWidget(buttons)
 
 

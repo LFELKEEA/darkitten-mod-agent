@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, Qt, QTimer, Signal
@@ -59,6 +60,10 @@ class ChatPage(QWidget):
         self._run_timer.setInterval(3000)
         self._run_timer.timeout.connect(self._refresh_run_status)
         self._run_timer.start()
+        self._busy_started = 0.0
+        self._busy_timer = QTimer(self)
+        self._busy_timer.setInterval(1000)
+        self._busy_timer.timeout.connect(self._tick_busy)
         self.main.update_checked.connect(self._on_update_checked)
 
     # ------------------------------------------------------------------
@@ -537,7 +542,7 @@ class ChatPage(QWidget):
             )
             return
         build = getattr(self.main, "build_page", None)
-        if build is not None and getattr(build.runner, "running", False):
+        if build is not None and build.is_busy():
             QMessageBox.information(
                 self, "编译进行中", "请先在「编译运行」页停止 Gradle 任务，再删除工程。"
             )
@@ -700,7 +705,26 @@ class ChatPage(QWidget):
         self.auto_apply_box.setEnabled(not running)
         self.auto_build_box.setEnabled(not running and bool(self.main.config.auto_apply))
         self.run_panel.setEnabled(not running)
-        self.send_btn.setText("生成中…" if running else "发送")
+        if running:
+            self._busy_started = time.time()
+            self._busy_timer.start()
+            self._tick_busy()
+        else:
+            self._busy_timer.stop()
+            self._busy_started = 0.0
+            self.send_btn.setText("发送")
+            self.stop_btn.setText("停止")
+
+    def _tick_busy(self) -> None:
+        if not self._busy_started:
+            return
+        elapsed = int(time.time() - self._busy_started)
+        self.send_btn.setText(f"生成中… {elapsed}s")
+        self.stop_btn.setText(f"停止（{elapsed}s）")
+        if elapsed >= 60:
+            self.stop_btn.setToolTip(
+                "任务还在后台执行。超过 1 分钟没有进度时，可以点这里中止并查看日志。"
+            )
 
     def _on_assistant(self, text: str) -> None:
         self.chat.add_message("assistant", text)

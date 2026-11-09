@@ -27,8 +27,10 @@ class UiSmokeTests(TempDataCase):
         window.config.update_url = ""
         window.show()
         self.app.processEvents()
-        self.assertEqual(window.stack.count(), 8)
+        self.assertEqual(window.stack.count(), 10)
         self.assertIsNotNone(window.chat_page)
+        self.assertIsNotNone(window.studio_page)
+        self.assertIsNotNone(window.studio_page.generate_btn)
         self.assertIsNotNone(window.tutorial_page)
         self.assertIsNotNone(window.build_page)
         self.assertIsNotNone(window.environment_page)
@@ -47,11 +49,14 @@ class UiSmokeTests(TempDataCase):
         self.assertIsNotNone(window.chat_page.run_panel)
         self.assertTrue(window.chat_page.run_panel.server_btn.isEnabled())
         self.assertIsNotNone(window.chat_page.artifact_panel.view)
+        window.go_to(window.studio_page)
+        self.assertIs(window.stack.currentWidget(), window.studio_page)
         window.go_to(window.tutorial_page)
         self.assertIs(window.stack.currentWidget(), window.tutorial_page)
         window.go_to(window.build_page)
         self.assertIs(window.stack.currentWidget(), window.build_page)
         self.assertIsNotNone(window.knowledge_page)
+        self.assertIsNotNone(window.memory_page)
         self.assertTrue(window.knowledge_page.import_btn.isEnabled())
         self.assertFalse(window.knowledge_page.import_scope.isEnabled())
         for index in range(window.stack.count()):
@@ -174,6 +179,44 @@ class UiSmokeTests(TempDataCase):
         ):
             self.assertTrue(button.isEnabled(), button.text())
         self.assertTrue(window.build_page.run_panel.server_btn.isEnabled())
+        window.close()
+        window.memory.close()
+        self.app.processEvents()
+
+    def test_delete_project_checks_build_busy_without_runner_attribute(self) -> None:
+        """删除工程前的占用检查要读 BuildPage 的真实状态。
+
+        回归的是 chat_page 里 ``build.runner.running`` 的旧写法：BuildPage
+        没有 runner 字段，点“删除工程”会直接抛 AttributeError。
+        """
+        from unittest import mock
+
+        from dma.project import create_project
+        from dma.ui import theme
+        from dma.ui import chat_page as chat_page_mod
+        from dma.ui.main_window import MainWindow
+
+        project = create_project(
+            self.tmp,
+            name="删除占用测试",
+            mod_id="delbusy",
+            mc_version="1.20.1",
+            loader="Forge",
+        )
+        theme.apply_theme(self.app, 13)
+        window = MainWindow()
+        window.config.shortcut_offered = True
+        window.config.update_url = ""
+        page = window.chat_page
+        page._set_project(project, quiet=True)
+        self.assertFalse(window.build_page.is_busy())
+        window.build_page._run_busy = True
+        self.assertTrue(window.build_page.is_busy())
+        with mock.patch.object(chat_page_mod.QMessageBox, "information") as info:
+            page.delete_project()
+        self.assertEqual(info.call_count, 1)
+        self.assertIn("编译进行中", info.call_args.args[1])
+        self.assertTrue(project.root.is_dir())
         window.close()
         window.memory.close()
         self.app.processEvents()

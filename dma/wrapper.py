@@ -16,7 +16,7 @@ MODDEV_DISTRIBUTION = "8.10.2"
 
 PROPERTIES = """distributionBase=GRADLE_USER_HOME
 distributionPath=wrapper/dists
-distributionUrl=https\\://services.gradle.org/distributions/gradle-{version}-bin.zip
+distributionUrl=https://services.gradle.org/distributions/gradle-{version}-bin.zip
 networkTimeout=10000
 validateDistributionUrl=true
 zipStoreBase=GRADLE_USER_HOME
@@ -71,6 +71,25 @@ def current_distribution(project_root: Path | None) -> str:
 
 
 def properties_valid(project_root: Path | None) -> bool:
+    """Wrapper 配置既能读到版本，URL 也必须是合法 scheme。
+
+    早期生成的 properties 里写着 ``https\\://``（YAML 风格的转义），
+    gradlew 会把它当成非法 URL 直接失败；这里一并判为无效，让上层重写。
+    """
+    if project_root is None:
+        return False
+    properties = Path(project_root) / "gradle" / "wrapper" / "gradle-wrapper.properties"
+    try:
+        text = properties.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    url = ""
+    for line in text.splitlines():
+        if line.strip().startswith("distributionUrl="):
+            url = line.split("=", 1)[1].strip()
+            break
+    if not url or "\\" in url or not url.startswith("https://"):
+        return False
     return bool(current_distribution(project_root))
 
 
@@ -106,7 +125,7 @@ def build_stack(project_root: Path | None) -> dict[str, str]:
 
 def compatible_version(project_root: Path | None) -> tuple[str, str]:
     """返回 (推荐 Gradle 版本, 原因)。空字符串表示保持工程现有配置。"""
-    current = current_distribution(project_root)
+    current = current_distribution(project_root) if properties_valid(project_root) else ""
     stack = build_stack(project_root)
     if "moddev" in stack:
         version = stack["moddev"] or "2.x"
@@ -143,7 +162,7 @@ def set_distribution(project_root: Path, version: str) -> list[str]:
     except OSError:
         text = ""
     url = (
-        "https\\://services.gradle.org/distributions/"
+        "https://services.gradle.org/distributions/"
         f"gradle-{version}-bin.zip"
     )
     if "distributionUrl=" not in text:
@@ -166,7 +185,7 @@ def ensure_compatible(
     project_root: Path, *, log: Log | None = None
 ) -> tuple[bool, str, str, str]:
     """让 Wrapper 版本与构建脚本匹配，返回 (是否改动, 原版本, 新版本, 原因)。"""
-    current = current_distribution(project_root)
+    current = current_distribution(project_root) if properties_valid(project_root) else ""
     target, reason = compatible_version(project_root)
     if not target or target == current:
         return False, current, current, ""

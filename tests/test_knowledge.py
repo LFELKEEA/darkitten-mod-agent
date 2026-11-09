@@ -418,7 +418,7 @@ class KnowledgeAgentTests(TempDataCase):
     def test_auto_context_injected_into_system_prompt(self) -> None:
         seen: list[list[dict]] = []
 
-        def fake(ai, messages):
+        def fake(ai, messages, **_kwargs):
             seen.append(list(messages))
             return "使用 Yarn 1.21.1+build.3。"
 

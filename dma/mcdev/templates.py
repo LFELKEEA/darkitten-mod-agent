@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import sys
+import time
 from pathlib import Path
 
 from .. import paths
@@ -55,7 +57,28 @@ def _values(
         "class_name": class_name,
         "mc_version": mc_version,
         "mod_version": mod_version,
+        "year": time.strftime("%Y"),
+        "java_homes": _java_homes_value(),
     }
+
+
+def _java_homes_value() -> str:
+    """列出本机 JDK，写给 Gradle 的 toolchain 自动探测。
+
+    ModDevGradle 的 createMinecraftArtifacts 要求 Java 21。默认的自动探测
+    只扫注册表和固定目录，装在 D 盘这类自定义位置的 JDK 找不到，Gradle 就
+    会去 foojay 现场下载；下载失败后只报一句“找不到 Java 21”，很难排查。
+    """
+    from .. import envcheck
+
+    seen: list[str] = []
+    for home in envcheck.java_homes():
+        # gradle.properties 是 Java properties 格式，反斜杠会被当成转义符，
+        # Windows 路径必须写成正斜杠，否则 D:\developer 会变成 D:developer。
+        text = str(home).replace("\\", "/")
+        if text and text not in seen:
+            seen.append(text)
+    return ",".join(seen)
 
 
 def _copy_template(source: Path, target: Path, values: dict[str, str]) -> None:
@@ -67,11 +90,23 @@ def _copy_template(source: Path, target: Path, values: dict[str, str]) -> None:
         relative = relative.replace("__package__", package_path)
         for key, value in values.items():
             relative = relative.replace("{{" + key + "}}", value)
+        is_text = (
+            item.suffix.lower() in TEXT_SUFFIXES
+            or item.name in {"gradlew", "LICENSE"}
+        )
+        rendered = ""
+        if is_text:
+            text = item.read_text(encoding="utf-8", errors="replace")
+            rendered = _render(text, values)
+        # 模板文件都叫 ModMain.java，但 Fabric / NeoForge 骨架里的公开类
+        # 是 <Mod>Mod；文件名不改，javac 会直接报“类 X 是公共的，应在
+        # X.java 中声明”。Forge 1.20.1 的入口类确实叫 ModMain，保持原名。
+        if item.name == "ModMain.java" and f"class {values['class_name']}" in rendered:
+            relative = relative[: -len("ModMain.java")] + f"{values['class_name']}.java"
         dest = target / relative
         dest.parent.mkdir(parents=True, exist_ok=True)
-        if item.suffix.lower() in TEXT_SUFFIXES or item.name in {"gradlew"}:
-            text = item.read_text(encoding="utf-8", errors="replace")
-            dest.write_text(_render(text, values), encoding="utf-8", newline="\n")
+        if is_text:
+            dest.write_text(rendered, encoding="utf-8", newline="\n")
         else:
             shutil.copy2(item, dest)
     # 保留可执行位（Windows 上靠 .bat，Unix 上 gradlew 需要 +x）
@@ -85,6 +120,115 @@ def _copy_template(source: Path, target: Path, values: dict[str, str]) -> None:
 
 def supports_scaffold(loader: str, mc_version: str = MC_VERSION) -> bool:
     return (mc_version or "").strip() == MC_VERSION and loader in SCAFFOLD_LOADERS
+
+
+def restore_incompatible_scaffold(root: str | Path, *, log=None) -> str:
+    """1.20.1 工程被改写成 NeoGradle 7 时，用内置骨架恢复构建脚本。
+
+    NeoGradle 7（`net.neoforged.gradle.userdev`）和 `net.neoforged:neoforge`
+    坐标都是 1.20.2+ 的写法，1.20.1 用它只会得到“找不到模块”，再怎么调
+    runs / repositories 也修不好。这里只处理这一种已确认不兼容的组合，
+    原文件先备份到 .dma/backups，返回给调用方写进构建日志。
+    """
+    project = Path(str(root)).expanduser()
+    meta_path = project / ".dma" / "project.json"
+    build_file = project / "build.gradle"
+    if not meta_path.is_file() or not build_file.is_file():
+        return ""
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        return ""
+    if not isinstance(meta, dict):
+        return ""
+    if str(meta.get("loader") or "").strip().lower() != "neoforge":
+        return ""
+    if str(meta.get("mc_version") or "").strip() != MC_VERSION:
+        return ""
+    try:
+        text = build_file.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    if (
+        "net.neoforged.gradle.userdev" not in text
+        and "net.neoforged:neoforge:" not in text
+    ):
+        return ""
+
+    mod_id = str(meta.get("mod_id") or "").strip() or "mod"
+    mod_name = str(meta.get("name") or mod_id).strip() or mod_id
+    src_root = project / "src" / "main" / "java"
+    package = ""
+    if src_root.is_dir():
+        for item in sorted(src_root.rglob("*.java")):
+            try:
+                head = item.read_text(encoding="utf-8", errors="replace")[:400]
+            except OSError:
+                continue
+            match = re.search(r"^\s*package\s+([\w.]+)\s*;", head, re.MULTILINE)
+            if match:
+                package = match.group(1)
+                break
+    mod_version = "1.0.0"
+    props_file = project / "gradle.properties"
+    if props_file.is_file():
+        try:
+            for line in props_file.read_text(
+                encoding="utf-8", errors="replace"
+            ).splitlines():
+                if line.strip().startswith("mod_version="):
+                    mod_version = line.split("=", 1)[1].strip() or mod_version
+        except OSError:
+            pass
+
+    backup = (
+        project
+        / ".dma"
+        / "backups"
+        / f"scaffold-restore-{time.strftime('%Y%m%d-%H%M%S')}"
+    )
+    for relative in (
+        "build.gradle",
+        "settings.gradle",
+        "gradle.properties",
+        "src/main/resources/META-INF/mods.toml",
+    ):
+        source = project / relative
+        if source.is_file():
+            target = backup / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+
+    create_neoforge_project(
+        project,
+        mod_id=mod_id,
+        mod_name=mod_name,
+        package=package,
+        mc_version=MC_VERSION,
+        mod_version=mod_version,
+    )
+
+    # 旧骨架的 ModMain.java 会和新入口类重复声明同一个类，挪进备份目录。
+    if package:
+        class_name = "".join(part.capitalize() for part in mod_id.split("_")) + "Mod"
+        stray = src_root / package.replace(".", "/") / "ModMain.java"
+        if stray.is_file() and (stray.parent / f"{class_name}.java").is_file():
+            target = backup / "src/main/java" / package.replace(".", "/") / "ModMain.java"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(stray, target)
+            stray.unlink()
+
+    notice = (
+        f"[dma] {project.name} 的 build.gradle 用了 NeoGradle 7 / "
+        "net.neoforged:neoforge（1.20.2+ 才支持），1.20.1 无法解析。"
+        f"已用内置骨架恢复构建脚本，原文件备份在 {backup}。"
+    )
+    if log:
+        try:
+            log(notice)
+        except Exception:  # noqa: BLE001 - 日志回调不能影响构建
+            pass
+    return notice
 
 
 def supports_probe(project_root: str | Path) -> bool:

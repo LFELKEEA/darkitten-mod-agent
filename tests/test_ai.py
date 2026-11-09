@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import io
+import threading
+import time
 import unittest
 import urllib.error
 from unittest import mock
@@ -9,6 +11,48 @@ from dma import ai
 
 
 class AIErrorTests(unittest.TestCase):
+    def test_stalled_response_hits_total_deadline(self) -> None:
+        release = threading.Event()
+
+        def stalled(*_args, **_kwargs):
+            release.wait(15)
+            raise TimeoutError("late")
+
+        started = time.time()
+        try:
+            with mock.patch("urllib.request.urlopen", side_effect=stalled):
+                with self.assertRaises(ai.AIError) as ctx:
+                    ai._http_json(
+                        "https://example.com/v1/chat/completions", {}, {}, 1
+                    )
+        finally:
+            release.set()
+        elapsed = time.time() - started
+        self.assertLess(elapsed, 8.0)
+        text = str(ctx.exception)
+        self.assertIn("没有返回完整响应", text)
+        self.assertIn("example.com", text)
+
+    def test_cancel_interrupts_waiting_request(self) -> None:
+        release = threading.Event()
+        cancel = threading.Event()
+
+        def stalled(*_args, **_kwargs):
+            release.wait(15)
+            raise TimeoutError("late")
+
+        threading.Timer(0.3, cancel.set).start()
+        started = time.time()
+        try:
+            with mock.patch("urllib.request.urlopen", side_effect=stalled):
+                with self.assertRaises(ai._Cancelled):
+                    ai._http_json(
+                        "https://example.com/v1/chat/completions", {}, {}, 30, cancel
+                    )
+        finally:
+            release.set()
+        self.assertLess(time.time() - started, 5.0)
+
     def test_timeout_error_mentions_host_and_hint(self) -> None:
         error = urllib.error.URLError(
             TimeoutError(

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import re
+import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -12,6 +14,18 @@ from .config import AIConfig
 
 class AIError(Exception):
     pass
+
+
+class _DeadlineExceeded(TimeoutError):
+    """整个请求（连接 + 读取响应）超过了总时限。"""
+
+
+class _Cancelled(AIError):
+    """用户在等待模型回复时点了停止。"""
+
+
+class AIToolsUnsupported(AIError):
+    """Raised when the endpoint rejects the ``tools`` field."""
 
 
 def _endpoint(base_url: str) -> str:
@@ -50,12 +64,82 @@ def _connect_error(url: str, reason: object) -> AIError:
     return AIError(f"无法连接 {host}：{text}。{hint}")
 
 
-def _http_json(url: str, payload: dict, headers: dict, timeout: int) -> dict:
+def _close_later(box: dict[str, Any], done: threading.Event) -> None:
+    """请求已经放弃，但 worker 还攥着连接；等它返回后关掉，别泄漏 socket。"""
+
+    def cleanup() -> None:
+        if not done.wait(30):
+            return
+        response = box.get("response")
+        try:
+            if response is not None:
+                response.close()
+        except Exception:  # noqa: BLE001 - 清理失败不影响报错
+            pass
+
+    threading.Thread(target=cleanup, daemon=True).start()
+
+
+def _fetch(
+    request: urllib.request.Request,
+    timeout: float,
+    cancel: threading.Event | None = None,
+) -> bytes:
+    """把连接和读取整段放进工作线程，给整个请求一个总时限。
+
+    ``urlopen(timeout=...)`` 只限制单次 socket 操作；服务端接受了连接却不发正文时，
+    主线程会一直停在 ``read()`` 上。这里用总时限兜住，并且每 0.25 秒检查一次取消。
+    """
+    box: dict[str, Any] = {}
+    done = threading.Event()
+
+    def worker() -> None:
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                box["response"] = response
+                box["raw"] = response.read()
+        except BaseException as exc:  # noqa: BLE001 - 原样抛回主线程
+            box["error"] = exc
+        finally:
+            done.set()
+
+    thread = threading.Thread(target=worker, daemon=True)
+    thread.start()
+    budget = max(1.0, float(timeout) + 2.0)
+    deadline = time.time() + budget
+    while not done.is_set():
+        if cancel is not None and cancel.is_set():
+            _close_later(box, done)
+            raise _Cancelled("已取消。")
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            _close_later(box, done)
+            raise _DeadlineExceeded(
+                f"请求在 {int(budget)} 秒内没有完成（连接或读取响应超时）"
+            )
+        done.wait(min(0.25, remaining))
+    error = box.get("error")
+    if isinstance(error, BaseException):
+        raise error
+    return box.get("raw") or b""
+
+
+def _http_json(
+    url: str,
+    payload: dict,
+    headers: dict,
+    timeout: int,
+    cancel: threading.Event | None = None,
+) -> dict:
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     request = urllib.request.Request(url, data=body, headers=headers, method="POST")
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            raw = response.read()
+        raw = _fetch(request, timeout, cancel)
+    except _DeadlineExceeded as exc:
+        raise AIError(
+            f"接口 {_host(url)} 在 {int(max(1.0, float(timeout) + 2.0))} 秒内没有返回完整响应。"
+            "请检查网络或代理是否稳定；也可以在「设置」里调大超时后重试。"
+        ) from exc
     except urllib.error.HTTPError as exc:
         detail = ""
         try:
@@ -117,17 +201,17 @@ def _text_from(data: dict) -> str:
     return text
 
 
-def request_chat(ai: AIConfig, messages: list[dict[str, Any]]) -> str:
+def _payload(ai: AIConfig, messages: list[dict[str, Any]]) -> tuple[str, dict, dict]:
     cfg = ai.normalized()
     headers = {"Content-Type": "application/json; charset=utf-8"}
     if cfg.provider == "pollinations":
         url = "https://text.pollinations.ai/openai"
-        headers["User-Agent"] = "DarkittenModAgent/0.1"
+        headers["User-Agent"] = "DarkittenModAgent/2.0"
         payload: dict[str, Any] = {
             "model": cfg.model or "openai-fast",
             "messages": messages,
             "temperature": cfg.temperature,
-            "max_tokens": min(4096, cfg.max_tokens),
+            "max_tokens": cfg.max_tokens,
             "private": True,
             "referrer": "darkitten-mod-agent",
         }
@@ -152,27 +236,134 @@ def request_chat(ai: AIConfig, messages: list[dict[str, Any]]) -> str:
         }
         if "deepseek" in cfg.model.lower():
             payload["reasoning_effort"] = "none"
+    return url, payload, headers
 
-    data = _http_json(url, payload, headers, cfg.timeout)
+
+def _request_with_retries(
+    ai: AIConfig,
+    messages: list[dict[str, Any]],
+    *,
+    tools: list[dict[str, Any]] | None = None,
+    tool_choice: str = "auto",
+    cancel: threading.Event | None = None,
+) -> dict:
+    cfg = ai.normalized()
+    url, payload, headers = _payload(ai, messages)
+    if tools:
+        payload["tools"] = tools
+        payload["tool_choice"] = tool_choice
     try:
-        return _text_from(data)
+        return _http_json(url, payload, headers, cfg.timeout, cancel)
+    except _Cancelled:
+        raise
     except AIError as exc:
         text = str(exc)
+        if tools and re.search(r"接口返回 (?:400|404|422)", text):
+            lowered = text.lower()
+            if any(word in lowered for word in ("tool", "function", "unknown field", "invalid")):
+                raise AIToolsUnsupported(text) from exc
         # 部分兼容接口不支持 reasoning_effort，去掉后重试一次。
         if "reasoning_effort" in payload and re.search(r"接口返回 (?:400|422)", text):
             retry = dict(payload)
             retry.pop("reasoning_effort", None)
-            return _text_from(_http_json(url, retry, headers, cfg.timeout))
+            try:
+                return _http_json(url, retry, headers, cfg.timeout, cancel)
+            except _Cancelled:
+                raise
+            except AIError as retry_exc:
+                text = str(retry_exc)
+                payload = retry
         # max_tokens 超过服务端上限时逐级下调。
         if re.search(r"接口返回 (?:400|422)", text) and int(payload.get("max_tokens", 0)) > 4096:
             for limit in (4096, 2048):
                 retry = dict(payload)
                 retry["max_tokens"] = limit
                 try:
-                    return _text_from(_http_json(url, retry, headers, cfg.timeout))
+                    return _http_json(url, retry, headers, cfg.timeout, cancel)
+                except _Cancelled:
+                    raise
                 except AIError:
                     continue
         raise
+
+
+def request_chat(
+    ai: AIConfig,
+    messages: list[dict[str, Any]],
+    *,
+    cancel: threading.Event | None = None,
+) -> str:
+    data = _request_with_retries(ai, messages, cancel=cancel)
+    return _text_from(data)
+
+
+def _tool_calls(message: dict) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for index, item in enumerate(message.get("tool_calls") or []):
+        if not isinstance(item, dict):
+            continue
+        function = item.get("function") if isinstance(item.get("function"), dict) else {}
+        name = str(function.get("name") or item.get("name") or "").strip()
+        if not name:
+            continue
+        raw_args = function.get("arguments")
+        if isinstance(raw_args, str):
+            try:
+                args = json.loads(raw_args or "{}", strict=False)
+            except ValueError:
+                args = {}
+        elif isinstance(raw_args, dict):
+            args = raw_args
+        else:
+            args = {}
+        rows.append(
+            {
+                "id": str(item.get("id") or f"call_{index}"),
+                "name": name,
+                "arguments": args if isinstance(args, dict) else {},
+            }
+        )
+    return rows
+
+
+def request_chat_tools(
+    ai: AIConfig,
+    messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]],
+    *,
+    tool_choice: str = "auto",
+    cancel: threading.Event | None = None,
+) -> dict[str, Any]:
+    """Native function calling. Returns content + parsed tool calls + raw message."""
+    data = _request_with_retries(
+        ai, messages, tools=tools, tool_choice=tool_choice, cancel=cancel
+    )
+    try:
+        choice = data["choices"][0]
+        message = choice.get("message") or {}
+    except (KeyError, IndexError, TypeError) as exc:
+        error = data.get("error") if isinstance(data, dict) else None
+        if isinstance(error, dict):
+            error = error.get("message") or error
+        raise AIError(f"接口没有返回有效回复。{error or ''}".strip()) from exc
+    content = message.get("content")
+    if isinstance(content, list):
+        content = "".join(
+            part.get("text", "")
+            for part in content
+            if isinstance(part, dict) and part.get("type") in (None, "text")
+        )
+    calls = _tool_calls(message)
+    text = str(content or "").strip()
+    if not text and not calls:
+        finish = str(choice.get("finish_reason") or "")
+        raise AIError("模型返回了空回复" + (f"（finish_reason={finish}）" if finish else "。"))
+    return {
+        "content": text,
+        "tool_calls": calls,
+        "message": message,
+        "finish_reason": choice.get("finish_reason"),
+    }
 
 
 def test_connection(ai: AIConfig) -> str:

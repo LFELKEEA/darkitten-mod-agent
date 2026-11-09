@@ -51,6 +51,30 @@ class CardTests(unittest.TestCase):
         self.assertEqual(steps[0]["cmd"], "time set day")
         self.assertEqual(steps[1]["cmd"], "weather clear")
 
+    def test_inline_comment_is_stripped(self) -> None:
+        text = (
+            "setup:\n"
+            "  commands:\n"
+            "    - time set day # 设为白天\n"
+            "actions:\n"
+            "  - command: setblock 0 64 0 stone # 放方块\n"
+        )
+        steps = cards.card_to_steps(cards.parse_yaml(text))["steps"]
+        self.assertEqual([item["cmd"] for item in steps], ["time set day", "setblock 0 64 0 stone"])
+        # 不带空格的井号属于值本身，不能被当成注释切掉。
+        self.assertEqual(cards.parse_yaml("a: b#c"), {"a": "b#c"})
+
+    def test_card_to_steps_rejects_non_mapping(self) -> None:
+        result = cards.card_to_steps(None)
+        self.assertEqual(result["steps"], [])
+        self.assertTrue(result["warnings"])
+
+    def test_unsupported_yaml_is_reported(self) -> None:
+        with self.assertRaises(ValueError):
+            cards.parse_yaml("name: |\n  a\n  b\n")
+        with self.assertRaises(ValueError):
+            cards.parse_yaml("a: &x 1\nb: *x\n")
+
     def test_dry_run_requires_steps(self) -> None:
         service = mcdev.McdevService()
         with self.assertRaises(ValueError):
@@ -105,6 +129,7 @@ class TemplateTests(TempDataCase):
         self.assertTrue((root / "gradlew.bat").is_file())
         build = (root / "build.gradle").read_text(encoding="utf-8")
         self.assertIn("net.minecraftforge.gradle", build)
+        self.assertIn("filteringCharset = 'UTF-8'", build)
         props = (root / "gradle.properties").read_text(encoding="utf-8")
         self.assertIn("demo_mod", props)
         self.assertIn("1.20.1", props)
@@ -139,9 +164,16 @@ class TemplateTests(TempDataCase):
         )
         self.assertEqual(meta["id"], "demo_mod")
         self.assertEqual(meta["entrypoints"]["main"], ["com.example.demo.DemoModMod"])
-        entry = root / "src" / "main" / "java" / "com" / "example" / "demo" / "ModMain.java"
+        entry = (
+            root / "src" / "main" / "java" / "com" / "example" / "demo"
+            / "DemoModMod.java"
+        )
         self.assertTrue(entry.is_file())
+        self.assertFalse(
+            (root / "src" / "main" / "java" / "com" / "example" / "demo" / "ModMain.java").exists()
+        )
         source = entry.read_text(encoding="utf-8")
+        self.assertIn("class DemoModMod", source)
         self.assertIn("implements ModInitializer", source)
         self.assertNotIn("net.minecraftforge", source)
 
@@ -154,17 +186,96 @@ class TemplateTests(TempDataCase):
             package="com.example.demo",
         )
         build = (root / "build.gradle").read_text(encoding="utf-8")
-        self.assertIn("net.neoforged.gradle.userdev", build)
+        self.assertIn("net.neoforged.moddev.legacyforge", build)
+        self.assertIn('neoForgeVersion = "${minecraft_version}-${neo_version}"', build)
+        self.assertIn("filteringCharset = 'UTF-8'", build)
         props = (root / "gradle.properties").read_text(encoding="utf-8")
         self.assertIn("neo_version=47.1.106", props)
         toml = (
             root / "src" / "main" / "resources" / "META-INF" / "mods.toml"
         ).read_text(encoding="utf-8")
-        self.assertIn('modId="neoforge"', toml)
-        entry = root / "src" / "main" / "java" / "com" / "example" / "demo" / "ModMain.java"
+        self.assertIn('modId="forge"', toml)
+        self.assertIn("mandatory=true", toml)
+        entry = (
+            root / "src" / "main" / "java" / "com" / "example" / "demo"
+            / "DemoModMod.java"
+        )
+        self.assertTrue(entry.is_file())
+        self.assertFalse(
+            (root / "src" / "main" / "java" / "com" / "example" / "demo" / "ModMain.java").exists()
+        )
         source = entry.read_text(encoding="utf-8")
+        self.assertIn("class DemoModMod", source)
         self.assertIn("IEventBus", source)
-        self.assertIn("NeoForge.EVENT_BUS", source)
+        self.assertIn("MinecraftForge.EVENT_BUS", source)
+        self.assertNotIn("net.neoforged.neoforge", source)
+
+    def test_restore_incompatible_neoforge_scaffold(self) -> None:
+        root = self.tmp / "neo_bad"
+        mcdev.templates.create_neoforge_project(
+            root,
+            mod_id="demo_mod",
+            mod_name="Demo",
+            package="com.example.demo",
+        )
+        (root / "build.gradle").write_text(
+            "plugins {\n"
+            "    id 'net.neoforged.gradle.userdev' version '7.0.145'\n"
+            "}\n"
+            "dependencies {\n"
+            "    implementation 'net.neoforged:neoforge:47.1.106'\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        (root / ".dma").mkdir(exist_ok=True)
+        (root / ".dma" / "project.json").write_text(
+            json.dumps(
+                {
+                    "loader": "NeoForge",
+                    "mc_version": "1.20.1",
+                    "mod_id": "demo_mod",
+                    "name": "Demo",
+                }
+            ),
+            encoding="utf-8",
+        )
+        entry = (
+            root / "src" / "main" / "java" / "com" / "example" / "demo"
+            / "DemoModMod.java"
+        )
+        old = entry.with_name("ModMain.java")
+        old.write_text(entry.read_text(encoding="utf-8"), encoding="utf-8")
+
+        notice = mcdev.templates.restore_incompatible_scaffold(root)
+
+        self.assertIn("NeoGradle 7", notice)
+        build = (root / "build.gradle").read_text(encoding="utf-8")
+        self.assertIn("net.neoforged.moddev.legacyforge", build)
+        self.assertNotIn("userdev", build)
+        self.assertTrue(entry.is_file())
+        self.assertFalse(old.exists())
+        backups = list((root / ".dma" / "backups").glob("scaffold-restore-*"))
+        self.assertTrue(backups)
+        self.assertIn(
+            "net.neoforged.gradle.userdev",
+            (backups[0] / "build.gradle").read_text(encoding="utf-8"),
+        )
+
+    def test_restore_keeps_valid_scaffold(self) -> None:
+        root = self.tmp / "neo_good"
+        mcdev.templates.create_neoforge_project(
+            root, mod_id="demo_mod", mod_name="Demo"
+        )
+        (root / ".dma").mkdir(exist_ok=True)
+        (root / ".dma" / "project.json").write_text(
+            json.dumps({"loader": "NeoForge", "mc_version": "1.20.1"}),
+            encoding="utf-8",
+        )
+        before = (root / "build.gradle").read_text(encoding="utf-8")
+        self.assertEqual(mcdev.templates.restore_incompatible_scaffold(root), "")
+        self.assertEqual(
+            (root / "build.gradle").read_text(encoding="utf-8"), before
+        )
 
     def test_create_scaffold_dispatch(self) -> None:
         for loader in ("Forge", "Fabric", "NeoForge"):

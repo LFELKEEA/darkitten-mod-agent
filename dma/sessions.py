@@ -9,7 +9,7 @@ from . import paths
 
 
 def _slug(project_root: Path | str) -> str:
-    return hashlib.sha1(str(project_root).encode("utf-8")).hexdigest()[:16]
+    return hashlib.sha1(str(project_root).encode("utf-8"), usedforsecurity=False).hexdigest()[:16]
 
 
 def _path(project_root: Path | str) -> Path:

@@ -657,7 +657,7 @@ def _java_for_decompile() -> tuple[Path | None, str]:
     if install is None:
         return None, (
             "本机没有找到 JDK，未生成反编译源码。到「环境」页点「一键准备」"
-            "装好 JDK 21，再重新导入这个 JAR。"
+            "装好 JDK 17 或更高版本，再重新导入这个 JAR。"
         )
     if install.major < 17:
         return None, (

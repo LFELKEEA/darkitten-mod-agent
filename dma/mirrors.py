@@ -6,6 +6,7 @@ import os
 import queue
 import re
 import shutil
+import socket
 import sys
 import tempfile
 import threading
@@ -22,21 +23,36 @@ from . import paths
 
 NEOFORGED_HOST = "maven.neoforged.net"
 USER_AGENT = "DarkittenModAgent/1.0 (+local build proxy)"
+MOJANG_LIBS = "https://libraries.minecraft.net/"
 
 # 按顺序尝试。前两个是国内加速，速度快；插件门户只用来兜住 ModDevGradle；
 # Stellar 的元数据最全但很慢；最后一个兜底。
 SOURCES: tuple[tuple[str, str], ...] = (
+    # Mojang 官方库文件直连通常可用，而且没有 bmclapi 的预签名跳转问题
+    # （HEAD 会被 S3 以 403 拒绝）。放在最前面当权威源。
+    ("mojanglibs", MOJANG_LIBS),
     ("bmclapi", "https://bmclapi2.bangbang93.com/maven"),
     ("nyist", "https://mirror4.nyist.edu.cn/bmclapi"),
+    ("tencent", "https://mirrors.cloud.tencent.com/nexus/repository/maven-public"),
+    ("huawei", "https://repo.huaweicloud.com/repository/maven"),
+    ("aliyun", "https://maven.aliyun.com/repository/public"),
     ("portal", "https://plugins.gradle.org/m2"),
     ("stellar", "https://repo.stellardrift.ca/maven/internal"),
     ("minguncle", "https://mirror.minguncle.cn/maven.neoforged.net"),
 )
 
 CENTRAL = "https://repo.maven.apache.org/maven2"
+
+# 这些官方仓库直连不通时，构建会卡在依赖解析。自动切到本地镜像代理。
+OFFICIAL_HOSTS: tuple[str, ...] = (
+    "maven.neoforged.net",
+    "maven.minecraftforge.net",
+    "maven.fabricmc.net",
+)
+_HOST_CACHE: dict[str, tuple[float, bool]] = {}
+_HOST_TTL = 60.0
 # 合并 NeoFormRuntime 时只需要快源；慢的备用源留给 Gradle 自己按需拉。
-FAST_SOURCE_NAMES = ("bmclapi", "nyist", "portal")
-MOJANG_LIBS = "https://libraries.minecraft.net/"
+FAST_SOURCE_NAMES = ("mojanglibs", "bmclapi", "nyist", "portal")
 VERSION_MANIFEST = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json"
 
 NFR_MAIN_CLASS = "net.neoforged.neoform.runtime.cli.Main"
@@ -74,14 +90,21 @@ def repo_cache() -> Path:
 # Windows 默认 MAX_PATH 是 260，Gradle 插件坐标很容易超长。超长时 open()
 # 直接抛 OSError，客户端只会看到“发完响应头就断开”，Gradle 会反复重试。
 _MAX_CACHE_PATH = 235
+# 远端 POM 正常只有几十 KB，解析前设上限，避免恶意/异常文件撑爆内存。
+_MAX_POM_BYTES = 4 * 1024 * 1024
 
 
 def cache_path(maven_path: str) -> Path:
-    base = repo_cache()
-    target = base / maven_path
+    base = repo_cache().resolve()
+    # pathlib 遇到绝对路径会丢掉左边的基址，'..' 也能穿出去；镜像路径
+    # 全部来自网络元数据，必须限制在 repo_cache 内。
+    cleaned = str(maven_path or "").replace("\\", "/").lstrip("/")
+    target = (base / cleaned).resolve()
+    if not target.is_relative_to(base):
+        raise ValueError(f"非法的 Maven 缓存路径：{maven_path}")
     if len(str(target)) + len(".part") <= _MAX_CACHE_PATH:
         return target
-    digest = hashlib.sha1(maven_path.encode("utf-8")).hexdigest()
+    digest = hashlib.sha1(maven_path.encode("utf-8"), usedforsecurity=False).hexdigest()
     return base / "_long" / digest[:2] / f"{digest}.bin"
 
 
@@ -103,11 +126,11 @@ def _gradle_cache_find(maven_path: str) -> Path | None:
         Path(group, artifact, version),
         Path(*group.split("."), artifact, version),
     ]
-    roots: list[Path] = []
-    env = os.environ.get("GRADLE_USER_HOME")
-    if env:
-        roots.append(Path(env) / "caches" / "modules-2" / "files-2.1")
-    roots.append(Path.home() / ".gradle" / "caches" / "modules-2" / "files-2.1")
+    roots: list[Path] = [
+        paths.gradle_home() / "caches" / "modules-2" / "files-2.1",
+        # 旧版本把缓存放在用户目录，迁移期间继续兼容读取。
+        Path.home() / ".gradle" / "caches" / "modules-2" / "files-2.1",
+    ]
     for root in roots:
         for relative in relatives:
             folder = root / relative
@@ -135,7 +158,9 @@ def _import_from_gradle_cache(
             if existing.is_file() and existing.stat().st_size > 0:
                 service.store(
                     maven_path,
-                    hashlib.sha1(existing.read_bytes()).hexdigest().encode(),
+                    hashlib.sha1(existing.read_bytes(), usedforsecurity=False)
+                    .hexdigest()
+                    .encode(),
                 )
                 return cache_path(maven_path)
             target = _gradle_cache_find(base)
@@ -143,7 +168,7 @@ def _import_from_gradle_cache(
                 return None
             data = target.read_bytes()
             service.store(base, data)
-            service.store(maven_path, hashlib.sha1(data).hexdigest().encode())
+            service.store(maven_path, hashlib.sha1(data, usedforsecurity=False).hexdigest().encode())
             return cache_path(maven_path)
         target = _gradle_cache_find(base)
         if target is None:
@@ -176,7 +201,10 @@ def _open(url: str, timeout: float):
 
 # Stellar 的元数据最全，但同时连接多了会直接卡住不返回。给每个源单独限流，
 # 拿不到名额的请求排队，总比大家一起去把源拖死好。
-_SOURCE_LIMITS = {"stellar": 6, "minguncle": 4}
+# Stellar 对并发很敏感：同时开 6 个连接就经常整批超时（实测 12 个并发里
+# 一半要 60 秒才失败），而 Neoforged 的构件只有它一个源，超时一次就会让
+# 整个仓库被 Gradle 禁用。宁可排队慢一点，也不要把它压垮。
+_SOURCE_LIMITS = {"stellar": 2, "minguncle": 2}
 _slots: dict[str, threading.Semaphore] = {}
 _slots_guard = threading.Lock()
 
@@ -284,13 +312,19 @@ class _SourceHealth:
         with self._lock:
             self._absent[(name, path)] = time.time() + _ABSENT_TTL
 
-    def fail(self, name: str, transient: bool = True) -> None:
+    def fail(self, name: str, transient: bool = True, cap: float = 600.0) -> None:
+        """记录一次失败并短暂避开该源。
+
+        权威源（Stellar）不能因为一次超时就被排除几分钟：Neoforged 的构件
+        只有它有，排除了就只能给 Gradle 回 503。所以调用方传一个很小的
+        ``cap``，让它几秒后就能重新参与竞争。
+        """
         if not transient:
             return
         with self._lock:
             streak = self._streak.get(name, 0) + 1
             self._streak[name] = streak
-            wait = min(20.0 * (2 ** (streak - 1)), 600.0)
+            wait = min(20.0 * (2 ** (streak - 1)), cap)
             self._penalty[name] = time.time() + wait
             self._speed[name] = 0.0
 
@@ -332,6 +366,7 @@ def _race(
     headers: dict[str, str] | None = None,
     stagger: float = _RACE_STAGGER,
     required: tuple[str, ...] = (),
+    authoritative: bool = False,
 ):
     """并发打开多个源，返回最先拿到数据的那个。
 
@@ -343,6 +378,13 @@ def _race(
     unresolved)。incomplete 表示还有源没来得及回答（排队或超时）；
     unresolved 表示 required 里的权威源没有给出明确答复，这两种情况都不能
     断定文件不存在。
+
+    authoritative=True 时（maven-metadata.xml 这类无法从其它源补齐的内容），
+    非权威源的响应先挂起，等权威源表态：权威源也拿到才算数。否则国内镜像
+    里那份过期了五年的 maven-metadata.xml 会先返回，让 Gradle 误判“没有
+    符合范围的版本”。权威源明确 404 时才退回其它源；权威源临时故障则宁
+    可回 503 让 Gradle 重试，也不能返回过期元数据。
+
     response 为 None 表示调用方不需要继续读。
     """
     results: queue.Queue = queue.Queue()
@@ -356,7 +398,14 @@ def _race(
         started = time.monotonic()
         try:
             response, held, bad = _open_source(
-                name, base, maven_path, timeout=timeout, attempts=1, headers=headers
+                name,
+                base,
+                maven_path,
+                timeout=timeout,
+                # 权威源重试：Stellar 偶发握手超时，重试一次就能拿到，
+                # 不能因为一次抖动就让整个构件解析失败。
+                attempts=3 if name in required else 1,
+                headers=headers,
             )
             if response is None:
                 results.put(("fail" if bad else "miss", name, None, None, None))
@@ -420,9 +469,13 @@ def _race(
     launched = 0
     pending = 0
     winner = None
+    held = None
     misses = 0
     failures = 0
     answered: set[str] = set()
+    required_names = set(required)
+    required_pending = set(required)
+    required_failed = False
     while winner is None:
         now = time.monotonic()
         if launched < len(sources) and now < deadline:
@@ -442,17 +495,56 @@ def _race(
         pending -= 1
         status, name, payload, response, slot = item
         if status == "ok":
-            stop.set()
-            winner = (name, payload, response, slot)
             answered.add(name)
+            if authoritative and name not in required_names:
+                # 先压着，等权威源表态；只留第一份，后面多余的直接关掉。
+                if held is None:
+                    held = item
+                else:
+                    if response is not None:
+                        _close_quietly(response)
+                    if slot is not None:
+                        slot.release()
+            else:
+                stop.set()
+                winner = (name, payload, response, slot)
+                if held is not None:
+                    if held[3] is not None:
+                        _close_quietly(held[3])
+                    if held[4] is not None:
+                        held[4].release()
+                    held = None
         elif status == "miss":
             misses += 1
             answered.add(name)
             _health.miss(name, maven_path)
         elif status == "fail":
             failures += 1
-            answered.add(name)
-            _health.fail(name)
+            if name in required_names:
+                required_failed = True
+            # 失败不等于“答复过”：权威源（Stellar 等）超时/重置时不能
+            # 把它当成 404，否则会误把存在的构件记成缺失。
+            _health.fail(name, cap=10.0 if name in required else 600.0)
+        if authoritative:
+            required_pending.discard(name)
+            if winner is None and not required_pending:
+                if held is not None and not required_failed:
+                    # 权威源明确说没有，其它源的内容才可信。
+                    stop.set()
+                    winner = held
+                    held = None
+                    break
+                # 权威源故障：不能用过期副本冒充正确结果，退出等 503。
+                break
+    if winner is None and held is not None and not (authoritative and required_failed):
+        winner = held
+        held = None
+    if held is not None:
+        if held[3] is not None:
+            _close_quietly(held[3])
+        if held[4] is not None:
+            held[4].release()
+        held = None
     stop.set()
     # 胜出后其它线程可能刚好也拿到数据，短时间清掉，避免连接和名额泄漏。
     end = time.monotonic() + 0.3
@@ -583,6 +675,72 @@ def neoforged_reachable(timeout: float = 6.0) -> bool:
         return False
 
 
+# 探测时必须访问一个“一定存在”的构件元数据。很多网络环境会在仓库根路径
+# 直接返回 404 或假 200，却把真正的构件请求卡死，只用根路径会误判为可达。
+_PROBE_PATHS: dict[str, str] = {
+    "maven.neoforged.net": "/releases/net/neoforged/forge/maven-metadata.xml",
+    "maven.minecraftforge.net": "/net/minecraftforge/forge/maven-metadata.xml",
+    "maven.fabricmc.net": "/net/fabricmc/fabric-loader/maven-metadata.xml",
+}
+
+
+def host_reachable(host: str, port: int = 443, timeout: float = 8.0) -> bool:
+    """真正建一次 HTTP(S) 连接来探测官方仓库，结果缓存 60 秒。
+
+    只做 TCP 握手会漏掉三类“假连通”：证书链校验失败、TLS 被中间设备
+    重置、网关接受了连接却不转发任何数据。这三种情况下 Gradle 一个构件
+    都拿不到，但 TCP 探测却报告“可达”，镜像永远不会启用。
+
+    对已知的官方仓库探测一个真实存在的 maven-metadata.xml：根路径经常被
+    网关伪造（返回 404 或假 200），不能作为判断依据。
+    """
+    now = time.time()
+    cached = _HOST_CACHE.get(host)
+    if cached is not None and now < cached[0]:
+        return cached[1]
+    scheme = "https" if port == 443 else "http"
+    path = _PROBE_PATHS.get(host, "/")
+    url = f"{scheme}://{host}:{port}{path}"
+    reachable = False
+    try:
+        request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            response.read(1)
+        reachable = True
+    except urllib.error.HTTPError as exc:
+        # 已知仓库的元数据 404/5xx 表示仓库不可用；其他主机只要响应了
+        # HTTP 状态码，就说明 TLS 与 HTTP 都通了。
+        reachable = host not in _PROBE_PATHS
+    except Exception:  # noqa: BLE001 - 证书、超时、重置都按不可达处理
+        reachable = False
+    _HOST_CACHE[host] = (now + _HOST_TTL, reachable)
+    return reachable
+
+
+def unreachable_hosts(
+    hosts: list[str] | tuple[str, ...] | None = None, timeout: float = 8.0
+) -> list[str]:
+    """返回连不上的官方仓库主机列表。空列表表示都能直连，不需要镜像。"""
+    candidates = [
+        str(host).strip()
+        for host in (hosts or OFFICIAL_HOSTS)
+        if str(host).strip()
+    ]
+    if not candidates:
+        return []
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(max_workers=len(candidates)) as pool:
+        results = list(
+            pool.map(lambda host: host_reachable(host, timeout=timeout), candidates)
+        )
+    return [host for host, ok in zip(candidates, results) if not ok]
+
+
+def forget_host_cache() -> None:
+    _HOST_CACHE.clear()
+
+
 def needs_mirror(text: str) -> bool:
     lowered = (text or "").lower()
     if NEOFORGED_HOST not in lowered:
@@ -672,6 +830,13 @@ def minecraft_dependencies_module(version_json: dict) -> dict:
     Gradle 会负责把所有库从能连通的源下载好，NFR 就不会再去碰被污染的主机。
     """
     version = str(version_json.get("id") or "")
+    # 变体必须声明这个 Minecraft 版本自己的 Java 目标版本（1.20.1 是 17）。
+    # 写死 21 时，toolchain 17 的工程在 compileClasspath 上会报
+    # “No matching variant … compatible with Java 21 … needed Java 17”。
+    try:
+        java_version = int(version_json["javaVersion"]["majorVersion"])
+    except (KeyError, TypeError, ValueError):
+        java_version = 17
     variants: list[dict] = []
     for distribution in ("client", "server"):
         for os_name in ("windows", "linux", "macos"):
@@ -683,7 +848,10 @@ def minecraft_dependencies_module(version_json: dict) -> dict:
                 entry: dict = {
                     "group": group,
                     "module": module,
-                    "version": {"requires": lib_version},
+                    # ModDevGradle 的 NonStrictDependencyTransform 只认 strictly：
+                    # 它把 strictVersion 读出来再 require，未设置时会把版本清空，
+                    # 依赖就变成 "group:module:" 无法解析。
+                    "version": {"strictly": lib_version},
                 }
                 if classifier:
                     entry["thirdPartyCompatibility"] = {
@@ -701,7 +869,7 @@ def minecraft_dependencies_module(version_json: dict) -> dict:
                         "name": f"{distribution}-{os_name}-{'api' if usage == 'java-api' else 'runtime'}",
                         "attributes": {
                             "org.gradle.usage": usage,
-                            "org.gradle.jvm.version": 21,
+                            "org.gradle.jvm.version": java_version,
                             "net.neoforged.distribution": distribution,
                             "net.neoforged.operatingsystem": os_name,
                         },
@@ -725,6 +893,8 @@ def minecraft_dependencies_module(version_json: dict) -> dict:
 
 
 def _pom_dependencies(xml_bytes: bytes) -> list[tuple[str, str, str, str | None]]:
+    if len(xml_bytes) > _MAX_POM_BYTES:
+        return []
     try:
         root = ET.fromstring(xml_bytes)
     except ET.ParseError:
@@ -851,9 +1021,21 @@ def _ensure_nfr_all_jar(group: str, module: str, version: str, log: Callable[[st
     target = folder / f"{module}-{version}-all.jar"
     stub = _bundled_loom_stub()
     stub_entry = "net/fabricmc/loom/nativeplatform/LoomNativePlatform.class"
+    # 先把 POM 拿到手：判断已合成的 jar 是否缺依赖时要用到依赖清单。
+    pom: bytes | None = None
+    bundled_pom = _bundled_neoform(version, ".pom")
+    if bundled_pom is not None:
+        pom = bundled_pom.read_bytes()
+    else:
+        pom = fetch(f"{base}/{module}/{version}/{module}-{version}.pom")
+    deps = list(_pom_dependencies(pom)) if pom else []
+    need_picocli = any(artifact == "picocli" for _g, artifact, _v, _c in deps)
     if target.is_file() and target.stat().st_size > 0 and _jar_ok(target):
-        # 旧版本合成的 jar 缺 fabric-loom-native 的类，需要重做一次。
-        if stub is None or _jar_has(target, stub_entry):
+        # 旧版本合成的 jar 缺 fabric-loom-native 的类（CLI 一启动就
+        # NoClassDefFoundError），也可能缺 picocli 等依赖，需要重做一次。
+        has_stub = stub is None or _jar_has(target, stub_entry)
+        has_picocli = not need_picocli or _jar_has(target, "picocli/CommandLine.class")
+        if has_stub and has_picocli:
             return target
     plain = folder / f"{module}-{version}.jar"
     if not (plain.is_file() and _jar_ok(plain)):
@@ -869,27 +1051,22 @@ def _ensure_nfr_all_jar(group: str, module: str, version: str, log: Callable[[st
         if not _jar_ok(plain):
             plain.unlink(missing_ok=True)
             return None
-    pom: bytes | None = None
-    bundled_pom = _bundled_neoform(version, ".pom")
-    if bundled_pom is not None:
-        pom = bundled_pom.read_bytes()
-    else:
-        pom = fetch(f"{base}/{module}/{version}/{module}-{version}.pom")
     parts = [plain]
-    if pom:
-        for dep_group, dep_artifact, dep_version, classifier in _pom_dependencies(pom):
-            dep_base = dep_group.replace(".", "/")
-            suffix = f"-{classifier}" if classifier else ""
-            dep_path = repo_cache() / dep_base / dep_artifact / dep_version / (
-                f"{dep_artifact}-{dep_version}{suffix}.jar"
-            )
-            if not (dep_path.is_file() and _jar_ok(dep_path)):
-                log(f"[镜像] 下载 {dep_group}:{dep_artifact}:{dep_version}{suffix}")
-                url = f"{dep_base}/{dep_artifact}/{dep_version}/{dep_artifact}-{dep_version}{suffix}.jar"
-                if not fetch_to(url, dep_path, timeout=20, attempts=1, fast_only=True):
+    for dep_group, dep_artifact, dep_version, classifier in deps:
+        dep_base = dep_group.replace(".", "/")
+        suffix = f"-{classifier}" if classifier else ""
+        dep_path = repo_cache() / dep_base / dep_artifact / dep_version / (
+            f"{dep_artifact}-{dep_version}{suffix}.jar"
+        )
+        if not (dep_path.is_file() and _jar_ok(dep_path)):
+            log(f"[镜像] 下载 {dep_group}:{dep_artifact}:{dep_version}{suffix}")
+            url = f"{dep_base}/{dep_artifact}/{dep_version}/{dep_artifact}-{dep_version}{suffix}.jar"
+            # 快源优先；拿不到再走全部源（.jar 是硬依赖，缺一个就启动不了）。
+            if not fetch_to(url, dep_path, timeout=30, attempts=2, fast_only=True):
+                if not fetch_to(url, dep_path, timeout=45, attempts=3):
                     log(f"[镜像] 跳过 {dep_artifact}{suffix}（留给 Gradle 处理）")
                     continue
-            parts.append(dep_path)
+        parts.append(dep_path)
     if stub is not None:
         parts.append(stub)
     log(f"[镜像] 合并 {module}-{version}-all.jar（{len(parts)} 个 jar）")
@@ -907,6 +1084,14 @@ _NFR_ARTIFACT = re.compile(r"^net/neoforged/neoform-runtime/([^/]+)/neoform-runt
 _NFR_MODULE = re.compile(r"^net/neoforged/neoform-runtime/([^/]+)/neoform-runtime-(\1)\.module$")
 _MCD_MODULE = re.compile(r"^net/neoforged/minecraft-dependencies/([^/]+)/minecraft-dependencies-(\1)\.module$")
 
+# Gradle 模块元数据是可选文件：拿不到时会退回读 POM。权威源抖动时如果
+# 回 503，Gradle 会直接判整个模块解析失败；回 404 反而能正常走 POM。
+_OPTIONAL_SUFFIXES = (".module", ".sha1", ".md5", ".sha256", ".sha512")
+
+
+def _is_optional(maven_path: str) -> bool:
+    return maven_path.lower().endswith(_OPTIONAL_SUFFIXES)
+
 
 # ----------------------------------------------------------------------
 # 本地 Maven 代理
@@ -915,6 +1100,10 @@ _MCD_MODULE = re.compile(r"^net/neoforged/minecraft-dependencies/([^/]+)/minecra
 _MISS_TTL = 30.0
 _ABSENT_TTL = 60.0
 MIRROR_PORT = 55878
+# 合成元数据的结构版本。改了 minecraft-dependencies 之类的生成逻辑就必须
+# 递增：Gradle 按仓库 URL 缓存模块元数据，URL 不变就永远用旧副本（例如
+# 之前写死 Java 21 的变体），升级程序后仍然复现“No matching variant”。
+SYNTH_SCHEMA = 3
 
 # NeoForged 自己的仓库（maven.neoforged.net）被墙时，只有 Stellar 镜像是完整的。
 # 这些路径先问 Stellar，避免前面几个只镜像 Mojang 的源返回 404 把整个解析带偏。
@@ -1000,8 +1189,13 @@ class _Handler(BaseHTTPRequestHandler):
     def _dispatch(self) -> None:
         service: MirrorService = self.server.service  # type: ignore[attr-defined]
         raw = self.path.split("?", 1)[0]
-        if raw.startswith("/releases/"):
-            maven_path = _normalize(raw[len("/releases/") :])
+        prefix = "/releases/"
+        if raw.startswith("/releases/s"):
+            head, _, rest = raw[len("/releases/s") :].partition("/")
+            if head.isdigit() and rest:
+                prefix = f"/releases/s{head}/"
+        if raw.startswith(prefix):
+            maven_path = _normalize(raw[len(prefix) :])
         else:
             self._missing()
             return
@@ -1011,10 +1205,8 @@ class _Handler(BaseHTTPRequestHandler):
         if ".." in maven_path.split("/") or "\\" in maven_path or ":" in maven_path:
             self._missing()
             return
-        cached = service.cached(maven_path)
-        if cached is not None:
-            self._send_file(cached)
-            return
+        # 先走本地合成：minecraft-dependencies / neoform-runtime 的元数据由
+        # 程序自己生成，旧版本留在缓存里的副本可能已经过期，不能被 cache 抢先命中。
         try:
             data = service.synthesize(maven_path)
         except Exception:  # noqa: BLE001 - 代理不能因为单个请求挂掉
@@ -1023,6 +1215,28 @@ class _Handler(BaseHTTPRequestHandler):
             service.store(maven_path, data)
             self._send_bytes(data)
             return
+        # 合成内容会随程序版本变化，缓存里旧内容的 .sha1 不能继续用。
+        # Gradle 校验不一致时会退回按旧哈希缓存的构件，于是升级后仍然
+        # 拿到过期元数据（例如把 Java 21 写死的 minecraft-dependencies）。
+        if maven_path.endswith(".sha1"):
+            synth = None
+            try:
+                synth = service.synthesize(maven_path[: -len(".sha1")])
+            except Exception:  # noqa: BLE001
+                synth = None
+            if synth is not None:
+                digest = hashlib.sha1(synth, usedforsecurity=False).hexdigest().encode("ascii")
+                service.store(maven_path, digest)
+                self._send_bytes(digest)
+                return
+        # maven-metadata.xml 决定动态版本（4.0.+ 这类）能解析出哪些版本，
+        # 国内镜像上的这份文件经常几年不更新。每次都重新问上游，不能直接
+        # 用本地缓存，否则 Gradle 会在“没有匹配版本”上失败。
+        if not maven_path.endswith("maven-metadata.xml"):
+            cached = service.cached(maven_path)
+            if cached is not None:
+                self._send_file(cached)
+                return
         if self.command == "HEAD":
             service.head(maven_path, self)
             return
@@ -1032,7 +1246,9 @@ class _Handler(BaseHTTPRequestHandler):
 class MirrorService:
     """把 maven.neoforged.net 换成本地代理，代理按需从国内镜像抓取并缓存。"""
 
-    def __init__(self, log: Callable[[str], None] | None = None) -> None:
+    def __init__(
+        self, log: Callable[[str], None] | None = None, *, fresh_port: bool = False
+    ) -> None:
         self._log = log or (lambda _text: None)
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
@@ -1040,6 +1256,10 @@ class MirrorService:
         self._locks_guard = threading.Lock()
         self._missing: dict[str, float] = {}
         self._script: Path | None = None
+        # 重试构建时换一个端口，等于给 Gradle 换了一个仓库 URL：
+        # 上次构建记下的“模块不存在”是按 URL 缓存的，端口不变就永远
+        # 不会重新问镜像，必须靠新端口绕开这份缓存。
+        self._fresh_port = fresh_port
 
     # -- 生命周期 -----------------------------------------------------
     @property
@@ -1047,15 +1267,21 @@ class MirrorService:
         if self._server is None:
             raise RuntimeError("镜像代理还没启动")
         host, port = self._server.server_address[:2]
-        return f"http://{host}:{port}/releases"
+        return f"http://{host}:{port}/releases/s{SYNTH_SCHEMA}"
 
     def start(self) -> str:
         if self._server is not None:
             return self.base_url
-        # 端口固定，代理地址在每次构建之间保持一致。Gradle 的依赖解析缓存
-        # 以仓库 URL 为键，端口一变就要重新访问所有仓库，构建会慢上好几分钟。
+        # 正常构建用固定端口，代理地址在每次构建之间保持一致，Gradle 的
+        # 依赖解析缓存可以继续复用。重试构建（fresh_port）则直接用临时端口，
+        # 让 Gradle 按新的仓库 URL 重新解析。
         server = None
-        for port in (MIRROR_PORT, *range(MIRROR_PORT + 1, MIRROR_PORT + 16), 0):
+        candidates = (0,) if self._fresh_port else (
+            MIRROR_PORT,
+            *range(MIRROR_PORT + 1, MIRROR_PORT + 16),
+            0,
+        )
+        for port in candidates:
             try:
                 server = _Server(("127.0.0.1", port), _Handler)
                 break
@@ -1100,11 +1326,25 @@ class MirrorService:
         self._missing.clear()
 
     # -- init script ---------------------------------------------------
-    def init_script(self) -> Path:
+    def init_script(self, hosts: list[str] | tuple[str, ...] | None = None) -> Path:
+        """生成 Gradle init script。
+
+        hosts 只包含“当前连不上”的官方仓库，避免把本来能直连的仓库也绕进代理。
+        """
+        active = [
+            str(host).strip()
+            for host in (hosts or OFFICIAL_HOSTS)
+            if str(host).strip()
+        ]
+        hosts_literal = "[" + ", ".join(
+            "'" + host.replace("'", "") + "'" for host in active
+        ) + "]"
         self.forget_missing()
         base = self.start()
         target = cache_dir() / "mirror.gradle"
-        content = _INIT_TEMPLATE.format(mirror=base, mojang=MOJANG_LIBS)
+        content = _INIT_TEMPLATE.format(
+            mirror=base, mojang=MOJANG_LIBS, hosts=hosts_literal
+        )
         try:
             if target.is_file() and target.read_text(encoding="utf-8") == content:
                 return target
@@ -1143,21 +1383,49 @@ class MirrorService:
         self._log(f"[镜像] 获取 {maven_path}")
         started = time.monotonic()
         pinned = _pinned_sources(maven_path)
+        # maven-metadata.xml 用来解析版本区间，内容不完整就会报“找不到匹配
+        # 4.0.+”这类错误（bmclapi 上 forgespi 的列表停在 2.0.0）。所以
+        # neoforged / forge / cpw 的元数据仍以 Stellar 为准，只是把等待时间
+        # 压到 45 秒内，避免一个文件卡三分钟让构建看起来像死机。
+        metadata = maven_path.endswith("maven-metadata.xml")
         ordered = _health.order(
             SOURCES + (("central", CENTRAL),), maven_path, pinned
         )
         winner, misses, failures, incomplete, unresolved = _race(
-            ordered, maven_path, mode="stream", required=pinned
+            ordered,
+            maven_path,
+            mode="stream",
+            required=pinned,
+            # Stellar 承接的 neoforged 构件并发多了会排队；权威源内部会重试
+            # 三次，所以要给足总时长（Gradle 侧的 socket 超时是 5 分钟）。
+            timeout=15.0 if metadata else (30.0 if pinned else _RACE_TIMEOUT),
+            overall=45.0 if metadata else (180.0 if pinned else _RACE_OVERALL),
+            authoritative=bool(pinned) and metadata,
         )
         if winner is None:
             tmp.unlink(missing_ok=True)
-            if unresolved or (misses == 0 and (failures or incomplete)):
+            # 非权威路径（普通 Maven Central 库）没有完整性问题，退回缓存
+            # 副本比让 Gradle 空等更好；neoforged 路径必须等 Stellar，
+            # 缓存里可能正好是别的镜像那份过期列表。
+            if metadata and not pinned:
+                cached_meta = self.cached(maven_path)
+                if cached_meta is not None:
+                    self._log(f"[镜像] {maven_path} 上游暂时不可用，使用缓存副本")
+                    handler._send_file(cached_meta)
+                    return
+            if _is_optional(maven_path) or not (
+                unresolved or (misses == 0 and (failures or incomplete))
+            ):
+                if unresolved and _is_optional(maven_path):
+                    self._log(
+                        f"[镜像] {maven_path} 拿不准是否存在，按可选项处理，交给 POM 解析"
+                    )
+                self._mark_missing(maven_path)
+                handler._missing()
+            else:
                 # 权威源没答复，或者根本没有源明确说“没有”，别记成 404。
                 self._log(f"[镜像] {maven_path} 上游暂时不可用，稍后重试")
                 handler._send_bytes(b"", 503)
-            else:
-                self._mark_missing(maven_path)
-                handler._missing()
             return
         name, first, response, slot = winner
         try:
@@ -1210,6 +1478,7 @@ class MirrorService:
             return
         started = time.monotonic()
         pinned = _pinned_sources(maven_path)
+        metadata = maven_path.endswith("maven-metadata.xml")
         ordered = _health.order(
             SOURCES + (("central", CENTRAL),), maven_path, pinned
         )
@@ -1217,13 +1486,27 @@ class MirrorService:
             ordered,
             maven_path,
             mode="head",
-            timeout=30.0,
-            overall=45.0,
+            timeout=15.0 if metadata else 30.0,
+            overall=45.0 if metadata else (180.0 if pinned else 45.0),
             headers={"Range": "bytes=0-0"},
             stagger=0.2,
             required=pinned,
         )
         if winner is None:
+            if metadata and not pinned:
+                cached_meta = self.cached(maven_path)
+                if cached_meta is not None:
+                    handler.send_response(200)
+                    handler.send_header("Content-Type", "application/octet-stream")
+                    handler.send_header("Content-Length", str(cached_meta.stat().st_size))
+                    handler.end_headers()
+                    return
+            if _is_optional(maven_path):
+                # .module / 校验和缺失时 Gradle 会退回 POM，不能因为上游
+                # 抖动就 503 把整个模块判死。
+                self._mark_missing(maven_path)
+                handler._missing()
+                return
             if unresolved or (misses == 0 and (failures or incomplete)):
                 handler._send_bytes(b"", 503)
             else:
@@ -1246,9 +1529,8 @@ class MirrorService:
         ):
             return None
         with self._lock_for(maven_path):
-            cached = self.cached(maven_path)
-            if cached is not None:
-                return cached.read_bytes()
+            # 合成内容的结构由当前程序版本决定，旧缓存里的副本可能已经过期，
+            # 不能直接复用，否则升级后仍会拿到错误的元数据。
             return self._synthesize(maven_path)
 
     def _lock_for(self, key: str) -> threading.Lock:
@@ -1317,8 +1599,8 @@ def _patch_all_jar(document: dict, all_jar: Path) -> None:
         "size": len(data),
         "sha512": hashlib.sha512(data).hexdigest(),
         "sha256": hashlib.sha256(data).hexdigest(),
-        "sha1": hashlib.sha1(data).hexdigest(),
-        "md5": hashlib.md5(data).hexdigest(),
+        "sha1": hashlib.sha1(data, usedforsecurity=False).hexdigest(),
+        "md5": hashlib.md5(data, usedforsecurity=False).hexdigest(),
     }
     for variant in document.get("variants", []):
         if variant.get("name") != "shadowRuntimeElements":
@@ -1335,11 +1617,14 @@ _INIT_TEMPLATE = """\
 beforeSettings {{ settings ->
     def mirrorUrl = '{mirror}'
     def mojangUrl = '{mojang}'
-    def mojangMirror = 'https://bmclapi2.bangbang93.com/maven'
+    // Route Mojang libs through the local proxy as well: bmclapi redirects
+    // to a presigned S3 URL, and Gradle's HEAD probe gets 403 there.
+    def mojangMirror = '{mirror}'
+    def officialHosts = {hosts}
     def rewrite = {{ repo ->
         if (repo instanceof org.gradle.api.artifacts.repositories.MavenArtifactRepository) {{
             def u = repo.url
-            if (u != null && u.host == 'maven.neoforged.net') {{
+            if (u != null && officialHosts.contains(u.host)) {{
                 repo.url = mirrorUrl
                 repo.allowInsecureProtocol = true
             }} else if (u != null && u.host == 'libraries.minecraft.net') {{
@@ -1358,11 +1643,14 @@ beforeSettings {{ settings ->
 allprojects {{
     def mirrorUrl = '{mirror}'
     def mojangUrl = '{mojang}'
-    def mojangMirror = 'https://bmclapi2.bangbang93.com/maven'
+    // Route Mojang libs through the local proxy as well: bmclapi redirects
+    // to a presigned S3 URL, and Gradle's HEAD probe gets 403 there.
+    def mojangMirror = '{mirror}'
+    def officialHosts = {hosts}
     def rewrite = {{ repo ->
         if (repo instanceof org.gradle.api.artifacts.repositories.MavenArtifactRepository) {{
             def u = repo.url
-            if (u != null && u.host == 'maven.neoforged.net') {{
+            if (u != null && officialHosts.contains(u.host)) {{
                 repo.url = mirrorUrl
                 repo.allowInsecureProtocol = true
             }} else if (u != null && u.host == 'libraries.minecraft.net') {{
@@ -1375,6 +1663,43 @@ allprojects {{
     repositories.maven {{ name = 'DMAMirror'; url = mirrorUrl; allowInsecureProtocol = true }}
     repositories.maven {{ name = 'DMAMojangMirror'; url = mojangMirror; allowInsecureProtocol = true }}
     repositories.maven {{ name = 'DMAMojang'; url = mojangUrl }}
+
+    // NeoFormRuntime downloads artifacts that are missing from its manifest with
+    // its own HTTP client, using a hardcoded https://maven.neoforged.net base.
+    // That client ignores Gradle repositories (and --offline), so a blocked host
+    // stalls the build. The NeoForm / MCP configuration for 1.20.1 asks for the
+    // artifacts below; resolve them through this project (i.e. through the
+    // mirror) and hand the local files to NFRT so it never has to hit the
+    // network itself.
+    tasks.matching {{ it.name == 'createMinecraftArtifacts' }}.configureEach {{ task ->
+        if (task.metaClass.respondsTo(task, 'addArtifactsToManifest')) {{
+            def prj = task.project
+            def coords = [
+                'de.oceanlabs.mcp:mcp_config:1.20.1-20230612.114412@zip',
+                'net.minecraftforge:installertools:1.2.0:fatjar',
+                'net.minecraftforge:installertools:1.3.2:fatjar',
+                'net.minecraftforge:mergetool:1.1.7:api',
+                'net.minecraftforge:mergetool:1.1.7:fatjar',
+                'net.minecraftforge:forgeflower:2.0.629.0',
+                'net.minecraftforge:ForgeAutoRenamingTool:1.0.2:all',
+                'net.minecraftforge:binarypatcher:1.1.1:fatjar',
+                'org.jetbrains:annotations:24.0.1',
+            ]
+            // One detached configuration per coordinate: Gradle collapses
+            // module version conflicts inside a single configuration, so
+            // requesting both installertools 1.2.0 and 1.3.2 there would
+            // leave only 1.3.2 in the manifest. NFRT then falls back to its
+            // hardcoded downloader for 1.2.0 and stalls on the blocked host.
+            coords.each {{ coordinate ->
+                def cfg = prj.configurations.detachedConfiguration()
+                cfg.transitive = false
+                cfg.dependencies.addAllLater(prj.provider {{
+                    [prj.dependencies.create(coordinate)]
+                }})
+                task.addArtifactsToManifest(cfg)
+            }}
+        }}
+    }}
     buildscript {{
         def bsRewrite = rewrite
         repositories.all {{ repo -> bsRewrite(repo) }}
@@ -1390,23 +1715,62 @@ _service: MirrorService | None = None
 _service_lock = threading.Lock()
 
 
-def service(log: Callable[[str], None] | None = None) -> MirrorService:
+def service(
+    log: Callable[[str], None] | None = None, *, fresh_port: bool = False
+) -> MirrorService:
     global _service
     with _service_lock:
+        if fresh_port and _service is not None:
+            _service.stop()
+            _service = None
         if _service is None:
-            _service = MirrorService(log)
+            _service = MirrorService(log, fresh_port=fresh_port)
         elif log is not None:
             _service._log = log
         return _service
 
 
-def prepare_launch_env(env: dict[str, str], log: Callable[[str], None] | None = None) -> Path | None:
-    """需要时启动代理并返回 init script 路径；不需要返回 None。"""
-    if neoforged_reachable():
+def prepare_launch_env(
+    env: dict[str, str] | None = None,
+    log: Callable[[str], None] | None = None,
+    hosts: list[str] | tuple[str, ...] | None = None,
+    *,
+    force: bool = False,
+    fresh_port: bool = False,
+) -> Path | None:
+    """官方仓库连不上时启动本地代理并返回 init script 路径。
+
+    全部官方仓库都能直连时返回 None，构建保持走官方源。代理启动失败也返回
+    None，不阻塞构建——让 Gradle 自己报网络错误，比直接中断更好排查。
+
+    传入的 hosts 会与官方仓库列表合并探测：NeoGradle 这类插件在运行时才
+    添加 maven.neoforged.net，构建脚本里扫不到，不能只依赖调用方传的列表。
+
+    ``force=True`` 跳过探测，直接把全部官方仓库改写到本地镜像。用于构建
+    已经因证书/网络问题失败、需要立刻重试的场景（例如探测进程能联网，但
+    Gradle 用的 JDK 信任库不认这台机器的中间证书）。
+    """
+    candidates: list[str] = []
+    for host in (*OFFICIAL_HOSTS, *(hosts or ())):
+        text = str(host).strip()
+        if text and text not in candidates:
+            candidates.append(text)
+    down = candidates if force else unreachable_hosts(candidates)
+    if not down:
         return None
-    mirror = service(log)
-    script = mirror.init_script()
-    return script
+    if log is not None:
+        if force:
+            log("[镜像] 强制切换到本地镜像代理重试：" + "、".join(down))
+        else:
+            log(
+                "[镜像] 官方仓库直连不通：" + "、".join(down) + "，自动切换本地镜像代理"
+            )
+    try:
+        return service(log, fresh_port=fresh_port).init_script(hosts=down)
+    except Exception as exc:  # noqa: BLE001 - 代理不可用时退回官方源
+        if log is not None:
+            log(f"[镜像] 本地代理启动失败，继续直连官方仓库：{exc}")
+        return None
 
 
 def shutdown() -> None:

@@ -30,8 +30,10 @@ from .chat_page import ChatPage
 from .connectors_page import ConnectorsPage
 from .environment_page import EnvironmentPage
 from .knowledge_page import KnowledgePage
+from .memory_page import MemoryPage
 from .settings_page import SettingsPage
 from .skills_page import SkillsPage
+from .studio_page import StudioPage
 from .tutorial_page import TutorialPage
 from .update_dialog import UpdateDialog
 from .widgets import tiny
@@ -112,21 +114,25 @@ class MainWindow(QMainWindow):
 
         self.stack = QStackedWidget()
         self.chat_page = ChatPage(self)
+        self.studio_page = StudioPage(self)
         self.tutorial_page = TutorialPage(self)
         self.build_page = BuildPage(self)
         self.skills_page = SkillsPage(self)
         self.connectors_page = ConnectorsPage(self)
         self.environment_page = EnvironmentPage(self)
         self.knowledge_page = KnowledgePage(self)
+        self.memory_page = MemoryPage(self)
         self.settings_page = SettingsPage(self)
         pages = [
             ("对话", self.chat_page),
+            ("快速生成", self.studio_page),
             ("教程", self.tutorial_page),
             ("编译运行", self.build_page),
             ("技能", self.skills_page),
             ("连接器", self.connectors_page),
             ("环境", self.environment_page),
             ("知识库", self.knowledge_page),
+            ("记忆", self.memory_page),
             ("设置", self.settings_page),
         ]
         self.group = QButtonGroup(self)
@@ -154,6 +160,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(sidebar)
         layout.addWidget(self.stack, 1)
         self.setCentralWidget(central)
+        self.studio_page.project_ready.connect(self._open_generated_project)
 
         self.statusBar().setSizeGripEnabled(False)
         self.statusBar().showMessage("就绪")
@@ -199,16 +206,24 @@ class MainWindow(QMainWindow):
         # 否则页面判断到的还是旧的 active_project，编译/运行按钮会一直是灰的。
         if hasattr(self, "build_page"):
             self.build_page.sync_project(project)
+        if hasattr(self, "studio_page"):
+            self.studio_page.set_project(project)
         if project is not None:
             self.config.project_root = str(project.root.parent)
             self.save_config()
+
+    def _open_generated_project(self, path: str) -> None:
+        self.chat_page.open_project_path(path)
+        self.go_to(self.chat_page)
+        self.status("已切换到新生成的工程，可以继续用对话细化或到「编译运行」验证。")
 
     def request_restart_for_update(self) -> None:
         QTimer.singleShot(300, QApplication.quit)
 
     # ------------------------------------------------------------------
     def _offer_shortcut(self) -> None:
-        if self.config.shortcut_offered:
+        # 窗口已经关掉时不要再弹模态框，否则测试或快速退出会把进程卡住。
+        if not self.isVisible() or self.config.shortcut_offered:
             return
         self.config.shortcut_offered = True
         self.save_config()

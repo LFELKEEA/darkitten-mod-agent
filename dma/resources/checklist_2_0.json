@@ -1,0 +1,1762 @@
+[
+  {
+    "id": "P0-01",
+    "category": "架构",
+    "title": "spec / workflow 接入主循环",
+    "level": "P0",
+    "section": "P0",
+    "problem": "Spec、AssetSpec、验收清单结构完整但未接入，运行时从\"一句话需求\"直接跳到写代码。",
+    "goal": "：任何需求先落 ModSpec，再进执行；acceptance 作为强制门禁， feature 未通过验收不得标记完成，失败阻断所有下游任务。",
+    "implementation": "agent 入口调 workflow.plan_tasks；把 spec 作为全局上下文， 每次文件修改必须归属某个 feature；验收项结构化对接到场景卡片 / GameTest。"
+  },
+  {
+    "id": "P0-02",
+    "category": "架构",
+    "title": "DAG 依赖调度器",
+    "level": "P0",
+    "section": "P0",
+    "problem": "任务扁平等权执行，常出现先写业务逻辑、后补 DeferredRegister，",
+    "goal": "：自动构建任务依赖图，串行阻塞依赖节点，无依赖节点并行； 一个节点失败，其下游全部标记阻塞而不是继续瞎写。",
+    "implementation": "依赖解析器 + 拓扑排序 + 增量构建（只重做受影响的模块）。"
+  },
+  {
+    "id": "P0-03",
+    "category": "架构",
+    "title": "文件快照、事务、回滚基线",
+    "level": "P0",
+    "section": "P0",
+    "problem": "改文件直接覆盖，一轮改崩一片就无法恢复，也无法二分定位是哪次编辑引入崩溃。",
+    "goal": "：每次构建前自动打快照；连续 N 轮修复失败自动回退到上一个可编译基线； 维护会话内版本链与 diff，禁止无意义的大面积重写。",
+    "implementation": "快照栈 + 变更 diff + rollback 工具 + 二分定位。"
+  },
+  {
+    "id": "P0-04",
+    "category": "架构",
+    "title": "死循环熔断与人工介入",
+    "level": "P0",
+    "section": "P0",
+    "problem": "反复改同一处、同一错误无限重试，耗尽 32 轮预算和 token。",
+    "goal": "：同一位置 / 同类错误重复超过阈值即停止自动修复， 输出\"已尝试 A/B/C，均失败，建议人工介入\"。",
+    "implementation": "失败聚类（位置哈希 + 错误签名）、最大重试阈值、分支策略切换。"
+  },
+  {
+    "id": "P0-05",
+    "category": "静态分析",
+    "title": "全局符号索引服务",
+    "level": "P0",
+    "section": "P0",
+    "problem": "只有 read_file / grep 文本搜索，没有类、方法、字段、继承、调用图。",
+    "goal": "：提供 symbol_query：查覆写、查调用链、查事件监听者、查泛型签名、 查注册项来源；支持按映射归一化后匹配。",
+    "implementation": "ASM + JavaParser 构建项目 + MC 本体 + Loader 符号库，持久化索引。"
+  },
+  {
+    "id": "P0-06",
+    "category": "静态分析",
+    "title": "Mapping（映射）转译层",
+    "level": "P0",
+    "section": "P0",
+    "problem": "Yarn / Mojmap / SRG / MCP 混用；模型写 Yarn 名而项目用 Mojmap，编译直接崩。",
+    "goal": "：所有检索、生成、校验统一归一化到项目当前映射，自动互译类名与方法名。",
+    "implementation": "映射表加载 + 签名转换器 + 生成前强制转译。"
+  },
+  {
+    "id": "P0-07",
+    "category": "Mixin",
+    "title": "ASM 级专项校验器",
+    "level": "P0",
+    "section": "P0",
+    "problem": "注入点（@At）、目标方法、捕获局部变量、优先级、refmap 全靠猜；",
+    "goal": "：静态校验注入点合法性、目标方法存在性、局部变量索引与类型、 handler 签名匹配、@Unique 命名冲突、refmap 绑定。",
+    "implementation": "ASM 扫描 + 字节码视图 + 注入点解析 + 冲突预扫描。"
+  },
+  {
+    "id": "P0-08",
+    "category": "客户端/服务端",
+    "title": "客户端类引用扫描",
+    "level": "P0",
+    "section": "P0",
+    "problem": "公共初始化代码里直接拿 Minecraft.getInstance()、渲染/粒子/输入类，",
+    "goal": "：自动识别客户端专属类引用，强制 @OnlyIn(Dist.CLIENT) 或移入 client 包； 校验 common / client 源码与资源目录分区规范。",
+    "implementation": "ASM 引用分析 + 路径规范校验 + 自动重构建议。"
+  },
+  {
+    "id": "P0-09",
+    "category": "线程",
+    "title": "异步世界写入检测",
+    "level": "P0",
+    "section": "P0",
+    "problem": "CompletableFuture、自定义线程池、IO 线程里直接改方块 / 实体 / Level，",
+    "goal": "：扫描异步分支对 Level 的写操作并阻断；输出\"必须回主线程提交\"的修复方案。",
+    "implementation": "ASM 调用点检测 + 主线程规则库 + 提交队列模板。"
+  },
+  {
+    "id": "P0-10",
+    "category": "网络",
+    "title": "网络包基础规范",
+    "level": "P0",
+    "section": "P0",
+    "problem": "无版本号、不分线程、无限流、大数据包不分片、发送上下文错误。",
+    "goal": "：强制协议版本标记、区分可靠/不可靠通道、限流、分片模板、 发送上下文（客户端只在客户端连接上发）。",
+    "implementation": "packet_linter + 通道注册时机检查 + 模板生成。"
+  },
+  {
+    "id": "P0-11",
+    "category": "安全",
+    "title": "客户端输入必须服务端权威校验",
+    "level": "P0",
+    "section": "P0",
+    "problem": "直接信任客户端发来的坐标、伤害、数量、物品修改，多人服可作弊。",
+    "goal": "：所有客户端包必须在服务端做权威校验；客户端逻辑不得作为真相来源； 敏感操作（给物品、传送、伤害、能力修改）强制鉴权。",
+    "implementation": "自动生成服务端校验层；包与校验规则绑定检查。"
+  },
+  {
+    "id": "P0-12",
+    "category": "构建",
+    "title": "Gradle 脚本校验与自动修复",
+    "level": "P0",
+    "section": "P0",
+    "problem": "build.gradle / settings.gradle 手写易错：源集、依赖、mappings、",
+    "goal": "：gradle linter，识别错误源集、错误处理器、缺失任务、依赖冲突； 禁止手写危险配置，改用受控模板生成。",
+    "implementation": "Gradle 脚本解析器 + 官方模板比对 + 自动补全。 第二部分  P1 —— 重大项（40 项）"
+  },
+  {
+    "id": "P1-01",
+    "category": "测试",
+    "title": "单元测试生成（脱离游戏）",
+    "level": "P1",
+    "section": "P1",
+    "problem": "所有验证都依赖启动游戏，慢且脆；纯数值、概率、计算逻辑无法快速回归。",
+    "goal": "：计算、概率、数据变换类逻辑优先产 JUnit 测试，秒级反馈。",
+    "implementation": ""
+  },
+  {
+    "id": "P1-02",
+    "category": "测试",
+    "title": "GameTest 套件编排与前置清理",
+    "level": "P1",
+    "section": "P1",
+    "problem": "零散测试互相污染世界状态，失败不可复现。",
+    "goal": "：自动生成 世界准备 → 执行 → 断言 → 清理；支持参数化（难度、阶段）。",
+    "implementation": ""
+  },
+  {
+    "id": "P1-03",
+    "category": "测试",
+    "title": "结构化崩溃日志解析",
+    "level": "P1",
+    "section": "P1",
+    "problem": "原始日志整段丢给模型，噪音淹没真因。",
+    "goal": "：剥离 loader / 原版内部栈，定位到本 mod 帧； 分类为 映射错 / Mixin 注入失败 / 资源缺失 / 注册时序 / 线程错 / NPE； 同类错误聚类，避免每轮重复解释。",
+    "implementation": ""
+  },
+  {
+    "id": "P1-04",
+    "category": "测试",
+    "title": "压力与模糊测试",
+    "level": "P1",
+    "section": "P1",
+    "problem": "tick 死循环、无限生成、无限递归、内存泄漏难以发现。",
+    "goal": "：探针监控调用深度与循环次数；对 NBT / loot / predicate / 数据包 注入畸形输入，捕获崩溃、OOM、死循环。",
+    "implementation": ""
+  },
+  {
+    "id": "P1-05",
+    "category": "测试",
+    "title": "多版本矩阵测试",
+    "level": "P1",
+    "section": "P1",
+    "problem": "只在单一 MC 版本 + 单一 loader 验证。",
+    "goal": "：MC 版本 × Loader × Java 版本 × OS 矩阵自动跑，输出兼容报告。",
+    "implementation": ""
+  },
+  {
+    "id": "P1-06",
+    "category": "资产",
+    "title": "Blockbench 集成（生成 .bbmodel 而非手写 JSON）",
+    "level": "P1",
+    "section": "P1",
+    "problem": "LLM 手写 model.json 极易 UV 错位、旋转错、父模型继承错。",
+    "goal": "：优先生成合法 .bbmodel，headless 导出模型 JSON + 预览图； 从零建模只允许 1–6 个立方体的简单几何。",
+    "implementation": ""
+  },
+  {
+    "id": "P1-07",
+    "category": "资产",
+    "title": "原版可信资产库（模板优先，增量修改）",
+    "level": "P1",
+    "section": "P1",
+    "problem": "从零搭立方体布局必然崩 UV。",
+    "goal": "：预缓存原版 bbmodel / 模型 / 贴图，支持 clone → 改尺寸 → 换贴图 → 调旋转。 目录分 validated / experimental，默认只读 validated。",
+    "implementation": ""
+  },
+  {
+    "id": "P1-08",
+    "category": "资产",
+    "title": "结构化像素贴图生成",
+    "level": "P1",
+    "section": "P1",
+    "problem": "自由文本绘图导致尺寸、透明通道、风格失控。",
+    "goal": "：结构化入参（类型、分辨率、调色板、参考原版、是否描边）； 强制 2 的幂尺寸、RGBA、像素风负向提示（禁止渐变、模糊、3D 渲染、文字）。",
+    "implementation": ""
+  },
+  {
+    "id": "P1-09",
+    "category": "资产",
+    "title": "Vision 美术评审子 Agent",
+    "level": "P1",
+    "section": "P1",
+    "problem": "文本 Agent 看不见自己画出来什么样，只能靠猜。",
+    "goal": "：Blockbench 预览图 + 沙盒游戏截图送入视觉模型， 返回结构化评审（是否原版风格 / UV 是否拉伸 / 是否紫黑块 / 配色是否符合需求）， 评审结论作为美术验收断言，失败触发迭代。",
+    "implementation": ""
+  },
+  {
+    "id": "P1-10",
+    "category": "资产",
+    "title": "GeckoLib 骨骼与动画校验",
+    "level": "P1",
+    "section": "P1",
+    "problem": "骨骼层级、关键帧、控制器 JSON 写错 → 实体不渲染或扭曲。",
+    "goal": "：禁止从零搭骨骼树，只允许基于可信模板改几何 + 微调动画； 校验骨骼名、时间轴、插值类型、控制器绑定。",
+    "implementation": ""
+  },
+  {
+    "id": "P1-11",
+    "category": "资产",
+    "title": "数据包专用校验（配方 / 战利品 / 标签 / 进度）",
+    "level": "P1",
+    "section": "P1",
+    "problem": "JSON 合法但 MC 解析器不认：标签循环、loot 函数顺序错、",
+    "goal": "：MC 专属 schema 校验，而不是通用 JSON lint。",
+    "implementation": ""
+  },
+  {
+    "id": "P1-12",
+    "category": "资产",
+    "title": "资产依赖追踪",
+    "level": "P1",
+    "section": "P1",
+    "problem": "注册项 → 模型 → 贴图 → 动画 的引用关系无人维护，",
+    "goal": "：资产引用图，自动检测孤立资源与悬空引用。",
+    "implementation": ""
+  },
+  {
+    "id": "P1-13",
+    "category": "注册表",
+    "title": "注册顺序与冻结检查",
+    "level": "P1",
+    "section": "P1",
+    "problem": "注册表 freeze 之后写入必崩；DeferredRegister.get() 解引用时机错。",
+    "goal": "：检测 freeze 后修改；校验 get() 调用点所在阶段。",
+    "implementation": ""
+  },
+  {
+    "id": "P1-14",
+    "category": "注册表",
+    "title": "动态注册（数据包驱动）",
+    "level": "P1",
+    "section": "P1",
+    "problem": "静态注册模板套到动态维度、动态特征上，重载即重复注册、ID 泄漏。",
+    "goal": "：动态注册独立模板 + 重载幂等 + ID 生命周期管理。",
+    "implementation": ""
+  },
+  {
+    "id": "P1-15",
+    "category": "注册表",
+    "title": "注册 ID / UUID 重复扫描",
+    "level": "P1",
+    "section": "P1",
+    "problem": "复制模板忘记改 ID、UUID，全局冲突且难排查。",
+    "goal": "：项目内（含跨会话）已用 ID 与 UUID 注册表，重复即告警； 内置热门 Mod 的 ID 黑名单。",
+    "implementation": ""
+  },
+  {
+    "id": "P1-16",
+    "category": "序列化",
+    "title": "Codec 编解码器校验",
+    "level": "P1",
+    "section": "P1",
+    "problem": "新版 MC 主推 Codec，模型常漏 optional / 默认值 / 多态 discriminator，",
+    "goal": "：自动生成带 fallback 的 Codec；校验递归引用与空列表安全。",
+    "implementation": ""
+  },
+  {
+    "id": "P1-17",
+    "category": "序列化",
+    "title": "NBT 规则检查",
+    "level": "P1",
+    "section": "P1",
+    "problem": "类型不匹配（存 Int 读 Short）、getCompound 自动创建空标签污染存档、",
+    "goal": "：NBT 静态检查，禁止危险写法。",
+    "implementation": ""
+  },
+  {
+    "id": "P1-18",
+    "category": "序列化",
+    "title": "版本化组件与向前兼容",
+    "level": "P1",
+    "section": "P1",
+    "problem": "组件无版本号，新版读不了旧存档；删组件导致旧档崩溃。",
+    "goal": "：组件序列化带版本；未知组件忽略而非崩溃；版本回退测试。",
+    "implementation": ""
+  },
+  {
+    "id": "P1-19",
+    "category": "存档",
+    "title": "迁移框架",
+    "level": "P1",
+    "section": "P1",
+    "problem": "Mod 迭代必改数据结构，旧存档要么丢数据要么损坏。",
+    "goal": "：自动加版本标记、生成迁移脚本模板、迁移前强制备份玩家与区块数据。",
+    "implementation": ""
+  },
+  {
+    "id": "P1-20",
+    "category": "第三方",
+    "title": "库版本独立符号表",
+    "level": "P1",
+    "section": "P1",
+    "problem": "抄旧版 API，新版签名变更直接失效。",
+    "goal": "：每个库 × 版本维护签名表、弃用列表、迁移示例。",
+    "implementation": ""
+  },
+  {
+    "id": "P1-21",
+    "category": "第三方",
+    "title": "@Optional 软依赖正确隔离",
+    "level": "P1",
+    "section": "P1",
+    "problem": "顶层 import 前置类，前置未安装时类加载阶段直接 crash。",
+    "goal": "：强制反射工厂 / ServiceLoader 隔离，功能优雅禁用。",
+    "implementation": ""
+  },
+  {
+    "id": "P1-22",
+    "category": "第三方",
+    "title": "ServiceLoader / 服务文件校验",
+    "level": "P1",
+    "section": "P1",
+    "problem": "META-INF/services 类名写错、实现类非 public / 无参构造、",
+    "goal": "：校验服务条目、实现类、加载时机。",
+    "implementation": ""
+  },
+  {
+    "id": "P1-23",
+    "category": "第三方",
+    "title": "shaded / relocate 识别",
+    "level": "P1",
+    "section": "P1",
+    "problem": "内嵌库包名被重定位，代码仍写原包名 → 整合包 LinkageError。",
+    "goal": "：扫描 relocate 后漏替换的反射字符串、资源路径、服务条目。",
+    "implementation": ""
+  },
+  {
+    "id": "P1-24",
+    "category": "第三方",
+    "title": "主动兼容探测",
+    "level": "P1",
+    "section": "P1",
+    "problem": "只会被动写 @Optional，不会主动探测主流 Mod 并生成兼容分支。",
+    "goal": "：检测到 Jade / EMI / Curios / Create 等存在时，自动生成对应集成代码。",
+    "implementation": ""
+  },
+  {
+    "id": "P1-25",
+    "category": "配置",
+    "title": "类型、范围、依赖校验",
+    "level": "P1",
+    "section": "P1",
+    "problem": "玩家填负数、互斥配置同时开启、客户端配置被服务端修改。",
+    "goal": "：每个配置项带校验器；区分客户端/服务端配置；变更事件与热重载。",
+    "implementation": ""
+  },
+  {
+    "id": "P1-26",
+    "category": "配置",
+    "title": "配置 GUI 自动生成 + 翻译绑定",
+    "level": "P1",
+    "section": "P1",
+    "problem": "只有后端配置，无配套界面；配置文案硬编码。",
+    "goal": "：按配置 schema 自动生成配置屏幕，自动绑定翻译 key。",
+    "implementation": ""
+  },
+  {
+    "id": "P1-27",
+    "category": "物品",
+    "title": "交互返回值（ActionResult / InteractionResult）",
+    "level": "P1",
+    "section": "P1",
+    "problem": "混淆使用/攻击/挖掘/方块交互时序；消耗后不返回正确结果。",
+    "goal": "：返回值规则库，防止事件消耗逻辑错乱、双触发。",
+    "implementation": ""
+  },
+  {
+    "id": "P1-28",
+    "category": "物品",
+    "title": "ItemStack 拷贝契约",
+    "level": "P1",
+    "section": "P1",
+    "problem": "直接传递原栈，跨事件篡改 NBT 与数量，极难复现。",
+    "goal": "：规则化 —— 只读可共享，修改前必须 copy()；扫描危险写法。",
+    "implementation": ""
+  },
+  {
+    "id": "P1-29",
+    "category": "物品",
+    "title": "可堆叠与容器合法性",
+    "level": "P1",
+    "section": "P1",
+    "problem": "设了 maxStackSize 但没重写 canStack；NBT 不同强行合并；",
+    "goal": "：堆叠规则校验 + 容器合法性检查。",
+    "implementation": ""
+  },
+  {
+    "id": "P1-30",
+    "category": "方块",
+    "title": "掉落、破坏速度、正确工具、附魔分支",
+    "level": "P1",
+    "section": "P1",
+    "problem": "requiresCorrectTool 写了但没进对应工具标签；",
+    "goal": "：工具标签、破坏规则、loot 分支校验。",
+    "implementation": ""
+  },
+  {
+    "id": "P1-31",
+    "category": "方块",
+    "title": "BlockState 数量与碰撞盒",
+    "level": "P1",
+    "section": "P1",
+    "problem": "布尔属性堆叠导致状态爆炸；渲染盒与碰撞盒不一致。",
+    "goal": "：状态数量上限告警；三盒一致性校验。",
+    "implementation": ""
+  },
+  {
+    "id": "P1-32",
+    "category": "方块实体",
+    "title": "脏标记、保存时机、移除钩子",
+    "level": "P1",
+    "section": "P1",
+    "problem": "改数据不 setChanged → 不落盘；频繁 setChanged → 狂写盘；",
+    "goal": "：脏标记规范校验 + 批量延迟保存队列 + 移除清理检查。",
+    "implementation": ""
+  },
+  {
+    "id": "P1-33",
+    "category": "状态效果",
+    "title": "MobEffect 与 AttributeModifier 生命周期",
+    "level": "P1",
+    "section": "P1",
+    "problem": "修饰器 UUID 硬编码重复、添加后忘移除、死亡/换维度残留。",
+    "goal": "：UUID 自动生成、修饰器绑定生命周期、统一清理模板。",
+    "implementation": ""
+  },
+  {
+    "id": "P1-34",
+    "category": "实体",
+    "title": "AI 目标优先级、寻路、生成与 despawn",
+    "level": "P1",
+    "section": "P1",
+    "problem": "多目标互相抢占；不会开门；despawn 规则错 → 实体常驻内存。",
+    "goal": "：AI 目标冲突检查 + 寻路节点/代价校验 + 生成与淘汰规则。",
+    "implementation": ""
+  },
+  {
+    "id": "P1-35",
+    "category": "音效",
+    "title": "SoundEvent 注册与实例释放",
+    "level": "P1",
+    "section": "P1",
+    "problem": "sound.json 格式错、衰减距离错、循环音效不释放、实例重复播放。",
+    "goal": "：音效 linter + 实例生命周期管理。",
+    "implementation": ""
+  },
+  {
+    "id": "P1-36",
+    "category": "附魔",
+    "title": "权重、互斥组、适用目标、铁砧/砂轮",
+    "level": "P1",
+    "section": "P1",
+    "problem": "附魔叠加、刷不出来、无法修复、冲突组写死。",
+    "goal": "：附魔规则库 + 修复公式校验。",
+    "implementation": ""
+  },
+  {
+    "id": "P1-37",
+    "category": "命令",
+    "title": "权限、参数解析、执行源区分",
+    "level": "P1",
+    "section": "P1",
+    "problem": "无权限控制；非法输入崩溃；不区分玩家 / 命令方块 / 控制台；",
+    "goal": "：命令模板 + 参数范围校验 + 补全与解析一致性检查。",
+    "implementation": ""
+  },
+  {
+    "id": "P1-38",
+    "category": "进度",
+    "title": "解锁条件、奖励、服务端权威",
+    "level": "P1",
+    "section": "P1",
+    "problem": "客户端判定解锁、奖励重复发放、requirements 写错永不触发。",
+    "goal": "：进度触发器服务端校验 + 奖励幂等 + 父链循环检测。",
+    "implementation": ""
+  },
+  {
+    "id": "P1-39",
+    "category": "资源重载",
+    "title": "ReloadListener 规范",
+    "level": "P1",
+    "section": "P1",
+    "problem": "F3+T 重载重复注册监听器、旧资源未清理、重载后状态错乱。",
+    "goal": "：重载生命周期模板 + 幂等注册 + 清理检查。",
+    "implementation": ""
+  },
+  {
+    "id": "P1-40",
+    "category": "构建",
+    "title": "版本锁定（version catalog）",
+    "level": "P1",
+    "section": "P1",
+    "problem": "依赖版本散写，同一库多处不一致，升级时错配。",
+    "goal": "：强制 version catalog 统一管理 MC / loader / 前置库版本。 第三部分  P2 —— 稳定性、性能、运行时契约（60 项）",
+    "implementation": ""
+  },
+  {
+    "id": "P2-01",
+    "category": "世界",
+    "title": "区块引用泄漏",
+    "level": "P2",
+    "section": "P2",
+    "problem": "静态集合持有 LevelChunk / BlockEntity，区块卸载后引用仍在 → 内存泄漏、NPE。",
+    "goal": "：扫描全局静态缓存中的区块引用并告警。",
+    "implementation": ""
+  },
+  {
+    "id": "P2-02",
+    "category": "世界",
+    "title": "区块实体批量保存限流",
+    "level": "P2",
+    "section": "P2",
+    "problem": "同区块大量 BE 同时落盘，阻塞主线程造成卡服。",
+    "goal": "：分批、延迟、限流保存。",
+    "implementation": ""
+  },
+  {
+    "id": "P2-03",
+    "category": "世界",
+    "title": "临时区块（不可写区块）保护",
+    "level": "P2",
+    "section": "P2",
+    "problem": "拿到\"假象区块\"直接写 BlockState，运行时抛异常或静默失败。",
+    "goal": "：写前校验区块可写性。",
+    "implementation": ""
+  },
+  {
+    "id": "P2-04",
+    "category": "维度",
+    "title": "虚空伤害、高度边界、超限清理",
+    "level": "P2",
+    "section": "P2",
+    "problem": "y 范围、虚空伤害、出界实体不清理。",
+    "goal": "：边界规则 + 虚空触发 + 超限实体定时清理。",
+    "implementation": ""
+  },
+  {
+    "id": "P2-05",
+    "category": "维度",
+    "title": "床爆炸 / 重生锚 / 重生点规则",
+    "level": "P2",
+    "section": "P2",
+    "problem": "自定义维度未配置床可用性；重生点在跨维度时错乱。",
+    "goal": "：维度重生配置校验器。",
+    "implementation": ""
+  },
+  {
+    "id": "P2-06",
+    "category": "维度",
+    "title": "独立时间流速与月相",
+    "level": "P2",
+    "section": "P2",
+    "problem": "自定义维度共用主世界时间；改流速污染全局计时器。",
+    "goal": "：维度时间隔离 + 独立月相。",
+    "implementation": ""
+  },
+  {
+    "id": "P2-07",
+    "category": "维度",
+    "title": "传送钩子与实体过滤",
+    "level": "P2",
+    "section": "P2",
+    "problem": "坐骑、箭、掉落物传送丢数据；不能传送的实体未过滤；事件顺序颠倒。",
+    "goal": "：传送前后钩子顺序规范 + 实体过滤。",
+    "implementation": ""
+  },
+  {
+    "id": "P2-08",
+    "category": "世界生成",
+    "title": "随机源与种子复现",
+    "level": "P2",
+    "section": "P2",
+    "problem": "new Random() 而非 level.random；种子不可复现；同种子生成结果不一致。",
+    "goal": "：强制使用世界/区块派生随机；固定种子回归测试。",
+    "implementation": ""
+  },
+  {
+    "id": "P2-09",
+    "category": "世界生成",
+    "title": "特征跨区块边界",
+    "level": "P2",
+    "section": "P2",
+    "problem": "特征越界放置导致重复生成与方块丢失。",
+    "goal": "：放置边界裁剪校验。",
+    "implementation": ""
+  },
+  {
+    "id": "P2-10",
+    "category": "世界生成",
+    "title": "生物生成上限与每区块计数",
+    "level": "P2",
+    "section": "P2",
+    "problem": "无视每区块上限，高密度区刷怪爆炸。",
+    "goal": "：生成配额校验 + 每 tick 生成预算。",
+    "implementation": ""
+  },
+  {
+    "id": "P2-11",
+    "category": "光照",
+    "title": "光照脏标记与动态光源节流",
+    "level": "P2",
+    "section": "P2",
+    "problem": "方块移除后光照不重算，永久亮/黑区块；动态光源全区块每 tick 刷新。",
+    "goal": "：光照更新检查 + 动态光源距离衰减与节流。",
+    "implementation": ""
+  },
+  {
+    "id": "P2-12",
+    "category": "渲染",
+    "title": "批渲染与缓冲区复用",
+    "level": "P2",
+    "section": "P2",
+    "problem": "每实体单独 RenderType、每帧新建 Buffer → 掉帧与 GC 压力。",
+    "goal": "：批渲染规则库 + 顶点缓冲复用检查。",
+    "implementation": ""
+  },
+  {
+    "id": "P2-13",
+    "category": "渲染",
+    "title": "渲染状态栈备份（Blend / Depth / Cull）",
+    "level": "P2",
+    "section": "P2",
+    "problem": "改完 GL 状态不恢复，污染后续所有渲染。",
+    "goal": "：状态栈模板 + 泄漏检测。",
+    "implementation": ""
+  },
+  {
+    "id": "P2-14",
+    "category": "渲染",
+    "title": "着色器校验",
+    "level": "P2",
+    "section": "P2",
+    "problem": "版本、扩展、uniform 名、sampler 绑定错 → 部分显卡编译失败/黑屏。",
+    "goal": "：GLSL linter + 编译失败降级材质。",
+    "implementation": ""
+  },
+  {
+    "id": "P2-15",
+    "category": "渲染",
+    "title": "Atlas / Sprite 图集",
+    "level": "P2",
+    "section": "P2",
+    "problem": "UV 越界、图集冲突、重载不清理 → GUI 偶发白块。",
+    "goal": "：图集注册与 UV 范围校验。",
+    "implementation": ""
+  },
+  {
+    "id": "P2-16",
+    "category": "渲染",
+    "title": "方块实体渲染线程安全",
+    "level": "P2",
+    "section": "P2",
+    "problem": "渲染线程直接读写 BE，随机崩溃。",
+    "goal": "：强制打包快照读取。",
+    "implementation": ""
+  },
+  {
+    "id": "P2-17",
+    "category": "渲染",
+    "title": "FBO / 渲染目标生命周期",
+    "level": "P2",
+    "section": "P2",
+    "problem": "不绑定、不清理、窗口缩放不重建 → 泄漏与花屏。",
+    "goal": "：资源生命周期绑定 + 缩放重建。",
+    "implementation": ""
+  },
+  {
+    "id": "P2-18",
+    "category": "渲染",
+    "title": "物品在 GUI / 掉落物 / 手持表现不一致",
+    "level": "P2",
+    "section": "P2",
+    "problem": "不写 item transform，三种场景表现割裂。",
+    "goal": "：模型变换一致性校验。",
+    "implementation": ""
+  },
+  {
+    "id": "P2-19",
+    "category": "粒子",
+    "title": "回收与距离裁剪",
+    "level": "P2",
+    "section": "P2",
+    "problem": "无条件生成、绑定实体的粒子在实体移除后残留、不做距离裁剪。",
+    "goal": "：粒子生命周期与裁剪检查。",
+    "implementation": ""
+  },
+  {
+    "id": "P2-20",
+    "category": "GUI",
+    "title": "容器菜单同步与槽位契约",
+    "level": "P2",
+    "section": "P2",
+    "problem": "槽位同步错、光标栈与拖拽逻辑违反原版、服务端不校验槽位修改。",
+    "goal": "：Menu 契约校验 + 服务端槽位鉴权。",
+    "implementation": ""
+  },
+  {
+    "id": "P2-21",
+    "category": "GUI",
+    "title": "关闭与离线清理",
+    "level": "P2",
+    "section": "P2",
+    "problem": "菜单打开时玩家下线/传送，菜单残留导致 NPE。",
+    "goal": "：关闭钩子全覆盖检查。",
+    "implementation": ""
+  },
+  {
+    "id": "P2-22",
+    "category": "GUI",
+    "title": "滚动、换行、超长提示溢出",
+    "level": "P2",
+    "section": "P2",
+    "problem": "tooltip 不截断、硬编码 \\n、长文本溢出屏幕。",
+    "goal": "：组件换行与滚动校验。",
+    "implementation": ""
+  },
+  {
+    "id": "P2-23",
+    "category": "输入",
+    "title": "按键冲突、焦点抢占、高 DPI",
+    "level": "P2",
+    "section": "P2",
+    "problem": "文本框聚焦时按键被误捕；GUI 缩放与鼠标坐标错位。",
+    "goal": "：输入上下文校验 + 坐标换算模板。",
+    "implementation": ""
+  },
+  {
+    "id": "P2-24",
+    "category": "HUD",
+    "title": "暂停 / 打开 GUI 时仍绘制",
+    "level": "P2",
+    "section": "P2",
+    "problem": "自定义 HUD 在暂停与菜单界面继续渲染，层级错乱。",
+    "goal": "：渲染时机检查。",
+    "implementation": ""
+  },
+  {
+    "id": "P2-25",
+    "category": "事件",
+    "title": "优先级与取消语义",
+    "level": "P2",
+    "section": "P2",
+    "problem": "高优先级改数据被后续覆盖；随意取消原版事件引发冲突；",
+    "goal": "：事件规则库（可取消/只读/顺序）。",
+    "implementation": ""
+  },
+  {
+    "id": "P2-26",
+    "category": "事件",
+    "title": "递归连锁检测",
+    "level": "P2",
+    "section": "P2",
+    "problem": "放置方块事件再次触发放置 → 无限递归。",
+    "goal": "：GameTest 调用深度探针 + 递归守卫模板。",
+    "implementation": ""
+  },
+  {
+    "id": "P2-27",
+    "category": "同步",
+    "title": "全量同步改为脏字段增量",
+    "level": "P2",
+    "section": "P2",
+    "problem": "每次变更同步整个 NBT，带宽爆炸。",
+    "goal": "：脏字段标记 + 版本号防乱序覆盖。",
+    "implementation": ""
+  },
+  {
+    "id": "P2-28",
+    "category": "同步",
+    "title": "包乱序、重复包、丢包",
+    "level": "P2",
+    "section": "P2",
+    "problem": "无序列号，重复包重复执行逻辑，乱序包用旧状态覆盖新状态。",
+    "goal": "：序列号 + 幂等处理 + 状态版本校验。",
+    "implementation": ""
+  },
+  {
+    "id": "P2-29",
+    "category": "同步",
+    "title": "客户端预测与服务端回滚",
+    "level": "P2",
+    "section": "P2",
+    "problem": "自定义移动/重力只写客户端 → 频繁回滚、抖动、瞬移。",
+    "goal": "：区分可预测字段；服务端权威校验；超限拦截与平滑回滚。",
+    "implementation": ""
+  },
+  {
+    "id": "P2-30",
+    "category": "同步",
+    "title": "幽灵方块",
+    "level": "P2",
+    "section": "P2",
+    "problem": "客户端预放置，服务端拒绝后不撤销，产生幻象方块。",
+    "goal": "：预测标记 + 确认回调 + 失败清除。",
+    "implementation": ""
+  },
+  {
+    "id": "P2-31",
+    "category": "网络",
+    "title": "玩家登出 / 切维度清理",
+    "level": "P2",
+    "section": "P2",
+    "problem": "绑定玩家的同步包在玩家退出后仍排队，访问已释放对象。",
+    "goal": "：生命周期绑定 + 队列清理。",
+    "implementation": ""
+  },
+  {
+    "id": "P2-32",
+    "category": "网络",
+    "title": "握手阶段版本协商",
+    "level": "P2",
+    "section": "P2",
+    "problem": "握手期自定义包无版本协商，不匹配时直接断连。",
+    "goal": "：协议版本协商 + 友好拒绝。",
+    "implementation": ""
+  },
+  {
+    "id": "P2-33",
+    "category": "网络",
+    "title": "压缩阈值与上下文重置",
+    "level": "P2",
+    "section": "P2",
+    "problem": "压缩开关不一致；切换维度/重连后压缩上下文未重置。",
+    "goal": "：压缩配置校验。",
+    "implementation": ""
+  },
+  {
+    "id": "P2-34",
+    "category": "实体",
+    "title": "实体追踪范围与区块追踪器",
+    "level": "P2",
+    "section": "P2",
+    "problem": "所有实体统一超大追踪距离，同步压力过高；自定义实体不入追踪。",
+    "goal": "：按类型设置追踪距离 + 追踪注册校验。",
+    "implementation": ""
+  },
+  {
+    "id": "P2-35",
+    "category": "实体",
+    "title": "卸载保存与恢复",
+    "level": "P2",
+    "section": "P2",
+    "problem": "卸载时漏存自定义组件与临时标记；恢复时引用已卸载区块。",
+    "goal": "：序列化字段完整性检查。",
+    "implementation": ""
+  },
+  {
+    "id": "P2-36",
+    "category": "实体",
+    "title": "死亡 / 复活 / 重生数据一致性",
+    "level": "P2",
+    "section": "P2",
+    "problem": "附件、冷却、buff 在死亡与重生时处理不一致，幽灵数据残留。",
+    "goal": "：统一生命期回调模板 + GameTest。",
+    "implementation": ""
+  },
+  {
+    "id": "P2-37",
+    "category": "实体",
+    "title": "坐骑、乘客、输入接管",
+    "level": "P2",
+    "section": "P2",
+    "problem": "多乘客输入抢占；下坐骑后运动矢量残留；鞍状态仅客户端。",
+    "goal": "：乘客与输入契约校验。",
+    "implementation": ""
+  },
+  {
+    "id": "P2-38",
+    "category": "实体",
+    "title": "仇恨与目标选择器",
+    "level": "P2",
+    "section": "P2",
+    "problem": "仇恨无限保留，不随距离/时间/死亡清除；只在客户端同步。",
+    "goal": "：仇恨生命周期校验 + 服务端权威。",
+    "implementation": ""
+  },
+  {
+    "id": "P2-39",
+    "category": "方块",
+    "title": "方块实体移除后防访问",
+    "level": "P2",
+    "section": "P2",
+    "problem": "异步任务、网络回调仍持有已移除 BE 的引用 → 随机 NPE。",
+    "goal": "：失效标记 + 访问守卫。",
+    "implementation": ""
+  },
+  {
+    "id": "P2-40",
+    "category": "方块",
+    "title": "红石更新风暴与递归",
+    "level": "P2",
+    "section": "P2",
+    "problem": "自定义方块产生无限 neighbor update，卡服。",
+    "goal": "：更新抑制标记 + 递归守卫。",
+    "implementation": ""
+  },
+  {
+    "id": "P2-41",
+    "category": "方块",
+    "title": "活塞推拉自定义方块与 BE",
+    "level": "P2",
+    "section": "P2",
+    "problem": "不能被推动；或被推动后引用、同步、NBT 错乱。",
+    "goal": "：活塞行为模板与校验。",
+    "implementation": ""
+  },
+  {
+    "id": "P2-42",
+    "category": "流体",
+    "title": "流动、源转换、桶交互、有限流体",
+    "level": "P2",
+    "section": "P2",
+    "problem": "交互逻辑不符合原版；无服务端校验；可跨虚空转移。",
+    "goal": "：容器契约测试模板。",
+    "implementation": ""
+  },
+  {
+    "id": "P2-43",
+    "level": "P2",
+    "category": "方块 / 容器",
+    "title": "漏斗 / 发射器 / 容器转移",
+    "section": "P2",
+    "problem": "交互逻辑不符合原版；无服务端校验；可跨虚空转移。",
+    "goal": "容器契约测试模板。",
+    "implementation": "容器契约测试模板。"
+  },
+  {
+    "id": "P2-44",
+    "category": "数据包",
+    "title": "标签 merge / replace 语义",
+    "level": "P2",
+    "section": "P2",
+    "problem": "误用 replace 清空其他 Mod 的标签；继承与合并混淆。",
+    "goal": "：标签合并模式静态告警。",
+    "implementation": ""
+  },
+  {
+    "id": "P2-45",
+    "category": "数据包",
+    "title": "动态标签与重载",
+    "level": "P2",
+    "section": "P2",
+    "problem": "只写静态 JSON，不懂 TagManager 动态增删与同步/清理。",
+    "goal": "：动态标签模板 + 重载清理。",
+    "implementation": ""
+  },
+  {
+    "id": "P2-46",
+    "category": "战利品",
+    "title": "函数顺序、附魔分支、缓存失效",
+    "level": "P2",
+    "section": "P2",
+    "problem": "先设置数量再复制 NBT、精准采集条件写反；",
+    "goal": "：loot 函数顺序校验 + 缓存失效检查。",
+    "implementation": ""
+  },
+  {
+    "id": "P2-47",
+    "category": "命令",
+    "title": "存储（storage）、记分板堆栈",
+    "level": "P2",
+    "section": "P2",
+    "problem": "storage 不绑定版本、重载清空；记分板硬编码名字冲突、",
+    "goal": "：命名空间前缀强制 + 清理钩子。",
+    "implementation": ""
+  },
+  {
+    "id": "P2-48",
+    "category": "函数（mcfunction）",
+    "title": "递归与执行上下文",
+    "level": "P2",
+    "section": "P2",
+    "problem": "tick 函数不节流；递归无上限卡服；加载阶段执行过早。",
+    "goal": "：深度与指令数上限 + 上下文校验。",
+    "implementation": ""
+  },
+  {
+    "id": "P2-49",
+    "category": "内存",
+    "title": "资源 dispose 与静态缓存淘汰",
+    "level": "P2",
+    "section": "P2",
+    "problem": "VAO、纹理、音频、缓冲区只创建不释放；静态缓存无 LRU / 软引用。",
+    "goal": "：生命周期绑定检查 + 缓存策略模板。",
+    "implementation": ""
+  },
+  {
+    "id": "P2-50",
+    "category": "反模式",
+    "title": "无过滤的全量遍历",
+    "level": "P2",
+    "section": "P2",
+    "problem": "每 tick 遍历全部玩家 / 全部实体 / 全区块，服务器雪崩。",
+    "goal": "：静态扫描并强制距离/标签/区块过滤。",
+    "implementation": ""
+  },
+  {
+    "id": "P2-51",
+    "category": "反模式",
+    "title": "getter 内修改状态",
+    "level": "P2",
+    "section": "P2",
+    "problem": "在 getXxx() 里写 NBT、触发同步，产生意外副作用。",
+    "goal": "：扫描 getter 内写操作。",
+    "implementation": ""
+  },
+  {
+    "id": "P2-52",
+    "category": "反模式",
+    "title": "构造器访问世界与注册表",
+    "level": "P2",
+    "section": "P2",
+    "problem": "方块/实体构造阶段访问 Level，启动时序不稳。",
+    "goal": "：构造阶段访问检查。",
+    "implementation": ""
+  },
+  {
+    "id": "P2-53",
+    "category": "反模式",
+    "title": "临时状态写入持久 NBT",
+    "level": "P2",
+    "section": "P2",
+    "problem": "tick 临时量、冷却、动画计时器落盘 → 存档膨胀、回档异常。",
+    "goal": "：持久字段白名单校验。",
+    "implementation": ""
+  },
+  {
+    "id": "P2-54",
+    "category": "反模式",
+    "title": "滥用 TickableBlockEntity",
+    "level": "P2",
+    "section": "P2",
+    "problem": "无必要持续 tick，增加服务器负担；不用状态驱动的激活式 tick。",
+    "goal": "：tick 必要性检查 + 按需激活模板。",
+    "implementation": ""
+  },
+  {
+    "id": "P2-55",
+    "category": "反模式",
+    "title": "全局静态分类混乱",
+    "level": "P2",
+    "section": "P2",
+    "problem": "分不清\"全局 / 每客户端 / 每世界实例\"数据，全部 static。",
+    "goal": "：静态字段分类标注校验。",
+    "implementation": ""
+  },
+  {
+    "id": "P2-56",
+    "category": "生命周期",
+    "title": "启动顺序、就绪等待、优雅关闭",
+    "level": "P2",
+    "section": "P2",
+    "problem": "依赖 Mod 未就绪即访问其 API；关闭顺序颠倒。",
+    "goal": "：就绪标记 + 依赖等待 + 关闭队列。",
+    "implementation": ""
+  },
+  {
+    "id": "P2-57",
+    "category": "并发",
+    "title": "自建任务队列与主线程对齐",
+    "level": "P2",
+    "section": "P2",
+    "problem": "队列不与 tick 对齐；无最大长度；堆积后卡顿。",
+    "goal": "：主线程队列模板 + 上限与丢弃策略。",
+    "implementation": ""
+  },
+  {
+    "id": "P2-58",
+    "category": "并发",
+    "title": "区块读写锁",
+    "level": "P2",
+    "section": "P2",
+    "problem": "多线程读区块不加锁；写入无独占标记，区块 NBT 损坏。",
+    "goal": "：读写隔离检查。",
+    "implementation": ""
+  },
+  {
+    "id": "P2-59",
+    "category": "Mixin",
+    "title": "@Overwrite 风险与可选目标",
+    "level": "P2",
+    "section": "P2",
+    "problem": "随意 overwrite 与其他 Mod 冲突；目标类不存在直接崩。",
+    "goal": "：overwrite 冲突预扫描 + optional mixin 模板。",
+    "implementation": ""
+  },
+  {
+    "id": "P2-60",
+    "category": "Mixin",
+    "title": "捕获 lambda / 内部类 / 可变参数",
+    "level": "P2",
+    "section": "P2",
+    "problem": "混淆后参数顺序变化，注入点不稳定。",
+    "goal": "：稳定注入点推荐 + 捕获合法性校验。 第四部分  P3 —— 生态、体验、合规、维护（44 项）",
+    "implementation": ""
+  },
+  {
+    "id": "P3-01",
+    "category": "打包",
+    "title": "mods.toml / fabric.mod.json 字段校验",
+    "level": "P3",
+    "section": "P3",
+    "problem": "loader 版本范围、MC 版本范围、Java 版本要求写错。",
+    "goal": "：schema 校验 + 默认值修正。",
+    "implementation": ""
+  },
+  {
+    "id": "P3-02",
+    "category": "打包",
+    "title": "Jar-in-Jar 内嵌前置",
+    "level": "P3",
+    "section": "P3",
+    "problem": "内嵌库未正确配置清单；开发依赖打进发布包。",
+    "goal": "：JIJ 配置校验 + scope 隔离。",
+    "implementation": ""
+  },
+  {
+    "id": "P3-03",
+    "category": "打包",
+    "title": "重复条目、模块 system（JPMS）",
+    "level": "P3",
+    "section": "P3",
+    "problem": "重复 class / 资源 / 服务文件；module-info 冲突。",
+    "goal": "：JAR 内容审计。",
+    "implementation": ""
+  },
+  {
+    "id": "P3-04",
+    "category": "打包",
+    "title": "签名与防篡改",
+    "level": "P3",
+    "section": "P3",
+    "problem": "发布包无签名或签名方式错；开发包与发布包签名配置混淆。",
+    "goal": "：签名配置隔离 + 自动校验。",
+    "implementation": ""
+  },
+  {
+    "id": "P3-05",
+    "category": "打包",
+    "title": "平台分离（原生库）",
+    "level": "P3",
+    "section": "P3",
+    "problem": "多平台原生库混在一个 JAR，无 OS/架构过滤。",
+    "goal": "：分层 JAR + 平台过滤。",
+    "implementation": ""
+  },
+  {
+    "id": "P3-06",
+    "category": "打包",
+    "title": "压缩级别与资源顺序",
+    "level": "P3",
+    "section": "P3",
+    "problem": "压缩过高拖慢启动；资源顺序影响加载。",
+    "goal": "：打包参数规范。",
+    "implementation": ""
+  },
+  {
+    "id": "P3-07",
+    "category": "文档",
+    "title": "许可证选择与 NOTICE",
+    "level": "P3",
+    "section": "P3",
+    "problem": "不选许可证、不加 LICENSE、不声明第三方素材版权。",
+    "goal": "：引导生成 LICENSE / NOTICE，资产来源标注。",
+    "implementation": ""
+  },
+  {
+    "id": "P3-08",
+    "category": "文档",
+    "title": "资产溯源（原版衍生 / AI 生成 / 外部素材）",
+    "level": "P3",
+    "section": "P3",
+    "problem": "直接用原版素材打包分发，版权风险。",
+    "goal": "：资产来源标签 + 分发前合规检查。",
+    "implementation": ""
+  },
+  {
+    "id": "P3-09",
+    "category": "文档",
+    "title": "Mod 图标、简介、画廊、平台元数据",
+    "level": "P3",
+    "section": "P3",
+    "problem": "图标尺寸/透明通道不合规；Modrinth 与 CurseForge 字段差异未适配。",
+    "goal": "：图标校验 + 双平台元数据模板。",
+    "implementation": ""
+  },
+  {
+    "id": "P3-10",
+    "category": "文档",
+    "title": "Javadoc 与示例同步",
+    "level": "P3",
+    "section": "P3",
+    "problem": "公共 API 无文档；示例过期。",
+    "goal": "：Javadoc 检查 + 示例与实参一致性校验。",
+    "implementation": ""
+  },
+  {
+    "id": "P3-11",
+    "category": "文档",
+    "title": "Changelog 自动生成",
+    "level": "P3",
+    "section": "P3",
+    "problem": "变更日志手写，容易漏。",
+    "goal": "：基于 Git 提交自动汇总。",
+    "implementation": ""
+  },
+  {
+    "id": "P3-12",
+    "category": "合规",
+    "title": "联网功能告知与开关",
+    "level": "P3",
+    "section": "P3",
+    "problem": "自动生成联网代码不带提示与关闭开关。",
+    "goal": "：任何网络功能必须配套开关与本地化说明。",
+    "implementation": ""
+  },
+  {
+    "id": "P3-13",
+    "category": "生态",
+    "title": "不修改原版全局参数，或提供开关",
+    "level": "P3",
+    "section": "P3",
+    "problem": "无理由改刷怪上限、tick 速率、生成权重。",
+    "goal": "：全局影响项必须可配置。",
+    "implementation": ""
+  },
+  {
+    "id": "P3-14",
+    "category": "生态",
+    "title": "命名空间前缀（命令 / 记分板 / storage / 标签）",
+    "level": "P3",
+    "section": "P3",
+    "problem": "占用通用名字，与其他 Mod 冲突。",
+    "goal": "：强制前缀校验。",
+    "implementation": ""
+  },
+  {
+    "id": "P3-15",
+    "category": "生态",
+    "title": "标签白/黑名单支持",
+    "level": "P3",
+    "section": "P3",
+    "problem": "自定义掉落、生成、效果无法用标签限定目标。",
+    "goal": "：标签化配置模板 + 热重载支持。",
+    "implementation": ""
+  },
+  {
+    "id": "P3-16",
+    "category": "生态",
+    "title": "单功能可禁用（而非整 Mod 开关）",
+    "level": "P3",
+    "section": "P3",
+    "problem": "用户只能整体关掉，不能单独关某个功能。",
+    "goal": "：功能级配置开关模板。",
+    "implementation": ""
+  },
+  {
+    "id": "P3-17",
+    "category": "生态",
+    "title": "JEI / EMI / REI / Jade 集成契约",
+    "level": "P3",
+    "section": "P3",
+    "problem": "查找器非懒加载；服务端注册多余代码；提示超长不折行。",
+    "goal": "：集成模板 + 侧别校验。",
+    "implementation": ""
+  },
+  {
+    "id": "P3-18",
+    "category": "生态",
+    "title": "已知冲突列表与告警",
+    "level": "P3",
+    "section": "P3",
+    "problem": "软依赖能写，但不知道哪些是真冲突。",
+    "goal": "：维护冲突库，加载时告警并给替代方案。",
+    "implementation": ""
+  },
+  {
+    "id": "P3-19",
+    "category": "生态",
+    "title": "配置改动影响提示",
+    "level": "P3",
+    "section": "P3",
+    "problem": "分不清哪些配置要重启服务器 / 重启客户端 / 重载数据包。",
+    "goal": "：影响级别标注。",
+    "implementation": ""
+  },
+  {
+    "id": "P3-20",
+    "category": "日志",
+    "title": "使用 mod logger 与结构化上下文",
+    "level": "P3",
+    "section": "P3",
+    "problem": "System.out 泛滥；日志无位置、玩家、维度、版本信息。",
+    "goal": "：logger 规范 + 上下文注入。",
+    "implementation": ""
+  },
+  {
+    "id": "P3-21",
+    "category": "日志",
+    "title": "脱敏、轮转、大小上限",
+    "level": "P3",
+    "section": "P3",
+    "problem": "日志打印玩家名坐标等敏感信息；文件无限增长占满磁盘。",
+    "goal": "：脱敏开关 + 轮转策略。",
+    "implementation": ""
+  },
+  {
+    "id": "P3-22",
+    "category": "调试",
+    "title": "自动生成调试子命令",
+    "level": "P3",
+    "section": "P3",
+    "problem": "无法 dump 注册表、附件、事件监听列表。",
+    "goal": "：debug dump 模板（默认关闭）。",
+    "implementation": ""
+  },
+  {
+    "id": "P3-23",
+    "category": "调试",
+    "title": "异常吞噬检测",
+    "level": "P3",
+    "section": "P3",
+    "problem": "空 catch(Exception) 静默失败，功能无声失效。",
+    "goal": "：空捕获扫描 + 强制日志。",
+    "implementation": ""
+  },
+  {
+    "id": "P3-24",
+    "category": "调试",
+    "title": "崩溃报告附加自定义章节",
+    "level": "P3",
+    "section": "P3",
+    "problem": "崩溃时不带 Mod 版本、启用功能、配置快照。",
+    "goal": "：崩溃上下文注入模板。",
+    "implementation": ""
+  },
+  {
+    "id": "P3-25",
+    "category": "调试",
+    "title": "性能面板与降级",
+    "level": "P3",
+    "section": "P3",
+    "problem": "调试控件留在正式版；无法一键关闭调试渲染。",
+    "goal": "：调试开关隔离 + 生产禁用校验。",
+    "implementation": ""
+  },
+  {
+    "id": "P3-26",
+    "category": "调试",
+    "title": "分层性能探针（tick / 同步 / 渲染 / 寻路）",
+    "level": "P3",
+    "section": "P3",
+    "problem": "只知道卡，不知道是谁卡。",
+    "goal": "：按功能拆分的低开销计数器 + 可选 JFR 埋点。",
+    "implementation": ""
+  },
+  {
+    "id": "P3-27",
+    "category": "版本",
+    "title": "弃用 API 扫描",
+    "level": "P3",
+    "section": "P3",
+    "problem": "持续使用 @Deprecated，下个 loader 版本直接移除。",
+    "goal": "：弃用扫描 + 替换建议。",
+    "implementation": ""
+  },
+  {
+    "id": "P3-28",
+    "category": "版本",
+    "title": "适配层隔离",
+    "level": "P3",
+    "section": "P3",
+    "problem": "多 MC 版本差异散落在业务代码里。",
+    "goal": "：适配器层模板。",
+    "implementation": ""
+  },
+  {
+    "id": "P3-29",
+    "category": "版本",
+    "title": "语义化版本与比较器",
+    "level": "P3",
+    "section": "P3",
+    "problem": "自写版本比较，快照/beta 判断错误。",
+    "goal": "：统一使用 loader 版本比较器。",
+    "implementation": ""
+  },
+  {
+    "id": "P3-30",
+    "category": "迁移",
+    "title": "跨大版本数据迁移向导",
+    "level": "P3",
+    "section": "P3",
+    "problem": "升级后旧 ID、旧组件、旧结构静默丢弃。",
+    "goal": "：迁移向导 + 变更日志提示。",
+    "implementation": ""
+  },
+  {
+    "id": "P3-31",
+    "category": "迁移",
+    "title": "弃用 ID / 配置键自动重映射",
+    "level": "P3",
+    "section": "P3",
+    "problem": "重命名后旧存档读不到数据。",
+    "goal": "：别名映射表 + 启动期迁移。",
+    "implementation": ""
+  },
+  {
+    "id": "P3-32",
+    "category": "热重载",
+    "title": "HotswapAgent 危险模式扫描",
+    "level": "P3",
+    "section": "P3",
+    "problem": "静态 final、注册表常量在热重载后不重置，开发环境状态越跑越乱。",
+    "goal": "：热重载危险模式静态扫描。",
+    "implementation": ""
+  },
+  {
+    "id": "P3-33",
+    "category": "工程",
+    "title": "源码格式化与提交前校验",
+    "level": "P3",
+    "section": "P3",
+    "problem": "格式混乱、import 顺序不统一、diff 噪音大。",
+    "goal": "：google-java-format / spotless 配置 + 提交钩子。",
+    "implementation": ""
+  },
+  {
+    "id": "P3-34",
+    "category": "工程",
+    "title": "CI 流水线模板",
+    "level": "P3",
+    "section": "P3",
+    "problem": "无自动编译、测试、GameTest、静态扫描、制品哈希。",
+    "goal": "：GitHub Actions / GitLab CI 模板。",
+    "implementation": ""
+  },
+  {
+    "id": "P3-35",
+    "category": "工程",
+    "title": "Git 版本号与变更追踪",
+    "level": "P3",
+    "section": "P3",
+    "problem": "版本号手写，不与 commit / tag 绑定。",
+    "goal": "：基于 Git 哈希与 tag 自动生成版本。",
+    "implementation": ""
+  },
+  {
+    "id": "P3-36",
+    "category": "工程",
+    "title": "依赖漏洞扫描",
+    "level": "P3",
+    "section": "P3",
+    "problem": "第三方依赖存在 CVE 无人告警。",
+    "goal": "：漏洞扫描 + 升级回归。",
+    "implementation": ""
+  },
+  {
+    "id": "P3-37",
+    "category": "国际化",
+    "title": "翻译完整性",
+    "level": "P3",
+    "section": "P3",
+    "problem": "硬编码文案；literal 与 translatable 混用；占位符格式错。",
+    "goal": "：字面字符串扫描 + 强制翻译 key + 回退链校验。",
+    "implementation": ""
+  },
+  {
+    "id": "P3-38",
+    "category": "国际化",
+    "title": "复数、语序、LTR/RTL",
+    "level": "P3",
+    "section": "P3",
+    "problem": "硬写单复数；阿拉伯语等 RTL 布局重叠。",
+    "goal": "：原版格式化规则 + 布局方向检查。",
+    "implementation": ""
+  },
+  {
+    "id": "P3-39",
+    "category": "无障碍",
+    "title": "GUI 朗读、导航顺序、对比度",
+    "level": "P3",
+    "section": "P3",
+    "problem": "自定义 GUI 无朗读标签、无键盘导航顺序。",
+    "goal": "：无障碍模板校验。",
+    "implementation": ""
+  },
+  {
+    "id": "P3-40",
+    "category": "体验",
+    "title": "资源缺失降级与友好提示",
+    "level": "P3",
+    "section": "P3",
+    "problem": "贴图/模型/音效缺失直接空白或崩溃，无占位与日志提示。",
+    "goal": "：占位资源 + 启动校验提示。",
+    "implementation": ""
+  },
+  {
+    "id": "P3-41",
+    "category": "安全",
+    "title": "数据包函数与命令注入",
+    "level": "P3",
+    "section": "P3",
+    "problem": "从 NBT / 数据包读字符串直接拼命令，可注入。",
+    "goal": "：注入扫描 + 转义模板。",
+    "implementation": ""
+  },
+  {
+    "id": "P3-42",
+    "category": "安全",
+    "title": "能力（Capability / Attachment）访问控制",
+    "level": "P3",
+    "section": "P3",
+    "problem": "其他 Mod 可无条件读写本 Mod 全部能力，无审计。",
+    "goal": "：只读标记 + 访问白名单 + 审计日志。",
+    "implementation": ""
+  },
+  {
+    "id": "P3-43",
+    "category": "安全",
+    "title": "文件读写沙盒",
+    "level": "P3",
+    "section": "P3",
+    "problem": "Mod 生成文件可写任意系统路径。",
+    "goal": "：限定在游戏目录内。",
+    "implementation": ""
+  },
+  {
+    "id": "P3-44",
+    "category": "安全",
+    "title": "脚本沙盒配额（若支持脚本）",
+    "level": "P3",
+    "section": "P3",
+    "problem": "脚本无限循环、无限内存、跨脚本共享可变状态。",
+    "goal": "：CPU/内存/线程配额 + 上下文隔离 + 中断钩子。 第五部分  TOOL —— 支撑以上各项的工具层改造（20 项） 第六部分  落地顺序与里程碑建议 里程碑 1（1–2 周，最小见效） 1. 接入 spec / workflow（P0-01） 2. 修 mcdev_prepare 默认超时 → 900s，并修正 ok=True 误判（joined 才算就绪） 3. 默认关闭\"仅编译通过即完成\"，改为必须产出场景断言或 GameTest 汇总 4. edit_file 失败率优化（AST 替换 / 精确索引） 预期：会话不再\"说完成其实没验证\"，多文件写入成功率显著提升。 里程碑 2（2–4 周，稳定产出） 5. DAG 依赖调度 + 快照回滚（P0-02/03/04） 6. 符号索引 + mapping 转译（P0-05/06） 7. 客户端引用扫描 + 异步写入检测（P0-08/09） 8. 结构化日志解析（P1-03） 预期：复杂功能不再\"先写业务后补注册\"，错误定位从小时级降到分钟级。 里程碑 3（1–2 月，复杂 Mod 可用） 9. Mixin 校验器（P0-07） 10. 网络 + 安全权威校验（P0-10/11） 11. 数据包 / 战利品 / 标签校验（P1-11） 12. GameTest 套件编排（P1-02） 预期：能稳定做自定义实体、能力、自定义方块、维度等子系统组合。 里程碑 4（长期，美术与生态） 13. Blockbench + 原版资产库 + 贴图生成（P1-06/07/08） 14. Vision 美术评审（P1-09） 15. GeckoLib 模板与动画校验（P1-10） 16. 打包、文档、CI、多版本矩阵（P3 段） 预期：从\"能跑的 Mod\"升级到\"能发版、能维护、能被整合包接受的 Mod\"。 第七部分  边界说明（此清单不覆盖的内容） 1. 各 Mod 自身的业务玩法逻辑漏洞 —— 属于具体玩法设计，不属通用校验项。 2. 游戏引擎源码级改造、客户端注入框架、反作弊内核。 3. 第三方平台对接（Discord / Webhook / 支付 / 统计上报）—— 属业务集成。 4. 极实验性特性（自定义渲染管线全链路、Vulkan RT、音频混音器重建） —— 已在 P2/P3 中以\"校验与降级\"形式给出最低要求，不展开实现。 END",
+    "implementation": ""
+  },
+  {
+    "id": "TOOL-01",
+    "level": "TOOL",
+    "category": "工具层",
+    "title": "原生 function calling 作为默认，淘汰 ```tool JSON + DSML 宽松修复",
+    "section": "TOOL",
+    "problem": "",
+    "goal": "原生 function calling 作为默认，淘汰 ```tool JSON + DSML 宽松修复",
+    "implementation": ""
+  },
+  {
+    "id": "TOOL-02",
+    "level": "TOOL",
+    "category": "工具层",
+    "title": "edit_file 改为 AST 感知替换（类 / 方法定位），不再依赖逐字符 old 匹配",
+    "section": "TOOL",
+    "problem": "",
+    "goal": "edit_file 改为 AST 感知替换（类 / 方法定位），不再依赖逐字符 old 匹配",
+    "implementation": ""
+  },
+  {
+    "id": "TOOL-03",
+    "level": "TOOL",
+    "category": "工具层",
+    "title": "read_file 哈希缓存 + 分片偏移记忆，避免重复读与上下文丢失",
+    "section": "TOOL",
+    "problem": "",
+    "goal": "read_file 哈希缓存 + 分片偏移记忆，避免重复读与上下文丢失",
+    "implementation": ""
+  },
+  {
+    "id": "TOOL-04",
+    "level": "TOOL",
+    "category": "工具层",
+    "title": "symbol_query：类、方法、字段、覆写、调用链、事件监听者查询",
+    "section": "TOOL",
+    "problem": "",
+    "goal": "symbol_query：类、方法、字段、覆写、调用链、事件监听者查询",
+    "implementation": ""
+  },
+  {
+    "id": "TOOL-05",
+    "level": "TOOL",
+    "category": "工具层",
+    "title": "mapping_translate：Yarn / Mojmap / SRG 互译",
+    "section": "TOOL",
+    "problem": "",
+    "goal": "mapping_translate：Yarn / Mojmap / SRG 互译",
+    "implementation": ""
+  },
+  {
+    "id": "TOOL-06",
+    "level": "TOOL",
+    "category": "工具层",
+    "title": "mixin_lint：注入点、捕获变量、优先级、refmap 静态校验",
+    "section": "TOOL",
+    "problem": "",
+    "goal": "mixin_lint：注入点、捕获变量、优先级、refmap 静态校验",
+    "implementation": ""
+  },
+  {
+    "id": "TOOL-07",
+    "level": "TOOL",
+    "category": "工具层",
+    "title": "client_ref_scan：客户端专属类引用扫描",
+    "section": "TOOL",
+    "problem": "",
+    "goal": "client_ref_scan：客户端专属类引用扫描",
+    "implementation": ""
+  },
+  {
+    "id": "TOOL-08",
+    "level": "TOOL",
+    "category": "工具层",
+    "title": "thread_guard：异步世界写入与主线程规则检测",
+    "section": "TOOL",
+    "problem": "",
+    "goal": "thread_guard：异步世界写入与主线程规则检测",
+    "implementation": ""
+  },
+  {
+    "id": "TOOL-09",
+    "level": "TOOL",
+    "category": "工具层",
+    "title": "packet_lint：通道注册、版本、限流、分片检查",
+    "section": "TOOL",
+    "problem": "",
+    "goal": "packet_lint：通道注册、版本、限流、分片检查",
+    "implementation": ""
+  },
+  {
+    "id": "TOOL-10",
+    "level": "TOOL",
+    "category": "工具层",
+    "title": "registry_audit：注册时机、冻结、ID/UUID 重复",
+    "section": "TOOL",
+    "problem": "",
+    "goal": "registry_audit：注册时机、冻结、ID/UUID 重复",
+    "implementation": ""
+  },
+  {
+    "id": "TOOL-11",
+    "level": "TOOL",
+    "category": "工具层",
+    "title": "datapack_lint：配方、战利品、标签、进度、谓词的 MC 专属 schema",
+    "section": "TOOL",
+    "problem": "",
+    "goal": "datapack_lint：配方、战利品、标签、进度、谓词的 MC 专属 schema",
+    "implementation": ""
+  },
+  {
+    "id": "TOOL-12",
+    "level": "TOOL",
+    "category": "工具层",
+    "title": "asset_lint：模型 UV、贴图规格、资源引用完整性",
+    "section": "TOOL",
+    "problem": "",
+    "goal": "asset_lint：模型 UV、贴图规格、资源引用完整性",
+    "implementation": ""
+  },
+  {
+    "id": "TOOL-13",
+    "level": "TOOL",
+    "category": "工具层",
+    "title": "blockbench：create_bbmodel / export_bbmodel / preview",
+    "section": "TOOL",
+    "problem": "",
+    "goal": "blockbench：create_bbmodel / export_bbmodel / preview",
+    "implementation": ""
+  },
+  {
+    "id": "TOOL-14",
+    "level": "TOOL",
+    "category": "工具层",
+    "title": "texture_gen：结构化像素贴图生成 + 规格校验",
+    "section": "TOOL",
+    "problem": "",
+    "goal": "texture_gen：结构化像素贴图生成 + 规格校验",
+    "implementation": ""
+  },
+  {
+    "id": "TOOL-15",
+    "level": "TOOL",
+    "category": "工具层",
+    "title": "vision_review：预览图 + 游戏截图的结构化美术评审",
+    "section": "TOOL",
+    "problem": "",
+    "goal": "vision_review：预览图 + 游戏截图的结构化美术评审",
+    "implementation": ""
+  },
+  {
+    "id": "TOOL-16",
+    "level": "TOOL",
+    "category": "工具层",
+    "title": "sandbox_screenshot：沙盒客户端自动截图回传",
+    "section": "TOOL",
+    "problem": "",
+    "goal": "sandbox_screenshot：沙盒客户端自动截图回传",
+    "implementation": ""
+  },
+  {
+    "id": "TOOL-17",
+    "level": "TOOL",
+    "category": "工具层",
+    "title": "log_parse：崩溃栈剥离、错误分类、同类聚类",
+    "section": "TOOL",
+    "problem": "",
+    "goal": "log_parse：崩溃栈剥离、错误分类、同类聚类",
+    "implementation": ""
+  },
+  {
+    "id": "TOOL-18",
+    "level": "TOOL",
+    "category": "工具层",
+    "title": "snapshot / rollback：基线快照、diff、回滚",
+    "section": "TOOL",
+    "problem": "",
+    "goal": "snapshot / rollback：基线快照、diff、回滚",
+    "implementation": ""
+  },
+  {
+    "id": "TOOL-19",
+    "level": "TOOL",
+    "category": "工具层",
+    "title": "impact_analysis：改动影响图（受影响注册项、资源、测试）",
+    "section": "TOOL",
+    "problem": "",
+    "goal": "impact_analysis：改动影响图（受影响注册项、资源、测试）",
+    "implementation": ""
+  },
+  {
+    "id": "TOOL-20",
+    "level": "TOOL",
+    "category": "工具层",
+    "title": "offline_cache：符号库、映射、模板、资产、文档全量离线",
+    "section": "TOOL",
+    "problem": "",
+    "goal": "offline_cache：符号库、映射、模板、资产、文档全量离线",
+    "implementation": ""
+  }
+]

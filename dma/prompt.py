@@ -61,12 +61,27 @@ Architectury：
 版本 API 变更 / 资源路径错误。给出出错文件、行号、根因和修复后的完整文件或完整方法。
 明确告诉用户：编译成功不等于游戏内正常运行。
 
+【规格驱动生成器】
+工程里内置了规格驱动生成器。用户要从零做一个完整模组、内容量较大（多个物品/方块/机器/群系/生物/任务）时，
+先用 studio_plan 或 studio_generate 得到连贯的 mod-spec.json 与注册代码，再读 GDD.md 和关键类，按用户需求细化。
+规格生成器负责“结构完整、能编译”，你负责“玩法正确、符合用户的具体要求”。
+生成后仍然必须读文件、编译、验证；不要把“生成成功”说成“游戏内已验证”。
+
+【2.0 规格优先与验收门禁】
+每次任务已经由宿主固化为 .dma/spec.json 和任务 DAG（见【规格与任务图（2.0）】）。
+1. 先看当前应执行的任务；被依赖的注册/骨架未完成时，不要先写业务逻辑。
+2. 每次写文件都属于某个功能；改动后不要跳过后面的 lint / build / verify。
+3. 验收门禁是强制的：必需项没有真实证据（构建、测试、运行时）时，不得说“完成”；
+   只能说明“已实现，尚未验证”，并列出阻断项。
+4. 构建失败会进入修复循环；同一错误重复出现时宿主会熔断并要求人工介入，不要机械重试。
+
 【最终答复】
 必须能直接验收：写明加载器与 MC 版本、改动的文件、编译结果、JAR 路径、实际用了哪种验证方式
 （探针断言 / 开发端日志 / GameTest）、剩余风险。不要用“接下来我会…”结尾。"""
 
 TOOL_PROTOCOL = """【工程工具协议】
-需要读文件、查资料、执行构建或操作游戏时，输出下面这种独立代码块，一次可以输出多个：
+优先使用原生 function calling（宿主会直接执行并回传结果）。
+如果当前模型通道不支持原生工具调用，再退回下面的文本代码块协议；一次可以输出多个：
 
 ```tool
 {"tool":"read_file","path":"src/main/java/com/example/ExampleMod.java"}
@@ -87,6 +102,20 @@ TOOL_PROTOCOL = """【工程工具协议】
   {"tool":"scaffold_project","loader":"Fabric","mod_id":"examplemod","name":"Example Mod","package":"com.example.examplemod","dest":"D:/mods/examplemod"}
   // loader 可选 Forge / Fabric / NeoForge；Architectury 或其他 MC 版本没有内置骨架，按官方模板手写
 - build_project 执行 Gradle: {"tool":"build_project","task":"build"}  // task 可选 build / runServer / runClient / runGameTestServer / runGametest
+
+规格驱动生成器（做完整模组时优先用它打底，再用文件工具细化）：
+- studio_plan 生成 mod-spec.json 规格和 GDD.md（当前有工程时写入工程；没有工程时只返回规格）:
+  {"tool":"studio_plan","idea":"深海遗迹、发光珊瑚矿、潜水装备、潮汐能机器","loader":"Forge","mc":"1.20.1","scope":"large"}
+  // scope 可选 small / medium / large / epic；name / modid / package 可留空自动生成
+- studio_generate 一句话直接生成可编译工程（含注册代码、纹理、模型、语言、配方、战利品、世界生成、社交系统）:
+  {"tool":"studio_generate","idea":"...","loader":"NeoForge","mc":"1.21.1","scope":"medium","dest":"D:/mods","build":true,"audit":true}
+  // dest 是父目录，工程会落在 dest/<modid>；目标目录非空时需 overwrite=true
+  // build / verify / package 可选 true；verify 会启动开发服务端，耗时较长
+- studio_audit 审计当前工程的资源与注册一致性: {"tool":"studio_audit"}
+- studio_build 用规格引擎编译并自动应用安全修复: {"tool":"studio_build","timeout":1800,"fix":true}
+- studio_verify 启动开发服务端做冒烟验证: {"tool":"studio_verify","timeout":600}
+- studio_package 打包 JAR 并生成发布元数据: {"tool":"studio_package"}
+  // 适用于带 .mcmod/state.json 与 mod-spec.json 的规格工程；普通手写工程继续用 build_project
 
 游戏运行与验证（Forge 1.20.1 首次调用会安装开发探针，可能要几分钟）：
 - mcdev_prepare 启动开发端: {"tool":"mcdev_prepare","kind":"both"}
@@ -162,7 +191,9 @@ def project_block(project: Project | None) -> str:
         return (
             "当前没有打开工程。用户提出新模组需求时，先确认加载器、MC 版本、Mod ID 和模组名称，"
             "然后调用 scaffold_project 生成对应工程；1.20.1 的 Forge / Fabric / NeoForge 有内置骨架，"
-            "Architectury 或其他版本按官方模板生成。不要只给文字方案。"
+            "Architectury 或其他版本按官方模板生成。"
+            "如果需求是完整模组（多个内容节点、完整进度线），优先调用 studio_generate，"
+            "它会按构思生成规格和可编译工程，你再继续细化。不要只给文字方案。"
         )
     meta = project.meta
     reference = Path(project.root) / "reference" / "decompiled" / "INDEX.md"
@@ -195,6 +226,7 @@ def build_system_prompt(
     max_steps: int = 0,
     knowledge_text: str = "",
     query: str = "",
+    kernel_text: str = "",
 ) -> str:
     limit = "不限制" if max_steps <= 0 else f"最多 {max_steps} 轮"
     parts = [
@@ -203,6 +235,8 @@ def build_system_prompt(
         f"【工具轮数】本次任务{limit}工具调用。大工程可以分多轮完成，但不要重复调用相同工具做同样的检查。",
         project_block(project),
     ]
+    if kernel_text:
+        parts.append(kernel_text)
     parts.append("【技能目录】\n" + skill_store.catalog_text())
     relevant: list[str] = ["delivery-checklist", "client-server-split", "code-engineering"]
     if project is not None:

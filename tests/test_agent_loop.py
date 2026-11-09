@@ -64,7 +64,7 @@ class AgentLoopTests(TempDataCase):
         ]
         seen_messages: list[list[dict]] = []
 
-        def fake(ai, messages):
+        def fake(ai, messages, **_kwargs):
             seen_messages.append(list(messages))
             return replies.pop(0)
 
@@ -155,7 +155,7 @@ class AgentLoopTests(TempDataCase):
         ]
         messages: list[list[dict]] = []
 
-        def fake(ai, items):
+        def fake(ai, items, **_kwargs):
             messages.append(list(items))
             return replies.pop(0)
 
@@ -177,7 +177,7 @@ class AgentLoopTests(TempDataCase):
         ]
         messages: list[list[dict]] = []
 
-        def fake(ai, items):
+        def fake(ai, items, **_kwargs):
             messages.append(list(items))
             return replies.pop(0)
 
@@ -211,7 +211,7 @@ class AgentLoopTests(TempDataCase):
         ]
         calls: list[int] = []
 
-        def fake(ai, items):
+        def fake(ai, items, **_kwargs):
             calls.append(1)
             return replies.pop(0)
 
@@ -225,7 +225,7 @@ class AgentLoopTests(TempDataCase):
         worker = self.worker(project)
         calls: list[int] = []
 
-        def fake(ai, items):
+        def fake(ai, items, **_kwargs):
             calls.append(1)
             return "我先读一下工程结构。"
 
@@ -240,7 +240,7 @@ class AgentLoopTests(TempDataCase):
         worker = self.worker(project)
         calls: list[int] = []
 
-        def fake(ai, items):
+        def fake(ai, items, **_kwargs):
             calls.append(1)
             return "已经读取了 build.gradle，确认配置没有问题。"
 
@@ -257,7 +257,7 @@ class AgentLoopTests(TempDataCase):
         )
         messages: list[list[dict]] = []
 
-        def fake(ai, items):
+        def fake(ai, items, **_kwargs):
             messages.append(list(items))
             return reply if len(messages) == 1 else "结束"
 
@@ -273,7 +273,7 @@ class AgentLoopTests(TempDataCase):
         worker = self.worker(project)
         messages: list[list[dict]] = []
 
-        def fake(ai, items):
+        def fake(ai, items, **_kwargs):
             messages.append(list(items))
             if len(messages) == 1:
                 return '```tool\n{"tool":"read_file","path":"note.txt"}\n```'
@@ -296,7 +296,7 @@ class AgentLoopTests(TempDataCase):
         messages: list[list[dict]] = []
         visible: list[str] = []
 
-        def fake(ai, items):
+        def fake(ai, items, **_kwargs):
             messages.append(list(items))
             return reply if len(messages) == 1 else "读完了。"
 
@@ -316,7 +316,7 @@ class AgentLoopTests(TempDataCase):
         )
         calls: list[int] = []
 
-        def fake(ai, items):
+        def fake(ai, items, **_kwargs):
             calls.append(1)
             return reply
 
@@ -357,7 +357,7 @@ class AgentLoopTests(TempDataCase):
         tool = '```tool\n{"tool":"list_files","path":"."}\n```'
         calls: list[int] = []
 
-        def fake(ai, messages):
+        def fake(ai, messages, **_kwargs):
             calls.append(1)
             return tool if len(calls) <= 25 else "大工程完成。"
 
@@ -372,7 +372,7 @@ class AgentLoopTests(TempDataCase):
         worker = self.worker(project)
         messages: list[list[dict]] = []
 
-        def fake(ai, items):
+        def fake(ai, items, **_kwargs):
             messages.append(list(items))
             if len(messages) == 1:
                 return (
@@ -397,7 +397,7 @@ class AgentLoopTests(TempDataCase):
         )
         messages: list[list[dict]] = []
 
-        def fake(ai, items):
+        def fake(ai, items, **_kwargs):
             messages.append(list(items))
             return reply if len(messages) == 1 else "改好了。"
 
@@ -418,7 +418,7 @@ class AgentLoopTests(TempDataCase):
         )
         messages: list[list[dict]] = []
 
-        def fake(ai, items):
+        def fake(ai, items, **_kwargs):
             messages.append(list(items))
             return reply if len(messages) == 1 else "先读一下。"
 
@@ -463,7 +463,7 @@ class AgentLoopTests(TempDataCase):
         ]
         seen: list[list[dict]] = []
 
-        def fake(ai, items):
+        def fake(ai, items, **_kwargs):
             seen.append(list(items))
             return replies.pop(0)
 

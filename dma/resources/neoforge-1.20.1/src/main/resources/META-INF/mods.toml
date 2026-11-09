@@ -9,16 +9,17 @@ displayName="${mod_name}"
 authors="${mod_authors}"
 description='''${mod_description}'''
 
+# 1.20.1 的 NeoForge 沿用 Forge 的 mods.toml 格式，运行时的 modId 仍然是 forge。
 [[dependencies.${mod_id}]]
-    modId="neoforge"
-    type="required"
+    modId="forge"
+    mandatory=true
     versionRange="${neo_version_range}"
     ordering="NONE"
     side="BOTH"
 
 [[dependencies.${mod_id}]]
     modId="minecraft"
-    type="required"
+    mandatory=true
     versionRange="${minecraft_version_range}"
     ordering="NONE"
     side="BOTH"

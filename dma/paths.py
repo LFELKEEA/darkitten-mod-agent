@@ -33,6 +33,27 @@ def tools_dir() -> Path:
     return path
 
 
+def gradle_home() -> Path:
+    """Gradle 用户目录默认放在程序的 data 下。
+
+    Gradle 默认写 ~/.gradle，会把发行版、依赖和 NeoForm 缓存全堆到 C 盘用户目录。
+    显式设置了 GRADLE_USER_HOME 时仍以用户的设置为准。
+    """
+    override = os.environ.get("GRADLE_USER_HOME", "").strip()
+    if override:
+        return Path(override).expanduser()
+    path = data_dir() / "gradle"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def temp_dir() -> Path:
+    """构建和解析用的临时文件也放在程序目录里，不写系统 Temp。"""
+    path = data_dir() / "temp"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 def config_path() -> Path:
     return data_dir() / "config.json"
 

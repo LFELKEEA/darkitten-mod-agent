@@ -6,9 +6,11 @@ import json
 import threading
 import time
 import unittest
+import urllib.request
 import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from unittest import mock
 
 from dma import mirrors
 
@@ -89,6 +91,12 @@ class MirrorHelperTests(TempDataCase):
         self.assertEqual(target, mirrors.cache_path(long))
         self.assertLessEqual(len(str(target)) + len(".part"), mirrors._MAX_CACHE_PATH)
 
+    def test_cache_path_rejects_escape(self) -> None:
+        # 绝对路径会被剥掉前导 / 后落到 repo_cache 内，不会写到数据目录外。
+        self.assertEqual(mirrors.cache_path("/abs/x.jar"), mirrors.repo_cache() / "abs/x.jar")
+        with self.assertRaises(ValueError):
+            mirrors.cache_path("../../y")
+
     def test_needs_mirror(self) -> None:
         text = (
             "Could not GET https://maven.neoforged.net/releases/x\n"
@@ -101,6 +109,7 @@ class MirrorHelperTests(TempDataCase):
     def test_module_synthesis(self) -> None:
         version = {
             "id": "1.21.1",
+            "javaVersion": {"majorVersion": 21},
             "libraries": [
                 {"name": "org.example:common:1.0"},
                 {
@@ -125,6 +134,22 @@ class MirrorHelperTests(TempDataCase):
             "natives-windows",
         )
         self.assertEqual(module["component"]["version"], "1.21.1")
+        self.assertEqual(
+            by_name["client-windows-api"]["attributes"]["org.gradle.jvm.version"], 21
+        )
+
+    def test_module_synthesis_uses_minecraft_java_version(self) -> None:
+        """1.20.1 的 toolchain 是 17；变体写死 21 会让 compileClasspath 变体不匹配。"""
+        version = {
+            "id": "1.20.1",
+            "javaVersion": {"majorVersion": 17},
+            "libraries": [{"name": "org.example:common:1.0"}],
+        }
+        module = mirrors.minecraft_dependencies_module(version)
+        for variant in module["variants"]:
+            self.assertEqual(
+                variant["attributes"]["org.gradle.jvm.version"], 17, variant["name"]
+            )
 
     def test_pom_runtime_only(self) -> None:
         pom = b"""<?xml version="1.0"?>
@@ -384,6 +409,30 @@ class RaceTests(TempDataCase):
 
 
 class MirrorServiceTests(TempDataCase):
+    def test_synthesized_module_sha1_matches_content(self) -> None:
+        """合成模块的 .sha1 必须是新内容的哈希，否则 Gradle 会退回旧缓存。"""
+        service = mirrors.MirrorService()
+        version_json = {
+            "id": "1.20.1",
+            "javaVersion": {"majorVersion": 17},
+            "libraries": [{"name": "org.example:common:1.0"}],
+        }
+        path = (
+            "net/neoforged/minecraft-dependencies/1.20.1/"
+            "minecraft-dependencies-1.20.1.module"
+        )
+        try:
+            base = service.start()
+            with mock.patch.object(
+                mirrors, "mojang_version_json", return_value=version_json
+            ):
+                module = urllib.request.urlopen(f"{base}/{path}", timeout=5).read()
+                sha1 = urllib.request.urlopen(f"{base}/{path}.sha1", timeout=5).read()
+        finally:
+            service.stop()
+        self.assertEqual(sha1.decode().strip(), hashlib.sha1(module).hexdigest())
+        self.assertIn(b'"org.gradle.jvm.version": 17', module)
+
     def test_init_script_and_cache(self) -> None:
         service = mirrors.MirrorService()
         try:
@@ -398,6 +447,81 @@ class MirrorServiceTests(TempDataCase):
             self.assertEqual(cached.read_bytes(), b"data")
         finally:
             service.stop()
+
+    def test_init_script_only_rewrites_given_hosts(self) -> None:
+        service = mirrors.MirrorService()
+        try:
+            script = service.init_script(hosts=["maven.neoforged.net"])
+            text = script.read_text(encoding="utf-8")
+            self.assertIn("def officialHosts = ['maven.neoforged.net']", text)
+            self.assertEqual(text.count("officialHosts.contains(u.host)"), 2)
+        finally:
+            service.stop()
+
+    def test_init_script_feeds_nfrt_artifacts_to_manifest(self) -> None:
+        """NFRT 下载器不认 Gradle 仓库，缺的构件必须提前塞进 artifact manifest。"""
+        service = mirrors.MirrorService()
+        try:
+            text = service.init_script(hosts=["maven.neoforged.net"]).read_text(
+                encoding="utf-8"
+            )
+            self.assertIn("addArtifactsToManifest", text)
+            for coordinate in (
+                "de.oceanlabs.mcp:mcp_config:1.20.1-20230612.114412@zip",
+                "net.minecraftforge:installertools:1.2.0:fatjar",
+                "net.minecraftforge:installertools:1.3.2:fatjar",
+                "net.minecraftforge:mergetool:1.1.7:api",
+                "net.minecraftforge:forgeflower:2.0.629.0",
+                "net.minecraftforge:ForgeAutoRenamingTool:1.0.2:all",
+                "net.minecraftforge:binarypatcher:1.1.1:fatjar",
+                "org.jetbrains:annotations:24.0.1",
+            ):
+                self.assertIn(coordinate, text)
+            # 模板用 str.format 渲染，落盘后不能残留双花括号。
+            self.assertNotIn("{{", text)
+            self.assertNotIn("}}", text)
+        finally:
+            service.stop()
+
+    def test_unreachable_hosts_reports_failed_probes(self) -> None:
+        with mock.patch.object(
+            mirrors,
+            "host_reachable",
+            side_effect=lambda host, **_kwargs: host != "maven.neoforged.net",
+        ):
+            down = mirrors.unreachable_hosts(
+                ["maven.neoforged.net", "maven.minecraftforge.net"]
+            )
+        self.assertEqual(down, ["maven.neoforged.net"])
+
+    def test_prepare_launch_env_skips_mirror_when_reachable(self) -> None:
+        with mock.patch.object(mirrors, "unreachable_hosts", return_value=[]):
+            self.assertIsNone(mirrors.prepare_launch_env())
+
+    def test_prepare_launch_env_passes_down_hosts_to_service(self) -> None:
+        fake = mock.Mock()
+        fake.init_script.return_value = Path("mirror.gradle")
+        with mock.patch.object(
+            mirrors, "unreachable_hosts", return_value=["maven.neoforged.net"]
+        ):
+            with mock.patch.object(mirrors, "service", return_value=fake):
+                script = mirrors.prepare_launch_env()
+        self.assertEqual(script, Path("mirror.gradle"))
+        fake.init_script.assert_called_once_with(hosts=["maven.neoforged.net"])
+
+    def test_prepare_launch_env_always_probes_official_hosts(self) -> None:
+        """NeoGradle 的仓库 URL 在插件里动态添加，构建脚本扫不到。
+
+        调用方传空 hosts 时也必须探测官方仓库，否则永远拿不到镜像。
+        """
+        with mock.patch.object(
+            mirrors, "unreachable_hosts", return_value=[]
+        ) as probe:
+            mirrors.prepare_launch_env(hosts=["repo.example.com"])
+        candidates = probe.call_args[0][0]
+        for host in mirrors.OFFICIAL_HOSTS:
+            self.assertIn(host, candidates)
+        self.assertIn("repo.example.com", candidates)
 
     def test_missing_cache_expires_and_clears_on_new_build(self) -> None:
         service = mirrors.MirrorService()

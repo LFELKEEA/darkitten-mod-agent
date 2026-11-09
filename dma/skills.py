@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import builtins
 import re
 from dataclasses import dataclass
 from datetime import datetime
@@ -60,7 +61,7 @@ MC 版本、Mod ID、显示名、依赖、是否需要 Datagen、是否允许 Mi
 gradle.properties
 settings.gradle
 build.gradle
-src/main/java/<package>/ModMain.java
+src/main/java/<package>/<ModId>Mod.java
 src/main/resources/fabric.mod.json
 src/main/resources/assets/<modid>/lang/en_us.json
 src/main/resources/assets/<modid>/lang/zh_cn.json
@@ -138,9 +139,13 @@ src/main/resources/pack.mcmeta
 MC 版本、Mod ID、显示名、依赖、是否允许 Mixin。先确认目标 MC 版本有对应 NeoForge。
 
 ## 版本要点
-- 1.20.1：NeoGradle 7.0.x，`META-INF/mods.toml`，部分 API 仍接近 Forge。
+- 1.20.1：用 ModDevGradle 的 `net.neoforged.moddev.legacyforge`（2.0.91），
+  构件坐标是 `net.neoforged:forge:1.20.1-47.1.106`，**不是** `net.neoforged:neoforge`；
+  代码仍用 `net.minecraftforge.*` 包，`mods.toml` 的依赖 modId 也写 `forge`。
+  NeoGradle 7（`net.neoforged.gradle.userdev`）从 1.20.2 起才适用，1.20.1 用了会解析失败。
+- 1.20.2+：ModDevGradle `net.neoforged.moddev` + `net.neoforged:neoforge:<版本>`。
 - 1.20.5+：元数据改为 `META-INF/neoforge.mods.toml`。
-- 较新版本常用 ModDevGradle；构建插件必须与 MC 版本匹配。
+- 构建文件一律用 `scaffold_project` 生成，不要凭记忆手写插件版本和坐标。
 - 不写 SRG 名（`m_12345_`）或混淆名。
 
 ## 最小目录
@@ -148,7 +153,7 @@ MC 版本、Mod ID、显示名、依赖、是否允许 Mixin。先确认目标 M
 build.gradle
 gradle.properties
 settings.gradle
-src/main/java/<package>/ModMain.java
+src/main/java/<package>/<ModId>Mod.java
 src/main/resources/META-INF/mods.toml
 src/main/resources/assets/<modid>/lang/en_us.json
 src/main/resources/assets/<modid>/lang/zh_cn.json
@@ -695,8 +700,8 @@ SKILL_HINTS: dict[str, tuple[str, ...]] = {
     "delivery-checklist": ("交付", "检查", "验收"),
     "modrinth-lookup": ("依赖", "modrinth", "版本查询", "下载地址"),
     "fabric-to-neoforge-port": (
-        "移植", "迁移", "fabric转", "转neoforge", "换加载器", "1.21.11",
-        "1.21.1", "neoforge",
+        "移植", "迁移", "fabric转", "转neoforge", "换加载器", "1.21.1",
+        "neoforge",
     ),
     "mca-reborn-compat": (
         "mca", "凡家", "村民", "身份同步", "外观同步", "接管身份", "结婚",
@@ -755,7 +760,7 @@ class SkillStore:
             )
             path.write_text(skill.markdown(), encoding="utf-8")
 
-    def list(self) -> list[Skill]:
+    def list(self) -> builtins.list[Skill]:
         skills: list[Skill] = []
         for path in sorted(self.folder.glob("*.md")):
             try:
@@ -838,8 +843,8 @@ class SkillStore:
         return "\n".join(rows) if rows else "（暂无技能）"
 
     def select_for(
-        self, query: str, base: list[str] | None = None, limit: int = 6
-    ) -> list[str]:
+        self, query: str, base: builtins.list[str] | None = None, limit: int = 6
+    ) -> builtins.list[str]:
         """按用户这句话挑选要加载正文的技能，基础技能优先，关键词命中的靠前。"""
         text = (query or "").lower()
         enabled = {item.id: item for item in self.list() if item.enabled}
