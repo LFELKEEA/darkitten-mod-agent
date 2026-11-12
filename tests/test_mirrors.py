@@ -342,8 +342,10 @@ class RaceTests(TempDataCase):
     def test_race_marks_unanswered_source_incomplete(self) -> None:
         server, base = _serve(_SlowHandler)
         try:
+            # 单次请求超时（timeout）必须明显大于整体等待（overall），否则两者
+            # 同时到点，慢源可能先抛超时被记成 failures，结果取决于调度顺序。
             winner, _misses, failures, incomplete, _unresolved = mirrors._race(
-                [("slowinc", base)], "m/a.jar", mode="bytes", timeout=0.2, overall=0.2
+                [("slowinc", base)], "m/a.jar", mode="bytes", timeout=2.0, overall=0.2
             )
             self.assertIsNone(winner)
             self.assertEqual(failures, 0)
@@ -373,7 +375,7 @@ class RaceTests(TempDataCase):
                 [("slowreq", base)],
                 "m/a.jar",
                 mode="bytes",
-                timeout=0.2,
+                timeout=2.0,
                 overall=0.2,
                 required=("slowreq",),
             )
