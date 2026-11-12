@@ -234,7 +234,7 @@ def audit(project: Path, profile: VersionProfile | None = None) -> dict[str, Any
     ).strip()
     if advanced_skip:
         advanced_ok = False
-        add("warn", "java-skipped", advanced_skip)
+        add("warning", "java-skipped", advanced_skip)
     configs = [n for n in spec["content"] if n["type"] == "config"]
     sounds = [n for n in spec["content"] if n["type"] == "sound"]
     energies = [n for n in spec["content"] if n["type"] == "energy"]

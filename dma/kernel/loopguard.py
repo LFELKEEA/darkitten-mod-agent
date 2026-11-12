@@ -239,6 +239,11 @@ class LoopGuard:
 
     # ------------------------------------------------------------------
     def record_success(self, *, kind: str = "") -> None:
+        # A successful build/verify means the previous failure was actually
+        # repaired.  Decrement the session failure budget so long sessions on
+        # big mods (100+ files, many distinct errors) don't hit a hard stop
+        # after max_total *distinct* errors that were each already fixed.
+        self.total_failures = max(0, self.total_failures - 1)
         self.success_streak += 1
         if kind:
             for item in self.failures:
@@ -247,6 +252,12 @@ class LoopGuard:
         else:
             for item in self.failures:
                 item.count = 0
+        # If the guard tripped, a run of consecutive successes proves the
+        # agent is making progress again: release the latch instead of
+        # requiring a manual reset() that nothing ever calls.
+        if self.stopped and self.success_streak >= self.max_repeats:
+            self.stopped = False
+            self.stop_reason = ""
 
     def reset(self) -> None:
         self.failures.clear()

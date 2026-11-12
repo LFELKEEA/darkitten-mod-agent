@@ -84,14 +84,28 @@ def _preferred_java() -> tuple[str, str] | None:
 
 
 def build_env(
-    *, windows_trust: bool = True, slow: bool = False
+    *, windows_trust: bool | None = None, slow: bool = False
 ) -> dict[str, str]:
     """Gradle 子进程环境：固定 JDK、放宽超时、必要时用 Windows 根证书。
 
     ``slow=True`` 用在镜像代理模式下：上游镜像可能要几十秒才吐第一个字节，
     Gradle 默认 30 秒的 socket 超时会先断开，必须一起放宽。
+
+    ``windows_trust`` 默认跟随用户配置 ``gradle_windows_certs``（默认关闭）。
+    注入 ``-Djavax.net.ssl.trustStoreType=Windows-ROOT`` 会让 JDK 去读 Windows
+    证书存储，而 JDK 17 在部分机器上访问该存储会抛 ``KeyStoreException: error 5``
+    （Access Denied），导致 SSL 上下文初始化失败、所有依赖下载在发出请求前就崩。
+    因此除非用户显式开启「使用 Windows 根证书」，否则保持 JVM 默认的 cacerts。
     """
     from .. import gradle as core_gradle
+
+    if windows_trust is None:
+        try:
+            from .. import config as _config
+
+            windows_trust = bool(_config.load_config().gradle_windows_certs)
+        except Exception:
+            windows_trust = False
 
     java = _preferred_java()
     return core_gradle.build_env(
@@ -303,6 +317,7 @@ class _Watchdog:
         stall_timeout: float,
         cancel: threading.Event | None,
         log=None,
+        root: Path | None = None,
     ) -> None:
         self.process = process
         self.task = task
@@ -310,6 +325,7 @@ class _Watchdog:
         self.stall_timeout = stall_timeout
         self.cancel = cancel
         self.log = log
+        self.root = root
         self.reason = ""
         self.started = time.time()
         self._last_output = self.started
@@ -339,11 +355,11 @@ class _Watchdog:
             now = time.time()
             if self.cancel is not None and self.cancel.is_set():
                 self.reason = "已取消。"
-                _kill(self.process)
+                _kill(self.process, self.root)
                 return
             if self.timeout > 0 and now - self.started > self.timeout:
                 self.reason = f"{self.task} 超过 {int(self.timeout)} 秒，已终止。"
-                _kill(self.process)
+                _kill(self.process, self.root)
                 return
             quiet = now - self._last_output
             if self.stall_timeout > 0 and quiet > self.stall_timeout:
@@ -352,7 +368,7 @@ class _Watchdog:
                     "如果是首次构建，请确认能访问 Maven 仓库；"
                     "也可以设置 DMA_GRADLE_OFFLINE=1 先用本地缓存构建。"
                 )
-                _kill(self.process)
+                _kill(self.process, self.root)
                 return
             if now >= next_beat:
                 next_beat = now + HEARTBEAT_SECONDS
@@ -557,6 +573,7 @@ def _run_once(
         stall_timeout=float(stall_timeout),
         cancel=cancel,
         log=log,
+        root=root,
     )
     watchdog.start()
     collected: list[str] = []
@@ -582,7 +599,7 @@ def _run_once(
         try:
             code = process.wait(timeout=15)
         except subprocess.TimeoutExpired:
-            _kill(process)
+            _kill(process, root)
             try:
                 code = process.wait(timeout=10)
             except subprocess.TimeoutExpired:
@@ -600,7 +617,7 @@ def _run_once(
     return code, output, watchdog.reason
 
 
-def _kill(process: subprocess.Popen) -> None:
+def _kill(process: subprocess.Popen, root: Path | None = None) -> None:
     try:
         if os.name == "nt":
             subprocess.run(
@@ -612,6 +629,36 @@ def _kill(process: subprocess.Popen) -> None:
         else:
             process.kill()
     except Exception:  # noqa: BLE001
+        pass
+    if root is not None:
+        stop_gradle_daemon(root)
+
+
+def stop_gradle_daemon(root: Path) -> None:
+    """取消 / 超时后，停掉残留的 Gradle daemon。
+
+    ``taskkill /T`` 只能杀掉 ``gradlew.bat`` 的进程树；Gradle daemon 是独立的
+    常驻进程，通过 daemon registry 的 socket 与客户端通信，不在该进程树里。
+    若不停掉它，「停止」之后它仍会在后台下载依赖 / 编译、占用 CPU 与网络，
+    表现就是「点了停止却还在跑」。这里用 ``gradlew --stop`` 干净地关掉当前
+    ``GRADLE_USER_HOME`` 下的所有 daemon。
+    """
+    gradlew = root / ("gradlew.bat" if os.name == "nt" else "gradlew")
+    if not gradlew.is_file():
+        return
+    try:
+        argv = [str(gradlew), "--stop"]
+        if os.name == "nt":
+            subprocess.run(
+                ["cmd", "/c", *argv],
+                capture_output=True,
+                timeout=30,
+                cwd=str(root),
+                creationflags=CREATE_NO_WINDOW,
+            )
+        else:
+            subprocess.run(argv, capture_output=True, timeout=30, cwd=str(root))
+    except Exception:  # noqa: BLE001 - 停止 daemon 是尽力而为
         pass
 
 

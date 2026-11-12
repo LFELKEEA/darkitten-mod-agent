@@ -634,6 +634,12 @@ class LaunchManager:
                     )
                 except Exception as exc:  # noqa: BLE001
                     warnings.append(str(exc))
+        # 停掉残留的 Gradle daemon：taskkill 只能杀 gradlew 的进程树，
+        # daemon 是独立常驻进程，不停掉它「停止」后仍会在后台烧 CPU / 下载。
+        try:
+            gradle_mod.stop_gradle_daemon(entry.project_dir)
+        except Exception as exc:  # noqa: BLE001
+            warnings.append(str(exc))
         entry.running = False
         return warnings
 

@@ -6,11 +6,11 @@ from dma.config import DEFAULT_MAX_STEPS, MAX_MAX_STEPS, Config, normalize_max_s
 
 
 class ContextTurnsTests(unittest.TestCase):
-    def test_default_is_32(self) -> None:
-        self.assertEqual(Config().normalized().context_turns, 32)
+    def test_default_is_128(self) -> None:
+        self.assertEqual(Config().normalized().context_turns, 128)
 
     def test_old_default_is_upgraded(self) -> None:
-        self.assertEqual(Config(context_turns=12).normalized().context_turns, 32)
+        self.assertEqual(Config(context_turns=12).normalized().context_turns, 128)
 
     def test_chosen_value_is_kept_after_upgrade(self) -> None:
         config = Config(context_turns=10, context_turns_upgraded=True).normalized()
@@ -18,7 +18,7 @@ class ContextTurnsTests(unittest.TestCase):
 
     def test_large_value_is_kept_or_clamped(self) -> None:
         self.assertEqual(Config(context_turns=64).normalized().context_turns, 64)
-        self.assertEqual(Config(context_turns=999).normalized().context_turns, 200)
+        self.assertEqual(Config(context_turns=999).normalized().context_turns, 600)
 
 
 class AutoBuildTests(unittest.TestCase):

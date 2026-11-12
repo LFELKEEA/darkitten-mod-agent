@@ -75,7 +75,7 @@ class GradleWatchdogTests(TempDataCase):
         lines: list[str] = []
         with mock.patch.object(gradle.subprocess, "Popen", return_value=process):
             with mock.patch.object(
-                gradle, "_kill", side_effect=lambda p: p.stdout.close()
+                gradle, "_kill", side_effect=lambda p, root=None: p.stdout.close()
             ):
                 with self.assertRaises(gradle.GradleError) as ctx:
                     gradle.run_gradle(self.root, "build", log=lines.append, **kwargs)

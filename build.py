@@ -22,6 +22,22 @@ BUILD = ROOT / "build"
 APP_DIST = DIST / "DarkittenModAgent"
 ZIP_NAME = f"DarkittenModAgent-{APP_VERSION}.zip"
 NOTES = [
+    "修复“做模组依赖下载全崩”：启动/编译开发端时不再无条件注入 Windows-ROOT 证书信任（JDK 17 读 Windows 证书存储会报 KeyStoreException error 5，SSL 初始化即崩）。现在默认不注入，界面设置里“Gradle 使用 Windows 证书”开关真正生效。",
+    "修复“无法停止”：停止构建或停止开发端时，除了杀 gradlew 进程树，现在还会执行 gradlew --stop 停掉后台常驻的 Gradle daemon，不再残留多个 java.exe 继续烧 CPU / 下载。",
+    "Agent 规模升级：默认步数 32→128（上限 4000）、上下文轮数 32→128（上限 600）、模型输出 8192→16384 tokens、历史预算 12 万→60 万字符、消息预算 48 万→200 万字符，老配置自动升级且保留用户自定义值，大型模组不再因“达到工具调用轮数上限”卡壳。",
+    "自动编译次数从 2 次放宽到 5 次，构建失败回传日志从 24K 扩大到 96K，编译页能看到完整错误而不是被截断的尾部。",
+    "循环熔断放宽：连续 5 次同类失败才切换策略、单会话累计 60 次才熔断，编译成功会回补失败预算并自动解除熔断，长模组不再被误杀。",
+    "45 分钟无进展保护只统计有效进展：read_file / list_files / search_text 等只读工具与 mcdev_prepare / GameTest 等长任务不再触发误停。",
+    "新增 7 个模型工具：texture_template（16×16 剑/镐/斧/锭/宝石模板）、model_json、blockstate_json、lang_json、recipe_json（8 种配方）、loot_table_json、validate_resources，资源全部按 JSON 规范生成并校验引用，不再手写容易出错的资源文件；pixel_art 支持 1-32 倍放大与描边。",
+    "新增 8 个大型模组技能：大模组路线图、注册中心、模型与纹理、世界生成、实体与 AI、配方与战利品、进度系统、GUI 与网络，并强化 3D 模型与视觉设计技能。",
+    "三个 1.20.1 骨架（Forge/Fabric/NeoForge）自带可编译示例：注册中心 ModRegistries + 示例方块/物品的全套资源（模型、blockstates、纹理、双语 lang、配方、战利品表、挖掘标签）+ MIT LICENSE，生成即跑通。",
+    "生成器 epic 规模补全：史诗项目现在真实生成 64+ 内容节点，主题不足时自动补足（社交/黄昏/科技/魔法/维度/农耕），跨界桥连接各主题，接近完整大模组的节奏。",
+    "版本矩阵修正：Fabric 26.x 改用 Gradle 9.8（Loom 1.19 要求）；1.21.8 与 26.x 降级为基础骨架标注，不再承诺生成器尚未适配的高级 Java；界面版本列表与版本种子表对齐。",
+    "GameTest 工程没有测试用例时直接跳过并标记通过，不再把“没有跑过测试”误报为失败；验证日志排除 jarjar/metadata 等良性提示行；反编译 genSources 与构建一致走镜像与 Forge 参数。",
+    "资源生成修正：pack.mcmeta 无条件生成（Fabric 也需要）；流体方块模型使用 _still 纹理渲染；needs_iron_tool 标签只给矿物与机器，农作物/装饰不再被要求铁镐。",
+    "维度钥匙修正：只有传送门激活器会生成 RealmKeyItem，遗迹钥匙不再被误做成跨维度传送；没有维度时不再生成空引用。",
+    "审计计数修正：warn 级别的问题正确计入统计，不再被静默丢弃。",
+    "list_files 支持 offset/limit 分页，大型工程目录不再只看得到前 300 个文件。",
     "修复“开发端无法运行”：启动 runServer / runClient 时也会启用本地 Maven 镜像代理并传入 --init-script。之前只有 build_project 走镜像，界面上的“启动开发端”仍在直连 maven.neoforged.net，返回 502 后卡在 createMinecraftArtifacts。",
     "启动阶段遇到依赖下载/证书错误时自动强制切换镜像并换端口重试一次；镜像模式下同步放宽 Gradle 的 HTTP 超时，慢速上游不会在 30 秒处断掉。",
     "启动开发端的默认等待时间从 180 秒提高到 600 秒，NeoForge 首次生成 Minecraft artifacts 不会再被 3 分钟超时误杀。",

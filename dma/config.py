@@ -16,8 +16,8 @@ PROVIDERS = {
     "ollama": "本地 Ollama",
 }
 
-DEFAULT_MAX_STEPS = 32
-MAX_MAX_STEPS = 999
+DEFAULT_MAX_STEPS = 128
+MAX_MAX_STEPS = 4000
 
 
 def normalize_max_steps(value: Any) -> int:
@@ -36,7 +36,7 @@ class AIConfig:
     model: str = "openai-fast"
     api_key: str = ""
     temperature: float = 0.2
-    max_tokens: int = 8192
+    max_tokens: int = 16384
     timeout: int = 180
 
     def normalized(self) -> "AIConfig":
@@ -54,7 +54,7 @@ class AIConfig:
             model=model,
             api_key=(self.api_key or "").strip(),
             temperature=max(0.0, min(1.5, float(self.temperature or 0.2))),
-            max_tokens=max(512, min(32768, int(self.max_tokens or 8192))),
+            max_tokens=max(512, min(32768, int(self.max_tokens or 16384))),
             timeout=max(30, min(600, int(self.timeout or 180))),
         )
 
@@ -67,8 +67,9 @@ class Config:
     auto_apply: bool = True
     auto_build: bool = True
     max_steps: int = DEFAULT_MAX_STEPS
-    context_turns: int = 32
+    context_turns: int = 128
     context_turns_upgraded: bool = False
+    scale_upgraded: bool = False
     native_tools: bool = False
     native_tools_upgraded: bool = False
     shortcut_offered: bool = False
@@ -79,10 +80,27 @@ class Config:
     gradle_windows_certs: bool = False
 
     def normalized(self) -> "Config":
-        turns = int(self.context_turns or 32)
+        turns = int(self.context_turns or 128)
         if not self.context_turns_upgraded and turns <= 12:
             # 0.3.16 之前默认 12 轮，老配置里基本都停在这个值；统一提高到 32。
             turns = 32
+        max_steps = (
+            int(self.max_steps)
+            if self.max_steps is not None
+            else DEFAULT_MAX_STEPS
+        )
+        ai = self.ai.normalized()
+        if not self.scale_upgraded and not self.context_turns_upgraded:
+            # 2.0.x 的默认规模太小（32 轮 / 32 轮上下文 / 8192 输出 token），
+            # 做大模组时模型会“失忆”或到轮数上限突然停下；统一放大到史诗级。
+            # 只放大从未被用户调过的默认值：max_steps=0 表示不限轮数、负数交给
+            # normalize_max_steps 处理，两者都不能动；用户显式选过的值也要保留。
+            if 0 < max_steps <= 32:
+                max_steps = DEFAULT_MAX_STEPS
+            if turns <= 32:
+                turns = 128
+            if ai.max_tokens <= 8192:
+                ai.max_tokens = 16384
         native_tools = bool(self.native_tools)
         if not self.native_tools_upgraded:
             # 2.0 起默认走原生 function calling；升级前的配置没有这个字段。
@@ -102,14 +120,15 @@ class Config:
             except OSError:
                 pass
         return Config(
-            ai=self.ai.normalized(),
+            ai=ai,
             project_root=root,
             last_project=self.last_project.strip(),
             auto_apply=bool(self.auto_apply),
             auto_build=bool(self.auto_build),
-            max_steps=normalize_max_steps(self.max_steps),
-            context_turns=max(2, min(200, turns)),
+            max_steps=normalize_max_steps(max_steps),
+            context_turns=max(2, min(600, turns)),
             context_turns_upgraded=True,
+            scale_upgraded=True,
             native_tools=native_tools,
             native_tools_upgraded=True,
             shortcut_offered=bool(self.shortcut_offered),

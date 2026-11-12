@@ -92,12 +92,26 @@ TOOL_PROTOCOL = """【工程工具协议】
 
 文件与工程：
 - list_files: {"tool":"list_files","path":".","depth":2}
+- list_files 分页: {"tool":"list_files","path":".","depth":2,"offset":300,"limit":300}  // offset 跳过前 N 条，limit 每页条数(1..1000)，返回 files/truncated/total
 - read_file: {"tool":"read_file","path":"相对路径"}  // 默认返回前 14000 字符
 - read_file 分段读: {"tool":"read_file","path":"相对路径","offset":14000,"max_chars":14000}
 - search_text: {"tool":"search_text","query":"关键字"}
 - edit_file 精确替换一处（推荐）: {"tool":"edit_file","path":"相对路径","old":"原文片段","new":"替换后的内容"}
 - write_file 新建或整体重写: {"tool":"write_file","path":"相对路径","content":"完整文件内容"}
 - pixel_art 生成像素纹理 PNG: {"tool":"pixel_art","path":"src/main/resources/assets/<modid>/textures/item/gem.png","palette":{".":"transparent","o":"#1b1b1f","a":"#7fd6ff"},"rows":["....","...."]}
+  // 可加 "scale":4（1-32 最近邻放大）与 "outline":"#222222"（给不透明像素描边）
+- texture_template 取内置 16x16 像素模板: {"tool":"texture_template","name":"sword"}
+  // 可用模板：sword / pickaxe / axe / shovel / hoe / ingot / gem / dust / stick / block / torch / bowl
+  // 返回 rows（字符点阵）、palette（调色板）与 note；换色后交给 pixel_art 生成 PNG
+- model_json 生成物品/方块模型 JSON: {"tool":"model_json","kind":"item","parent":"item/generated","textures":{"layer0":"<modid>:item/gem"}}
+  // kind: block / item；block 可传 elements / display 生成 3D 模型
+- blockstate_json 生成 blockstates JSON: {"tool":"blockstate_json","variants":{"":{"model":"<modid>:block/gem_block"}}}
+- lang_json 生成语言文件: {"tool":"lang_json","entries":{"item.<modid>.gem":"宝石"}}
+- recipe_json 生成配方 JSON: {"tool":"recipe_json","kind":"shaped","result":"<modid>:gem","pattern":[" g ","gmg"," g "],"key":{"g":{"item":"<modid>:gem_shard"},"m":{"item":"minecraft:diamond"}}}
+  // kind: shaped / shapeless / smelting / blasting / smoking / campfire_cooking / stonecutting / smithing_transform
+- loot_table_json 生成战利品表 JSON: {"tool":"loot_table_json","block":"<modid>:gem_block","silk_touch_self":true}
+- validate_resources 校验资源一致性（JSON 合法、纹理/模型引用、lang 键、PNG 尺寸）: {"tool":"validate_resources"}
+  // 每次新增资源后用一次；返回中文检查报告，逐条修复后重跑
 - scaffold_project 生成工程骨架（1.20.1 内置 Forge / Fabric / NeoForge；目标目录已有工程时需 overwrite=true）:
   {"tool":"scaffold_project","loader":"Fabric","mod_id":"examplemod","name":"Example Mod","package":"com.example.examplemod","dest":"D:/mods/examplemod"}
   // loader 可选 Forge / Fabric / NeoForge；Architectury 或其他 MC 版本没有内置骨架，按官方模板手写
@@ -238,7 +252,15 @@ def build_system_prompt(
     if kernel_text:
         parts.append(kernel_text)
     parts.append("【技能目录】\n" + skill_store.catalog_text())
-    relevant: list[str] = ["delivery-checklist", "client-server-split", "code-engineering"]
+    relevant: list[str] = [
+        "delivery-checklist",
+        "client-server-split",
+        "code-engineering",
+        "large-mod-playbook",
+        "mod-registry",
+        "mod-model-texture",
+        "mod-recipe-loot",
+    ]
     if project is not None:
         meta = project.meta
         loader = (meta.loader or "").lower()
@@ -259,7 +281,7 @@ def build_system_prompt(
         if (project.root / "src" / "main" / "resources").is_dir():
             relevant.append("datagen-assets")
     relevant.append("reference-research")
-    selected = skill_store.select_for(query, relevant, limit=6)
+    selected = skill_store.select_for(query, relevant, limit=12)
     loaded = []
     for skill_id in selected:
         skill = skill_store.get(skill_id)

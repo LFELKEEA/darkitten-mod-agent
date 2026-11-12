@@ -65,18 +65,43 @@ def unit_test_source(spec: ModSpec, feature: Feature, *, package: str | None = N
     return "\n".join(lines) + "\n"
 
 
+def _game_test_loader(spec: ModSpec) -> str:
+    lowered = (spec.loader or "").strip().lower().replace("neo forge", "neoforge")
+    if "fabric" in lowered:
+        return "fabric"
+    if "neoforge" in lowered:
+        return "neoforge"
+    if "forge" in lowered:
+        return "forge"
+    return "neoforge"
+
+
+def _game_test_imports(loader: str) -> list[str]:
+    if loader == "fabric":
+        return ["import net.fabricmc.fabric.api.gametest.v1.FabricGameTest;"]
+    if loader == "forge":
+        return [
+            "import net.minecraftforge.event.RegisterGameTestsEvent;",
+            "import net.minecraftforge.eventbus.api.SubscribeEvent;",
+        ]
+    return [
+        "import net.neoforged.neoforge.event.RegisterGameTestsEvent;",
+        "import net.neoforged.bus.api.SubscribeEvent;",
+    ]
+
+
 def game_test_source(spec: ModSpec, feature: Feature, *, package: str | None = None) -> str:
     package = package or spec.package
     class_name = _class_name(feature.id)
+    loader = _game_test_loader(spec)
     lines = [
         f"package {package};",
         "",
         "import net.minecraft.gametest.framework.GameTest;",
         "import net.minecraft.gametest.framework.GameTestHelper;",
-        "import net.neoforged.neoforge.event.RegisterGameTestsEvent;",
-        "import net.neoforged.bus.api.SubscribeEvent;",
+        *_game_test_imports(loader),
         "",
-        "public class " + class_name + "GameTest {",
+        "public class " + class_name + "GameTest" + (" implements FabricGameTest" if loader == "fabric" else "") + " {",
         "",
         "    @GameTest(template = \"minecraft:empty\")",
         "    public void scenario(GameTestHelper helper) {",
@@ -84,13 +109,16 @@ def game_test_source(spec: ModSpec, feature: Feature, *, package: str | None = N
         f"        // {feature.title}: 失败时用 helper.fail(...) 输出具体坐标",
         "        helper.succeed();",
         "    }",
-        "",
-        "    @SubscribeEvent",
-        "    public static void register(RegisterGameTestsEvent event) {",
-        f"        event.register({class_name}GameTest.class);",
-        "    }",
-        "}",
     ]
+    if loader != "fabric":
+        lines += [
+            "",
+            "    @SubscribeEvent",
+            "    public static void register(RegisterGameTestsEvent event) {",
+            f"        event.register({class_name}GameTest.class);",
+            "    }",
+        ]
+    lines.append("}")
     return "\n".join(lines) + "\n"
 
 

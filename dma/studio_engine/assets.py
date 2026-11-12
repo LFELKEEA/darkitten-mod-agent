@@ -301,10 +301,18 @@ def _recipe_body(node: dict[str, Any], modid: str, mc: str) -> dict[str, Any] | 
             break
     base_mat = base_mat or f"{modid}:core_block"
     if ntype in {"material"} and nid.endswith("ingot"):
+        shard = nid.replace("_ingot", "_shard")
+        if shard == nid:
+            # 防御：id 不带 _ingot 后缀时，从全量 id 表里找一个 *_shard 作为矿锭原料。
+            for other in node.get("_all_ids", []):
+                other_id = _path(other)
+                if other_id.endswith("_shard"):
+                    shard = other_id
+                    break
         return {
             "type": "minecraft:smelting",
             "category": "misc",
-            "ingredient": _ingredient(mc, f"{modid}:{nid.replace('_ingot', '_shard')}"),
+            "ingredient": _ingredient(mc, f"{modid}:{shard}"),
             "result": _result(mc, node["id"]),
             "experience": 0.7,
             "cookingtime": 200,
@@ -468,17 +476,15 @@ def generate_assets(project: Path, spec: dict[str, Any], mc: str,
     modid = spec["identity"]["modid"]
     palette = spec.get("palette", ["#888888", "#cccccc", "#444444"])
     res = project / "src" / "main" / "resources"
-    # Forge/NeoForge wrap an exploded mod directory in PathPackResources, which
-    # reads pack.mcmeta from disk. Without it Forge 1.20.1 logs "Missing
-    # metadata in pack mod:<id>" and every model lookup throws
-    # FileNotFoundException even though the JSON exists.
-    if loader in {"forge", "neoforge"}:
-        write_json(res / "pack.mcmeta", {
-            "pack": {
-                "description": f"{spec['identity']['name_en']} resources",
-                "pack_format": _pack_format(mc),
-            },
-        })
+    # 所有加载器都需要 pack.mcmeta。Forge/NeoForge 包装的 mod 目录在
+    # PathPackResources 里读它，缺了会报 "Missing metadata in pack mod:<id>"
+    # 并让每个模型查询抛 FileNotFoundException；Fabric 也需要它声明资源包。
+    write_json(res / "pack.mcmeta", {
+        "pack": {
+            "description": f"{spec['identity']['name_en']} resources",
+            "pack_format": _pack_format(mc),
+        },
+    })
     asset_root = res / "assets" / modid
     data_root = res / "data" / modid
     all_ids = [n["id"] for n in spec["content"]]
@@ -594,8 +600,11 @@ def generate_assets(project: Path, spec: dict[str, Any], mc: str,
                 },
             })
             write_json(asset_root / "models" / "block" / f"{nid}.json", {
-                "parent": "minecraft:block/block",
-                "textures": {"particle": f"{modid}:block/{nid}_still"},
+                "parent": "minecraft:block/cube_all",
+                "textures": {
+                    "all": f"{modid}:block/{nid}_still",
+                    "particle": f"{modid}:block/{nid}_still",
+                },
             })
             write_json(asset_root / "models" / "item" / f"{nid}_bucket.json", {
                 "parent": "minecraft:item/generated",
@@ -617,13 +626,19 @@ def generate_assets(project: Path, spec: dict[str, Any], mc: str,
 
     # Item group icon is represented by the first signature item.
 
-    # Tags: keep them minimal and version-aware.
+    # Tags: keep them minimal and version-aware. 农作物/装饰/轨道/竞技场/传送门框
+    # 不应用镐采挖；needs_iron_tool 只给矿物与机器，避免工具等级要求覆盖所有方块。
     tag_root = data_root / tag_dir(mc, "block")
-    mineable = sorted({_path(n["id"]) for n in spec["content"] if n["type"] in BLOCK_TYPES})
+    pickaxe_types = {t for t in BLOCK_TYPES if t not in {"decor", "crop", "rail", "arena", "portal_frame"}}
+    hard_types = {"ore", "storage_block", "machine", "energy"}
+    mineable = sorted({_path(n["id"]) for n in spec["content"] if n["type"] in pickaxe_types})
+    hard = sorted({_path(n["id"]) for n in spec["content"] if n["type"] in hard_types})
     if mineable:
         write_json(tag_root / "mineable" / "pickaxe.json", {"replace": False, "values": [f"{modid}:{x}" for x in mineable]})
-        write_json(tag_root / "needs_iron_tool.json", {"replace": False, "values": [f"{modid}:{x}" for x in mineable]})
-        generated["tags"] += 2
+        generated["tags"] += 1
+    if hard:
+        write_json(tag_root / "needs_iron_tool.json", {"replace": False, "values": [f"{modid}:{x}" for x in hard]})
+        generated["tags"] += 1
     item_tag_root = data_root / tag_dir(mc, "item")
     write_json(item_tag_root / "tools.json", {"replace": False, "values": [n["id"] for n in spec["content"] if n["type"] == "tool"]})
     generated["tags"] += 1

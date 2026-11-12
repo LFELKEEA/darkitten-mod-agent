@@ -142,8 +142,10 @@ def generate_item(path: Path, kind: str = "ingot", *, base: str = "#c9c9c9", siz
     else:
         draw.rectangle([4, 4, 11, 11], fill=_rgba(base, 255), outline=_rgba(dark, 255))
 
-    image.save(Path(path), format="PNG", optimize=True)
-    return Path(path)
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    image.save(target, format="PNG", optimize=True)
+    return target
 
 
 def validate(path: Path, *, expected_size: tuple[int, int] | None = None, opaque: bool = False,

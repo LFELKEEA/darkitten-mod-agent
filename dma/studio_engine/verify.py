@@ -33,7 +33,7 @@ IGNORE = [
     "can't keep up", "server tick", "preparing spawn area",
     # Debug lines are diagnostic, not failures. Forge logs benign messages
     # such as "Failed to load resource META-INF/jarjar/metadata.json".
-    "[debug]", "does not contain dependency information",
+    "[debug]", "does not contain dependency information", "jarjar",
 ]
 
 
@@ -178,7 +178,32 @@ def verify_server(project: Path, profile: VersionProfile, timeout: int = 600) ->
     return result
 
 
+def _has_gametests(project: Path) -> bool:
+    src = project / "src"
+    if not src.exists():
+        return False
+    for p in src.rglob("*.java"):
+        try:
+            text = p.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        if "@GameTest" in text or "GameTestHelper" in text:
+            return True
+    return False
+
+
 def verify_gametest(project: Path, profile: VersionProfile, timeout: int = 900) -> dict[str, Any]:
+    if not _has_gametests(project):
+        result = {
+            "ok": True,
+            "skipped": True,
+            "kind": "gametest",
+            "marker_seen": False,
+            "severe": False,
+            "reason": "工程中没有 GameTest 用例，跳过游戏测试。",
+        }
+        write_json(project / ".mcmod" / "verify-gametest.json", result)
+        return result
     result = _run_task_streaming(project, profile, "runGameTestServer", timeout=timeout,
                                  stop_marker="All required tests passed", stop_command="stop\n")
     ok = result["marker_seen"] and not result["severe"]

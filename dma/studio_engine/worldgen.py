@@ -47,7 +47,8 @@ def _key(mc: str) -> tuple[int, int, int]:
 
 
 def _supported(mc: str) -> bool:
-    return _key(mc) >= (1, 20, 0)
+    # 26.x 的数据包/维度格式尚未确认，只发 worldgen-manifest.json 说明。
+    return (1, 20, 0) <= _key(mc) < (26, 0, 0)
 
 
 def _is_26(mc: str) -> bool:
@@ -318,6 +319,21 @@ def _biome_json(spec: dict[str, Any], biome_node: dict[str, Any] | None,
     }
 
 
+def _dim_theme(dim: dict[str, Any]) -> str:
+    """从维度节点的 id/名称/mechanics 探测下界/末地主题,决定维度类型 JSON 的形状。"""
+    text = " ".join([
+        str(dim.get("id", "")),
+        str(dim.get("name_en", "")),
+        str(dim.get("name_zh", "")),
+        " ".join(str(m) for m in dim.get("mechanics", [])),
+    ]).lower()
+    if any(k in text for k in ("nether", "infernal", "下界", "地狱")):
+        return "nether"
+    if any(k in text for k in ("end", "void", "末地", "虚空")):
+        return "end"
+    return ""
+
+
 def _dimension_json(modid: str, dim_id: str, biome_id: str) -> dict[str, Any]:
     return {
         "type": f"{modid}:{dim_id}_type",
@@ -463,7 +479,8 @@ def generate_worldgen(project: Path, spec: dict[str, Any], mc: str,
         if linked is None and biome_records:
             linked = biome_records[min(index, len(biome_records) - 1)][0]
         dim_biomes[dim["id"]] = f"{modid}:{linked}"
-        write_json(type_root / f"{dim_path}_type.json", _dimension_type_json("", mc))
+        write_json(type_root / f"{dim_path}_type.json",
+                   _dimension_type_json(_dim_theme(dim), mc))
         write_json(dim_root / f"{dim_path}.json",
                    _dimension_json(modid, dim_path, f"{modid}:{linked}"))
         stats["dimensions"] += 1

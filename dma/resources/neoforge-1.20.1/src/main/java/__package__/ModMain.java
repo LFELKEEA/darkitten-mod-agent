@@ -13,6 +13,7 @@ public class {{class_name}} {
 
     public {{class_name}}(IEventBus modEventBus) {
         LOGGER.info("{} initialized", MOD_ID);
+        ModRegistries.register(modEventBus);
         MinecraftForge.EVENT_BUS.register(this);
     }
 }

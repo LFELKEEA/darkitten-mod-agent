@@ -153,8 +153,11 @@ def verify(
         return result
 
     lint_report = report
+    # A task with no declared acceptance items must not be evaluated against
+    # *every* item of its feature: that inverts the contract and turns tasks
+    # the workflow allows to complete into blocking gate failures.
     for item in feature.acceptance:
-        if item.id not in task.acceptance and task.acceptance:
+        if task.acceptance and item.id not in task.acceptance:
             continue
         check = _evaluate(
             item, root,

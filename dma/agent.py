@@ -15,6 +15,7 @@ from PySide6.QtCore import QObject, Signal
 
 from . import (
     ai,
+    arttools,
     connectors,
     mcdev,
     netclient,
@@ -88,8 +89,8 @@ INFO_PATH_RE = re.compile(
 MAX_TOOL_RESULT = 200_000
 MAX_FETCH_RESULT = 60_000
 MAX_STEP_RESULT = 300_000
-MAX_BUILD_RESULT = 24_000
-MAX_BUILD_SUCCESS = 4_000
+MAX_BUILD_RESULT = 96_000
+MAX_BUILD_SUCCESS = 16_000
 MAX_FENCE_FILES = 40
 # runServer / runClient 是常驻任务，Gradle 不会自己结束；放进 build_project
 # 只会一直等到超时，然后把正常的开发端杀掉。
@@ -110,7 +111,13 @@ def _build_task_error(task: str) -> str:
     )
 # 连续多久没有任何“有效进展”（写入文件或完成编译）就主动停下。
 # 网络请求有 netclient 硬超时、Gradle 有 watchdog，这个兜底针对模型空转。
-PROGRESS_TIMEOUT = 20 * 60
+PROGRESS_TIMEOUT = 45 * 60
+# 只读工具：纯阅读阶段不应被 PROGRESS_TIMEOUT 误杀，执行成功后刷新进展时间戳。
+READ_ONLY_TOOLS = {
+    "read_file", "list_files", "search_text", "search_knowledge",
+    "read_knowledge", "read_skill", "search_code", "fetch_url",
+}
+AUTO_BUILD_MAX = 5
 BUILD_TRIGGER_EXTS = {
     ".java", ".kt", ".kts", ".gradle", ".properties", ".json", ".json5",
     ".toml", ".xml", ".mcmeta", ".lang", ".yml", ".yaml", ".glsl", ".fsh",
@@ -367,8 +374,8 @@ def _looks_like_action_intent(text: str) -> bool:
     return bool(INTENT_MARKER_RE.search(tail))
 
 
-HISTORY_CHAR_BUDGET = 120_000
-MESSAGE_CHAR_BUDGET = 480_000
+HISTORY_CHAR_BUDGET = 600_000
+MESSAGE_CHAR_BUDGET = 2_000_000
 
 
 def _history_window(history: list[dict[str, str]], turns: int) -> list[dict[str, str]]:
@@ -641,10 +648,16 @@ def _depth_ok(path: Path, root: Path, depth: int) -> bool:
     return len(relative.parts) <= max(1, depth)
 
 
-def _list_files(root: Path, path: str, depth: int) -> str:
+def _list_files(
+    root: Path,
+    path: str,
+    depth: int,
+    offset: int = 0,
+    limit: int = 300,
+) -> dict[str, Any]:
     base = project_mod.safe_path(root, path or ".")
     if not base.is_dir():
-        return f"不是目录：{path}"
+        return {"files": [], "truncated": False, "total": 0, "error": f"不是目录：{path}"}
     rows: list[str] = []
     for current, dirs, files in os.walk(base):
         dirs[:] = sorted(d for d in dirs if d not in project_mod.SKIP_DIRS and not d.startswith("."))
@@ -653,9 +666,15 @@ def _list_files(root: Path, path: str, depth: int) -> str:
             if not _depth_ok(item, base, depth):
                 continue
             rows.append(item.relative_to(base).as_posix())
-            if len(rows) >= 300:
-                return "\n".join(rows) + "\n…（已截断）"
-    return "\n".join(rows) if rows else "（目录为空）"
+    total = len(rows)
+    offset = max(0, offset)
+    limit = max(1, min(int(limit), 1000))
+    page = rows[offset:offset + limit]
+    return {
+        "files": page,
+        "truncated": offset + limit < total,
+        "total": total,
+    }
 
 
 class AgentWorker(QObject):
@@ -898,7 +917,7 @@ class AgentWorker(QObject):
                         }
                     )
                     continue
-                if auto_builds < 2 and self._should_auto_build(run, applied_mark):
+                if auto_builds < AUTO_BUILD_MAX and self._should_auto_build(run, applied_mark):
                     auto_builds += 1
                     applied_mark = len(run.applied)
                     ok, report = self._auto_build()
@@ -909,7 +928,7 @@ class AgentWorker(QObject):
                         )
                         run.text = final_text
                         return run
-                    if auto_builds >= 2 or (
+                    if auto_builds >= AUTO_BUILD_MAX or (
                         self.kernel is not None and self.kernel.guard.should_stop()
                     ):
                         final_text = (
@@ -986,6 +1005,11 @@ class AgentWorker(QObject):
                     }
                 )
             _compact_messages(messages)
+            if self.kernel is not None and step % 12 == 0 and step < limit:
+                # 每 12 轮同步一次任务图进度，防止长任务里模型忘记当前应做的功能。
+                block = self.kernel.prompt_block()
+                if block:
+                    messages.append({"role": "user", "content": block})
 
         final_text = final_text or "已达到工具调用轮数上限。请继续发送消息，让我接着完成剩余部分。"
         run.text = self._finalize_text(final_text)
@@ -1315,6 +1339,7 @@ class AgentWorker(QObject):
         args = call.args
         allowed_without_project = {
             "read_skill",
+            "texture_template",
             "remember",
             "recall",
             "fetch_url",
@@ -1343,14 +1368,20 @@ class AgentWorker(QObject):
         }
         if self.project is None and name not in allowed_without_project:
             return "当前没有打开工程，无法执行文件操作。请先在界面创建或打开工程。"
+        failed = False
         try:
             if name == "list_files":
                 root = self.project.root
-                return _list_files(
+                result = _list_files(
                     root,
                     str(args.get("path") or "."),
                     _arg_int(args, "depth", 2),
+                    _arg_int(args, "offset", 0),
+                    _arg_int(args, "limit", 300),
                 )
+                if result.get("error"):
+                    return result["error"]
+                return json.dumps(result, ensure_ascii=False)
             if name == "read_file":
                 relative = str(args.get("path") or "").strip()
                 try:
@@ -1430,8 +1461,21 @@ class AgentWorker(QObject):
                 rows = args.get("rows")
                 if not isinstance(palette, dict) or not isinstance(rows, list):
                     return "pixel_art 需要 palette 对象和 rows 数组。"
+                scale = args.get("scale")
+                outline = args.get("outline")
+                scale_int = _arg_int(args, "scale", 1)
+                if scale is not None and not 1 <= scale_int <= 32:
+                    return "pixel_art 的 scale 必须在 1-32 之间。"
                 try:
-                    data, width, height = _encode_pixel_png(palette, rows)
+                    if scale is None and outline is None:
+                        data, width, height = _encode_pixel_png(palette, rows)
+                    else:
+                        data, width, height = arttools.pixel_png(
+                            palette,
+                            [str(row) for row in rows],
+                            scale=scale_int,
+                            outline=str(outline) if outline else None,
+                        )
                 except ValueError as exc:
                     return f"pixel_art 参数错误：{exc}"
                 try:
@@ -1454,6 +1498,92 @@ class AgentWorker(QObject):
                 run.applied = list(self.applied)
                 self.status.emit(f"已生成纹理 {relative}")
                 return f"已生成纹理：{relative}（{width}x{height}，{len(data)} 字节）"
+            if name == "texture_template":
+                want = str(args.get("name") or "").strip()
+                if args.get("list") or not want:
+                    names = ", ".join(arttools.TEMPLATE_NAMES)
+                    return (
+                        f"可用 16x16 模板：{names}。\n"
+                        "用法：texture_template name=sword 返回字符点阵（keys: rows/palette/note），"
+                        "配合 pixel_art 换色后生成 PNG。"
+                    )
+                try:
+                    template = arttools.template_rows(want)
+                except ValueError as exc:
+                    return f"texture_template 参数错误：{exc}"
+                return json.dumps(template, ensure_ascii=False, indent=2)[:MAX_TOOL_RESULT]
+            if name == "model_json":
+                try:
+                    text, warnings = arttools.model_json(
+                        kind=str(args.get("kind") or "").strip().lower(),
+                        parent=str(args.get("parent") or ""),
+                        textures=args.get("textures"),
+                        elements=args.get("elements"),
+                        display=args.get("display"),
+                    )
+                except ValueError as exc:
+                    return f"model_json 参数错误：{exc}"
+                prefix = "\n".join(f"警告：{item}" for item in warnings)
+                return (prefix + "\n" if prefix else "") + text[:MAX_TOOL_RESULT]
+            if name == "blockstate_json":
+                try:
+                    text, warnings = arttools.blockstate_json(
+                        variants=args.get("variants"), multipart=args.get("multipart")
+                    )
+                except ValueError as exc:
+                    return f"blockstate_json 参数错误：{exc}"
+                prefix = "\n".join(f"警告：{item}" for item in warnings)
+                return (prefix + "\n" if prefix else "") + text[:MAX_TOOL_RESULT]
+            if name == "lang_json":
+                entries = args.get("entries")
+                if not isinstance(entries, dict) or not entries:
+                    return "lang_json 需要 entries 对象（翻译键到文本）。"
+                try:
+                    text = arttools.lang_json(entries)
+                except ValueError as exc:
+                    return f"lang_json 参数错误：{exc}"
+                return text[:MAX_TOOL_RESULT]
+            if name == "recipe_json":
+                try:
+                    text, warnings = arttools.recipe_json(
+                        kind=str(args.get("kind") or "").strip().lower(),
+                        result=str(args.get("result") or ""),
+                        count=_arg_int(args, "count", 1),
+                        pattern=args.get("pattern"),
+                        key=args.get("key"),
+                        ingredients=args.get("ingredients"),
+                        ingredient=args.get("ingredient"),
+                        experience=args.get("experience"),
+                        cookingtime=args.get("cookingtime"),
+                        template=args.get("template"),
+                        base=args.get("base"),
+                        addition=args.get("addition"),
+                    )
+                except ValueError as exc:
+                    return f"recipe_json 参数错误：{exc}"
+                prefix = "\n".join(f"警告：{item}" for item in warnings)
+                return (prefix + "\n" if prefix else "") + text[:MAX_TOOL_RESULT]
+            if name == "loot_table_json":
+                try:
+                    text = arttools.loot_table_json(
+                        block=str(args.get("block") or ""),
+                        item=str(args.get("item") or ""),
+                        silk_touch_self=bool(args.get("silk_touch_self")),
+                        extra=args.get("extra"),
+                    )
+                except ValueError as exc:
+                    return f"loot_table_json 参数错误：{exc}"
+                return text[:MAX_TOOL_RESULT]
+            if name == "validate_resources":
+                root_arg = str(args.get("root") or "").strip()
+                if root_arg:
+                    target = project_mod.safe_path(self.project.root, root_arg)
+                else:
+                    target = self.project.root / "src" / "main" / "resources"
+                if not target.is_dir():
+                    return f"资源目录不存在：{target}"
+                report = arttools.validate_resources(target)
+                return report[:MAX_TOOL_RESULT]
             if name in {"edit_file", "replace_in_file", "apply_patch"}:
                 relative = str(args.get("path") or "").strip()
                 old = str(args.get("old") or args.get("find") or "")
@@ -1875,10 +2005,14 @@ class AgentWorker(QObject):
                 "screenshot_collect、offline_cache。"
             )
         except Exception as exc:
+            failed = True
             if self.cancelled:
                 # 工具在取消后被网络层/子进程提前打断，不能当作普通失败继续跑。
                 raise AgentError("已取消") from exc
             return f"工具执行失败：{exc}"
+        finally:
+            if not failed and name in READ_ONLY_TOOLS:
+                self._progress_at = time.monotonic()
 
     # ------------------------------------------------------------------
     def _execute_kernel(self, name: str, args: dict[str, Any]) -> str:
@@ -2268,6 +2402,7 @@ class AgentWorker(QObject):
                 join_port=join_port,
                 install_probe=bool(args.get("install_probe", True)),
             )
+            self._progress_at = time.monotonic()
             return json.dumps(result, ensure_ascii=False, indent=2)[:MAX_TOOL_RESULT]
         if name == "mcdev_stop":
             side = str(args.get("side") or "all").strip().lower()
@@ -2311,6 +2446,7 @@ class AgentWorker(QObject):
                     str(item.get("type")) == "assert" for item in result.get("steps") or []
                 )
                 self.kernel.record_runtime(bool(result.get("ok")) and has_assert)
+            self._progress_at = time.monotonic()
             return json.dumps(result, ensure_ascii=False, indent=2)[:MAX_TOOL_RESULT]
         if name == "mcdev_build":
             if self.kernel is not None:
@@ -2322,6 +2458,7 @@ class AgentWorker(QObject):
             head = "编译成功（退出码 0）。" if code == 0 else f"编译失败（退出码 {code}）。"
             if self.kernel is not None:
                 self.kernel.record_build(code == 0, output)
+            self._progress_at = time.monotonic()
             return f"{head}\n\n{tail}"[:MAX_TOOL_RESULT]
         if name == "mcdev_gametest":
             code, output = mcdev.gradle.gametest(
@@ -2335,6 +2472,7 @@ class AgentWorker(QObject):
             head = "GameTest 通过。" if code == 0 else f"GameTest 失败（退出码 {code}）。"
             if self.kernel is not None:
                 self.kernel.record_test(code == 0, summary)
+            self._progress_at = time.monotonic()
             return f"{head}\n{summary}\n\n{output[-MAX_BUILD_RESULT:]}"[:MAX_TOOL_RESULT]
 
         side = str(args.get("side") or "server").strip().lower()

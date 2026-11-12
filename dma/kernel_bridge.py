@@ -54,7 +54,9 @@ class KernelBridge:
         self.spec: ModSpec | None = None
         self.workflow: Workflow | None = None
         self.snapshots: SnapshotStore | None = None
-        self.guard = LoopGuard()
+        # 大模组一次编译经常带出多个错误，熔断阈值放宽：
+        # 同一处失败 5 次、累计 60 次失败才停止自动修复。
+        self.guard = LoopGuard(max_repeats=5, max_total=60)
         self.last_build_ok: bool | None = None
         self.last_build_output = ""
         self.last_test_ok: bool | None = None

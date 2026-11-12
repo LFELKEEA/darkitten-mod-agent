@@ -11,5 +11,6 @@ public class {{class_name}} implements ModInitializer {
     @Override
     public void onInitialize() {
         LOGGER.info("{} initialized", MOD_ID);
+        ModRegistries.register();
     }
 }

@@ -241,6 +241,12 @@ def detect_themes(idea: str) -> list[str]:
     return [k for _, k in scored[:2]]
 
 
+# epic 需要 ~64 个内容节点；单个主题只有 30~40 个。当构思只命中 1~2 个主题时，
+# 按内容量从大到小补足第五个主题为止（social/twilight 各约 12-15 节点），
+# 跨界桥会把这些主题与主主题连接起来，符合「接近完整模组」的承诺。
+EPIC_FILL_THEMES = ("social", "twilight", "tech", "magic", "dimension", "farming")
+
+
 def _theme_names(themes: list[str]) -> tuple[str, str, list[str]]:
     primary = THEMES[themes[0]]
     zh = primary["zh"]
@@ -462,6 +468,13 @@ def _expand(modid: str, theme: str, theme_zh: str, theme_en: str, scope: str, id
     themes = detect_themes(idea)
     if theme not in themes:
         themes.insert(0, theme)
+    if scope == "epic":
+        # epic 承诺 64 节点：单/双主题填不满，从兼容主题补足到 5 个主题。
+        for extra in EPIC_FILL_THEMES:
+            if len(themes) >= 5:
+                break
+            if extra not in themes:
+                themes.append(extra)
     # Every detected theme contributes its full archetype set. A Twilight
     # Forest + MCA style idea therefore gets both world/adventure and
     # NPC/social systems instead of one theme plus a single bridge block.
@@ -487,7 +500,7 @@ def _expand(modid: str, theme: str, theme_zh: str, theme_en: str, scope: str, id
             continue
         seen.add(n.id)
         unique.append(n)
-    if len(unique) > target:
+    if len(unique) > target and scope != "epic":
         # Keep all stage 1-2 nodes, trim the tail of stage 3-4.
         must = [n for n in unique if n.stage <= 2]
         rest = [n for n in unique if n.stage > 2]

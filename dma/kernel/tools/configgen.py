@@ -175,7 +175,7 @@ def screen_source(
         "        int y = 36;",
         "        int x = Math.max(10, this.width / 2 - 150);",
         "        for (Map.Entry<String, Object> entry : new ArrayList<>(this.values.entrySet())) {",
-        '            String key = "config.' + modid + '." + entry.getKey();',
+        f'            String key = "config.{modid}." + entry.getKey();',
         "            Component label = Component.translatable(key)",
         '                    .append(Component.literal(": " + entry.getValue()));',
         "            Button button = Button.builder(label, b -> this.toggle(entry))",

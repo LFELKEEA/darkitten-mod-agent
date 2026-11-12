@@ -161,7 +161,7 @@ def content_plan(spec: dict[str, Any]) -> ContentPlan:
             plan.fluids.append(node)
         elif ntype == "block" and nid.endswith("board"):
             plan.boards.append(node)
-        elif ntype in {"key", "item"} and ("key" in nid or "activator" in nid) and dims:
+        elif ntype in {"key", "item"} and "activator" in nid and dims:
             plan.keys.append(node)
     # A dimension always benefits from a reachable key, even if the spec only
     # generated a generic material. Use the signature artifact when available.
@@ -2203,7 +2203,7 @@ def write_sources(base: Path, ident: dict[str, Any], profile, loader: str) -> di
         content.mkdir(parents=True, exist_ok=True)
         write_text(content / "QuestBoardBlock.java", _quest_board_block(package, modid, profile.mc))
 
-    if plan.keys:
+    if plan.keys and plan.dimensions:
         content.mkdir(parents=True, exist_ok=True)
         dimension = _path(plan.dimensions[0]["id"])
         write_text(content / "RealmKeyItem.java", _realm_key_item(package, modid, dimension, profile.mc))

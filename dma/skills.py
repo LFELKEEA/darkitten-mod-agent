@@ -335,6 +335,22 @@ neoforge/      # NeoForge 入口与平台实现
 7. **入游戏**：blockstates / models/item 引用、渲染器注册、语言键。
 8. **验证**：物品栏、地面、第三人称、方块六面、透明与剔除。
 
+## Blockbench → JSON 导出规范
+- 方块导出勾选「Texture Scale 16」；不勾会把 UV 写成 0–1 浮点，游戏读错。
+- 元素盒的 `from`/`to` 保持整数或 .5/.25 小数，避免 15.9 这种导致缝隙。
+- 旋转用 pivot 定中心：在 Blockbench 里把 pivot 移到旋转轴再设 rotation，导出才是 `origin` + `axis` + `angle`。
+- 导出后检查：`textures` 键引用 `#0`；`particle` 键存在（掉落物粒子）；`cullface` 只在需要的面写；`display` 各姿势不空。
+- GeckoLib 实体导出用「Export → Blockbench Project / Geo」专用格式，不要用方块导出器导实体。
+
+## 旋转与 UV 坑（重点）
+- **angle 符号**：绕 Y 轴 `-45` 和 `45` 方向相反；Blockbench 预览与游戏渲染可能镜像，导出后以游戏实际为准，不要照搬预览。
+- **rescale**：`rescale: true` 让旋转后贴图随盒缩放；`false` 时贴图保持原像素尺寸，旋转的盒会被裁边。斜向元素（45° 旋转的杆/棱）务必开 `rescale`。
+- **UV 顺序**：每个面 `uv: [u1, v1, u2, v2]` 是左下角→右上角；写反（`[u2,v2,u1,v1]`）贴图镜像。
+- **UV 越界**：UV 坐标超过纹理尺寸（如 16×16 纹理写 `[0,0,20,20]`）会拉伸或报错；导出前在纹理面板确认每个面都在画布内。
+- **共面 z-fighting**：两个盒贴在同一平面会闪烁；错开 0.01 或合并成一个盒。
+- **cullface 漏写/多写**：透明方块漏 `cullface` 会看到内面；实心方块多写会让相邻面被剔除露缝。
+- **方块纹理连续**：需要四方连续的方块（草、矿石、地板），上下左右纹理边缘颜色一致，否则方块并排有明显接缝。
+
 ## Java 模型 JSON
 - `textures`：`{"0":"modid:block/name","particle":"modid:block/name"}`。
 - `elements`：`from` / `to` 为 [x,y,z]，范围 0–16；可带 `rotation {origin, axis, angle, rescale}`。
@@ -380,7 +396,36 @@ neoforge/      # NeoForge 入口与平台实现
 - 16×16 用于物品/方块；32×32 用于精细图标；GUI 建议 256×256。
 - 动画纹理竖向排列帧，旁边写 `.png.mcmeta`：`{"animation":{"frametime":2}}`。
 
-## 像素画规则
+## 16×16 纹理绘制技巧
+- **先画形状后上色**：先用 1–2 个色块定主体轮廓（占 10×10 以上），再分层上色、描边、高光。
+- **外轮廓**：用比主体深一档的同色相描 1px 边，不要用纯黑 `#000`（会脏、不自然）。
+- **光源左上**：高光放左上/上侧 1px，阴影放右下/下侧 1px；高光用比基色亮 2–3 档的颜色。
+- **像素对齐**：斜线用 1:1 / 2:1 / 2:2 的阶梯，不要用抗锯齿半透明过渡；保持硬边。
+- **对称**：左右对称的物品先画一半再镜像，保证轮廓工整。
+- **主体够大**：物品主体至少 12×12，否则在地面/手中看不清。
+
+## 调色板
+- 先定 3–5 个主色（基色 + 亮部 + 暗部 + 描边 + 点缀色），再各加 1 个高光/阴影档；不要超过 20 色。
+- 明暗用**同色相、不同明度**（HSL 调 L），不要只调 RGB 三通道；饱和度随明度一起微调更自然。
+- 金属/宝石：亮部更亮、暗部更深、加 1 个纯白高光点；木头/布料：明暗对比低，柔和过渡。
+- 冷色做阴影、暖色做高光更通透（如蓝色物体阴影偏紫、高光偏青白）。
+- 透明区域用 `.`，不要在透明区放半透明色（除非版本支持 translucent）。
+
+## 体积感
+- **两明一暗**：主体最少「基色 + 1 亮 + 1 暗」三层，才有立体感；只有基色就是平片。
+- **渐变阶梯**：从亮到暗 3–4 阶，每阶 1px，做斜面/球面体积。
+- **轮廓转折**：在边缘内侧加一圈暗色，中心加亮色，做「圆润」感（如宝石、药水）。
+- **投影**：地面物品可在地面纹理上画 1px 暗影，增加落地感。
+- 参考：先看原版同类物品（如钻石、金锭）的明暗分布，再套用自己的配色。
+
+## 动画帧
+- 动画纹理竖向排列帧：`png.mcmeta` 写 `{"animation":{"frametime":2}}`；`frametime` 是每帧 tick（20 tick=1 秒）。
+- 每帧尺寸一致，帧之间只改「动的部分」（火焰、闪光、呼吸），静态部分复用。
+- 火焰/水：3–8 帧循环；旋转动画用 `{"animation":{"interpolate":true}}`（平滑插值）或逐帧画旋转。
+- 帧顺序从上到下；`frames` 数组可指定播放顺序和每帧时长（`{"frames":[{"index":0,"time":4},1,2]}`）。
+- 画帧时先画第一帧，复制后微调像素，不要每帧重画。
+
+## 像素画规则（总则）
 - 先用 3–5 个主色定调，再加 1–2 个高光/阴影；不要用纯黑描边，用深色同色相。
 - 光源左上；高光 1px、阴影 1px；外轮廓闭合。
 - 透明区域用 `.`；不要抗锯齿，保持硬边。
@@ -637,6 +682,509 @@ neoforge/      # NeoForge 入口与平台实现
 """,
     },
     {
+        "id": "large-mod-playbook",
+        "name": "大模组工程方法学",
+        "description": "大模组工程方法学：目录组织、注册中心、渐进构建与里程碑计划，面向 100+ 文件、跨维度/世界生成/实体/进度的大型模组。",
+        "body": """# 大模组工程方法学
+
+## 适用
+暮色森林级别：100+ 文件，跨维度、世界生成、实体、进度、配方联动、多方块结构、Boss 战、科技树。不是“加几个物品”，而是系统工程。
+
+## 里程碑（先骨架后血肉）
+1. **骨架跑通**：工程能编译、能启动、入口/注册中心/包结构成型，哪怕只有 1 个占位物品。此阶段只验证“能跑”。
+2. **注册管线**：所有 DeferredRegister / 注册中心就位，物品/方块/实体/方块实体/附魔/药水/标签页骨架齐全，空实现也能编译。
+3. **内容填充**：按“一域一域”推进——先物品→再方块→再实体→再世界生成→再进度→再配方联动。每域独立编译、独立进游戏验证。
+4. **配方联动**：最后把内容串起来——合成树、掉落、进度触发、JEI、战利品、成就引导。没有内容前不要提前写联动。
+
+## 目录组织（分域，不按类型平铺）
+```
+<package>/
+  core/        # ModMain、常量、Config、注册中心聚合
+  registry/    # 每个注册表的 DeferredRegister 与注册入口
+  item/        # 物品类 + 子域（armor、tool、food、scroll）
+  block/       # 方块类、方块实体、行为
+  entity/      # 实体类、AI、渲染器、spawn egg
+  worldgen/    # feature、placement、dimension、biome、structure
+  recipe/      # 自定义配方类型、序列化器
+  loot/        # 战利品函数/条件扩展
+  advancement/ # 进度触发器与条件
+  network/     # 网络包
+  client/      # 渲染、GUI、HUD、粒子（永远只在客户端加载）
+  compat/      # 与其他模组/API 的兼容层
+```
+- 包按“域”分，不按“Item/Block/Entity 全挤一个包”。一个域一个包，域内再分子包。
+- 注册名统一命名 `modid:domain_name`，资源路径与注册名一一对应。
+
+## 注册中心模式
+- 每个域一个 `ModItems` / `ModBlocks` / `ModEntities` 等注册类，用 `DeferredRegister`（Forge/NeoForge）或 `Registry.register`（Fabric）集中注册，构造器只调用这些注册类。
+- 常量化所有注册名/资源位置（`ResourceLocation`），禁止到处手写字符串字面量。
+- 颜色/特性/配方/掉落/进度全部绑定到注册名，不靠硬编码下标索引。
+
+## 跨域依赖
+- 明确依赖方向：item/block → core/registry → 无；entity → item(掉落)/block；recipe → item/block；advancement → 一切；client → 一切但只读。
+- 不要让 item 直接 import entity 或 client；需要联动时通过注册名/事件，不通过类引用。
+
+## 渐进验证
+- 每完成一个域就 `./gradlew build`（或 `mcdev_build`），能启动就启动看一遍。
+- 用一个“内容清单”（registry id → 文件路径 → 状态）跟踪 100+ 文件的完成度，不要靠记忆。
+- 世界生成、实体 AI、网络、进度触发、跨维度传送这些高风险域，逐项标【⚠️人工复核】并给游戏内验证步骤。
+
+## 红线
+- 不一次性生成 50 个文件再编译；每 5–10 个文件编译一次。
+- 先跑通骨架再堆内容；没有注册中心就写实体/世界生成必乱。
+- 客户端类绝不进公共包（见 client-server-split）。
+""",
+    },
+    {
+        "id": "mod-registry",
+        "name": "注册中心模式",
+        "description": "注册中心模式：DeferredRegister / RegisterEvent 的 Forge/Fabric 双写法，物品/方块/实体/附魔/药水/创造标签页全注册表清单。",
+        "body": """# 注册中心模式
+
+## 目标
+所有内容（物品/方块/实体/方块实体/附魔/药水/创造标签页/菜单/声音/粒子/配方类型/战利品/维度/特征）通过统一注册中心注册，注册名与资源路径一一对应，禁止散落各处手写注册。
+
+## Forge / NeoForge：DeferredRegister
+```java
+public static final DeferredRegister<Item> ITEMS = DeferredRegister.create(ForgeRegistries.ITEMS, MODID);
+public static final RegistryObject<Item> EXAMPLE = ITEMS.register("example", () -> new Item(new Item.Properties()));
+// @Mod 构造器里：ITEMS.register(modEventBus);
+```
+- 每个注册表一个 `DeferredRegister`，字段用 `public static final`，`RegistryObject<T>` 暴露引用。
+- 按注册表类型取：`ForgeRegistries.BLOCKS / BLOCK_ENTITY_TYPES / ENTITY_TYPES / MOB_EFFECTS / POTIONS / CREATIVE_MODE_TABS / MENU_TYPES / SOUND_EVENTS / PARTICLE_TYPES / RECIPE_TYPES / LOOT_CONDITION_TYPES / LOOT_FUNCTION_TYPES / FEATURES / ...`。
+- 在 `@Mod` 构造器里把每个 DeferredRegister 挂到 `modEventBus`；不要在主类里 new 内容对象。
+- 需要额外处理（方块物品绑定、附魔合成、实体属性）用 `bus.addListener(...)` 或 `DeferredRegister` 的 `register` 回调，不要塞进构造器。
+
+## Fabric：Registry.register
+```java
+public static final Item EXAMPLE = Registry.register(Registries.ITEM,
+    new Identifier(MODID, "example"), new Item(new Item.Settings()));
+```
+- 在 `ModInitializer.onInitialize()` 里注册；用 `Registries.ITEM / BLOCK / ENTITY_TYPE / ENCHANTMENT / STATUS_EFFECT / ...`。
+- 1.21+ 部分注册改用 `Registry.register(RegistryKey, ...)`，先核对当前 Yarn 映射。
+
+## 全注册表清单
+| 内容 | Forge 注册表 | Fabric 注册表 |
+| --- | --- | --- |
+| 物品 | `ForgeRegistries.ITEMS` | `Registries.ITEM` |
+| 方块 | `ForgeRegistries.BLOCKS` | `Registries.BLOCK` |
+| 方块实体 | `ForgeRegistries.BLOCK_ENTITY_TYPES` | `Registries.BLOCK_ENTITY_TYPE` |
+| 实体 | `ForgeRegistries.ENTITY_TYPES` | `Registries.ENTITY_TYPE` |
+| 附魔 | `ForgeRegistries.ENCHANTMENTS` | `Registries.ENCHANTMENT` |
+| 药水效果 | `ForgeRegistries.MOB_EFFECTS` | `Registries.STATUS_EFFECT` |
+| 药水 | `ForgeRegistries.POTIONS` | `Registries.POTION` |
+| 创造标签页 | `ForgeRegistries.CREATIVE_MODE_TABS` | `Registries.ITEM_GROUP` |
+| 菜单类型 | `ForgeRegistries.MENU_TYPES` | `Registries.SCREEN_HANDLER` |
+| 声音事件 | `ForgeRegistries.SOUND_EVENTS` | `Registries.SOUND_EVENT` |
+| 粒子类型 | `ForgeRegistries.PARTICLE_TYPES` | `Registries.PARTICLE_TYPE` |
+| 配方类型 | `ForgeRegistries.RECIPE_TYPES` | `Registries.RECIPE_TYPE` |
+| 战利品条件/函数 | `ForgeRegistries.LOOT_CONDITION_TYPES` / `LOOT_FUNCTION_TYPES` | `Registries.LOOT_CONDITION_TYPE` / `LOOT_FUNCTION_TYPE` |
+| 维度/特征/生物群系 | 数据包 JSON + `Registries.*` | 数据包 JSON + `Registries.*` |
+
+## 注册顺序与时机
+- 内容对象创建要早、副作用（方块掉落、实体属性、附魔合成）要晚、游戏内事件最晚。
+- 方块物品：方块注册后，物品注册时 `new BlockItem(block, props)` 引用方块对象。
+- 附魔、药水等带参数的注册，先注册“类型”，再在 `FMLCommonSetupEvent` / `onInitialize` 后补参数。
+- 不要用“注册表 id 数组 + for 循环下标”的脆弱方式映射内容；用常量引用。
+
+## 资源绑定
+- 每个注册名都有 `models/`、`textures/`、`lang/`、`blockstates/`（方块）、`spawn_eggs`/渲染器（实体）、`sounds.json`（声音）对应项，路径用同一 `modid:name`。
+- 注册名只用小写 + 下划线，不用中文、空格、大写。
+
+## 检查
+- DeferredRegister 是否都挂到正确总线；`RegistryObject` 是否在注册前被取值（会 NPE/崩溃）。
+- Fabric 是否都跑在 `onInitialize` 时机；专用服务端是否加载了客户端注册（如创造标签页图标渲染）。
+""",
+    },
+    {
+        "id": "mod-model-texture",
+        "name": "物品方块实体模型规范",
+        "description": "物品/方块/实体 JSON 模型规范：parents、display、elements、rotations、blockstates、cuboid UV，16/32 像素纹理与 Blockbench 导出。",
+        "body": """# 物品 / 方块 / 实体模型与纹理规范
+
+## 模型类型速查
+- **物品模型**：`assets/<modid>/models/item/<id>.json`，扁平图标用 `parent: "item/generated"` + `layer0`；手持 3D 用 `parent` + `display` + `elements`。
+- **方块模型**：`assets/<modid>/models/block/<id>.json`（16×16×16 元素盒）+ `assets/<modid>/blockstates/<id>.json`（variants / multipart）。
+- **实体模型**：Java `EntityModel<T>` + `ModelPart`（原版）或 GeckoLib `.geo.json`。
+
+## 物品模型 JSON 要点
+```json
+{
+  "parent": "item/generated",
+  "textures": { "layer0": "modid:item/example" }
+}
+```
+- `parent` 可继承原版（`item/generated`、`item/handheld`、`block/cube_all` 等）或自己的父模型，省重复。
+- `display` 键：`gui`、`ground`、`fixed`、`thirdperson_righthand`、`thirdperson_lefthand`、`firstperson_righthand`、`firstperson_lefthand`；`rotation`/`translation`/`scale` 控制手持姿势。
+- 手持模型不要超出 16×16×16 太多，否则第三人称/第一人称穿模。
+
+## 方块模型 JSON 要点
+```json
+{
+  "parent": "block/cube_all",
+  "textures": { "all": "modid:block/example" }
+}
+```
+- `elements`：`from`/`to` 为 `[x,y,z]`（0–16），`faces` 每面 `uv: [u1,v1,u2,v2]` + `texture: "#0"`，按需 `cullface`、`rotation`、`tintindex`。
+- `rotation`：`{origin: [x,y,z], axis: "x"|"y"|"z", angle: ±22.5|±45, rescale: bool}`；`rescale` 让旋转后贴图随盒缩放而不是被裁。
+- 透明/半透明方块：`parent` 选 `cutout` 或 `translucent`（按版本），否则透明区域显示黑块。
+- 光照/粒子：`textures` 里加 `"particle"` 键指定粒子贴图，避免掉落物粒子全黑。
+
+## blockstates：variants 与 multipart
+- **variants**：一个属性组合一个模型，如 `{"variants": {"facing=north": {"model": "modid:block/x"}, "facing=south": {"model": "modid:block/x", "y": 180}}}`；属性名必须与 BlockState 属性完全一致。
+- **multipart**：按条件叠加多个部分（栅栏、红石、墙），`when` 条件 + `apply` 模型；适合有多个独立可开关部分的方块。
+- 旋转用 `y`（绕 Y 轴 0/90/180/270）和 `x`；`uvlock: true` 让顶底面纹理随旋转锁定，避免朝向纹理乱转。
+
+## 实体模型
+- 原版：`ModelPart` 树 + `addBox(...)` 建盒，`setPos` 定枢轴，动画改 `setRotation`/`visible`；渲染器经 `RegisterRenderers`（Forge）/`EntityRenderers`（Fabric）注册，`ModelLayer` 定义层。
+- GeckoLib：`.geo.json`（骨骼）、`animation.json`（动画）、`GeoModel`/`GeoEntityRenderer`；动画控制器只放客户端。
+
+## 纹理规范
+- **16×16**：物品、方块、简单实体，一像素一格；**32×32**：精细图标、GUI 元素、较大实体。
+- 必须带透明通道（RGBA PNG）；物品主体占满 12×12 以上，地面/手中看得清。
+- 方块纹理要四方连续，边缘颜色一致避免接缝；上下左右纹理编号对齐模型 `faces` 的 UV。
+- 实体纹理按 UV 布局展开，区域不重叠、不越界、不拉伸；用 Blockbench 画布看 UV 对应关系。
+
+## Blockbench 工作流
+1. 新建 Java Block/Item 或 Modded Entity；方块单位设为 16，画布 UV 用 0–16 像素坐标（不是 0–1）。
+2. 建元素盒拼轮廓（白模），再用 `pivot` 定旋转中心。
+3. 分配 UV：每个面指定纹理区域，确保贴图分区对应。
+4. 画贴图，或导出 UV 模板交给 `pixel_art` 手绘。
+5. 导出：方块/物品选「Minecraft Java Block/Item」；实体选 GeckoLib 或原版格式。
+6. **导出后必须人工核对 JSON**：Blockbench 偶发字段（`rotation` 的 angle、uv 顺序、`rescale`）与游戏实际读取不一致。
+
+## 手写 JSON 要点（不用 Blockbench 时）
+- `elements` 从 `from`（左下后角）到 `to`（右上前角），坐标 0–16 整数或 .5/.25 小数。
+- 每个面 UV 顺序是 `[u1, v1, u2, v2]`（左下角到右上角），`texture` 引用 `#` 编号键。
+- `cullface` 值：`down/up/north/south/west/east`，只有面向该方向才渲染，避免内面穿帮。
+- 不要混用 1.21 的 `item_model` 语法和 1.20.1 的 `layer0`；以目标 MC 版本为准。
+
+## 质量检查
+- 无 z-fighting（共面）、无 UV 越界、纹理不拉伸、透明剔除正确。
+- 物品 `display` 实际进游戏看手持角度；方块六面、掉落物、第三人称都验证一遍。
+- 完整建模流程见 asset-3d-modeling。
+""",
+    },
+    {
+        "id": "mod-worldgen",
+        "name": "世界生成",
+        "description": "世界生成：configured/placed feature、biome modifier、维度 JSON、datapack 结构与 noise settings，Forge BiomeModifier 与 Fabric biome API。",
+        "body": """# 世界生成
+
+## 层次（从数据到游戏）
+`biome → placed feature → configured feature → feature（生成逻辑）`，再加 `noise settings`（维度地形）、`dimension`（维度 JSON）、`structure`（数据包结构）。逐层是“什么生成在哪儿、多大密度、什么形状”。
+
+## Feature 三层（1.20.1 数据驱动）
+- **ConfiguredFeature**：`data/<ns>/worldgen/configured_feature/<name>.json`，指定 `type`（如 `minecraft:ore`、`minecraft:tree`、自定义 feature 类）+ `config`（矿的 `targets`、树的结构）。
+- **PlacedFeature**：`data/<ns>/worldgen/placed_feature/<name>.json`，`feature` 引用 configured，`placement` 数组指定 `count`/`rarity`/`height` 过滤器等。
+- 自定义 `Feature` 类：`Feature<FC>` + `Codec`，在 `DeferredRegister`（`ForgeRegistries.FEATURES`）注册，JSON 里 `type: "modid:name"` 引用。
+
+## 1.20.1 Forge：BiomeModifier
+- 用 `BiomeModifier` 把 placed feature 加进生物群系，而不是直接改 biome JSON。
+- 常用 `ForgeBiomeModifiers.AddFeaturesBiomeModifier`，JSON 在 `data/<ns>/forge/biome_modifier/<name>.json`：
+```json
+{
+  "type": "forge:add_features",
+  "biomes": "#minecraft:is_overworld",
+  "features": "modid:ore_example",
+  "step": "underground_ores"
+}
+```
+- `step` 决定生成阶段（`raw_generation`/`underground_ores`/`vegetal_decoration`/`top_layer_modification` 等），错阶段会不生成。
+- `biomes` 用 biome 标签（`#`）或单个 biome id；想加进所有生物群系用 `#is_overworld` 这类原版标签。
+
+## Fabric：Biome Modification API
+- 用 `fabric-biome-api-v1`，`BiomeModifications.addFeature(BiomeSelectors.foundInOverworld(), GenerationStep.Feature.UNDERGROUND_ORES, registryKey)`。
+- `BiomeSelectors`：`foundInOverworld()`/`foundInTheNether()`/`tag(...)`/`includeByKey(...)`。
+- `GenerationStep.Feature.*` 对应 Forge 的 `step`。
+- 需在 `fabric.mod.json` 声明 `fabric-biome-api-v1` 依赖，并在 entrypoint 里执行。
+
+## 维度 JSON
+- `data/<ns>/dimension/<name>.json`：`type`（`minecraft:overworld` 或自定义 `DimensionType`）、`generator`（`type: minecraft:noise` + `settings` 引用 noise settings + `biome_source`）。
+- 自定义维度先要有 `DimensionType`（JSON）与 `noise_settings`，再在 JSON 里引用；跨维度传送用 `ServerPlayer.changeDimension` / `teleportTo`，标【⚠️人工复核】。
+
+## Noise settings（地形）
+- `data/<ns>/worldgen/noise_settings/<name>.json`：`noise_router`（各层噪声）、`sea_level`、`default_block`/`default_fluid`、`surface_rule` 等。
+- 改地形是高风险操作，逐字段核对原版样例，不凭记忆写 `noise_router`；改错直接崩地形或白屏。
+
+## Structure（数据包结构）
+- 结构有 `.nbt`（用结构方块导出）+ `structure`/`structure_set` JSON（`data/<ns>/worldgen/structure/` 与 `structure_set/`）+ 模板池（`template_pool`，用于 jigsaw）。
+- 结构方块或 `/place` 导出 `.nbt`，放 `data/<ns>/structures/<name>.nbt`。
+- `structure` JSON 的 `biomes`、`step`、`spawn_overrides`、`type`（`jigsaw` 需要 `start_pool`）都要配全；jigsaw 结构最容易漏 `template_pool`。
+
+## 验证
+- 用 `/locate structure <ns>:<name>`、`/locate biome` 验证存在；`/place feature <ns>:<name>` 直接测试 feature。
+- 新世界才生成，旧区块不刷新；测 worldgen 要开新世界或删区块。
+- 生成密度、矿石埋深、生物群系过滤都要在游戏里实际看，不能只看 JSON 没报错。
+- 维度、地形、跨维度传送、生物群系修改一律标【⚠️人工复核】。
+""",
+    },
+    {
+        "id": "mod-entity",
+        "name": "实体开发",
+        "description": "实体开发：EntityType+Entity 类、属性、渲染器/模型层、AI goal、生成蛋与战利品，Forge/Fabric 差异。",
+        "body": """# 实体开发
+
+## 组成
+`EntityType` + `Entity` 子类 + 注册 + 属性（Attribute）+ 渲染器（Renderer/ModelLayer）+ AI（Goal）+ 生成蛋 + 战利品表。缺一样实体都“看不见/不会动/不掉东西”。
+
+## 注册与 Entity 类
+- Forge：`DeferredRegister.create(ForgeRegistries.ENTITY_TYPES, MODID)`，`EntityType.Builder.of(MyEntity::new, MobCategory.CREATURE).sized(w, h).build("modid:example")`。
+- Fabric：`Registry.register(Registries.ENTITY_TYPE, id, FabricEntityTypeBuilder.create(SpawnGroup.CREATURE, MyEntity::new).dimensions(EntityDimensions.fixed(w, h)).build())`。
+- `Entity` 子类构造器传 `EntityType` 和 `Level`；生物用 `Mob`/`PathfinderMob`，飞行用 `FlyingMob`，远程用 `Mob` + 投射物。
+- `registerAttributes()`（Forge 生物）/ `createMobAttributes()`（Fabric）设置基础属性。
+
+## 属性
+- 生命 `MAX_HEALTH`、移动 `MOVEMENT_SPEED`、攻击 `ATTACK_DAMAGE`、护甲 `ARMOR`、跟随距离 `FOLLOW_RANGE`、击退抗性 `KNOCKBACK_RESISTANCE`。
+- 用 `AttributeSupplier.Builder`；Forge 在 `EntityAttributeCreationEvent` 注册，Fabric 在 `DefaultAttributeRegistry.register`。
+
+## 渲染器与模型层
+- Forge：`EntityRenderers.register(type, MyRenderer::new)` 在 `FMLClientSetupEvent`；`ModelLayer` 用 `LayerDefinition.create(...)` 注册。
+- Fabric：`EntityRendererRegistry.register(type, MyRenderer::new)` 在 `ClientModInitializer`；模型层 `EntityModelLayerRegistry.registerModelLayer(...)`。
+- `Renderer` 指定纹理（`getTextureLocation`）、模型、阴影大小；缩放用 `scale`。
+- 模型、纹理、渲染器、模型层四者注册名/路径必须一致，否则白模或透明。
+
+## AI Goal
+- 在 `registerGoals()` 里 `goalSelector.addGoal(priority, new Goal())`，优先级数字越小越先执行（0/1/2…）。
+- 常用目标：`FloatGoal`、`MeleeAttackGoal`、`WaterAvoidingRandomStrollGoal`、`LookAtPlayerGoal`、`RandomLookAroundGoal`、`FollowOwnerGoal`、`PanicGoal`、`TemptGoal`。
+- 自定义 AI 继承 `Goal`，实现 `canUse()`、`canContinueToUse()`、`tick()`；目标选择器（`targetSelector`）用 `NearestAttackableTargetGoal` 等。
+- AI 只跑服务端；客户端只消费渲染，不要用 AI 驱动客户端表现。
+
+## 生成蛋与自然生成
+- 生成蛋：Forge `new SpawnEggItem(type, c1, c2, props)`，Fabric `new SpawnEggItem(type, c1, c2, settings)`，颜色给 16 进制。
+- 自然生成：用生物群系修改（Forge `AddSpawnsBiomeModifier` / Fabric `BiomeModifications.addSpawn`），配置 `type`、`weight`、`minCount`/`maxCount`。
+- 只加实体不加 spawn 配置，生物不会自然出现。
+
+## 战利品
+- `data/<ns>/loot_tables/entities/<entity_id>.json`；实体掉落由 `getLootTable` 返回表 id 或重写 `dropCustomDeathLoot` 自定义掉落。
+- 避免重复掉落：原版掉落 + 自定义掉落都触发会掉两份。
+
+## Forge / Fabric 差异速查
+| 事项 | Forge 1.20.1 | Fabric |
+| --- | --- | --- |
+| 实体类型 | `EntityType.Builder` | `FabricEntityTypeBuilder` |
+| 属性注册 | `EntityAttributeCreationEvent` | `DefaultAttributeRegistry` |
+| 渲染器 | `EntityRenderers.register` | `EntityRendererRegistry.register` |
+| 生成蛋 | `new SpawnEggItem(type, c1, c2, props)` | `new SpawnEggItem(type, c1, c2, settings)` |
+| 世界/玩家 | `Level` / `Player` / `ServerPlayer` | `World` / `PlayerEntity` / `ServerPlayerEntity` |
+
+## 检查
+- 客户端类（渲染器/模型）是否只进 client 入口；专用服务端能否启动。
+- 碰撞箱、眼睛高度、骑乘位置、命名（`/summon` 用注册名）是否一致。
+- 实体 AI、远程攻击投射物、生成蛋颜色、自然生成、跨版本映射标【⚠️人工复核】。
+""",
+    },
+    {
+        "id": "mod-recipe-loot",
+        "name": "配方与战利品表",
+        "description": "配方与战利品表：有序/无序/熔炼/锻造台/切石机配方 JSON 与战利品池/条件/函数全规范，自定义配方类型。",
+        "body": """# 配方与战利品表
+
+## 配方 JSON（1.20.1 格式）
+目录 `data/<ns>/recipes/<name>.json`。字段 `type`、`result`（1.20.1 用 `{"item": "...", "count": n}`，1.20.5+ 改 `{"id": ...}`）、`ingredients`/`key`。
+
+### 有序（shaped）
+```json
+{
+  "type": "minecraft:crafting_shaped",
+  "pattern": ["AAA", "B B", "AAA"],
+  "key": { "A": {"item": "minecraft:iron_ingot"}, "B": {"item": "minecraft:stick"} },
+  "result": {"item": "modid:example", "count": 1}
+}
+```
+- `pattern` 每行等长（空位用空格），最多 3×3；`key` 里字符→材料映射。
+- 支持 tag 材料：`"A": {"tag": "minecraft:planks"}`，比写死 item 更稳。
+
+### 无序（shapeless）
+```json
+{
+  "type": "minecraft:crafting_shapeless",
+  "ingredients": [{"item": "minecraft:diamond"}, {"tag": "minecraft:planks"}],
+  "result": {"item": "modid:example", "count": 2}
+}
+```
+- 无序不关心位置，`ingredients` 平铺数组。
+
+### 熔炼 / 烟熏 / 高炉
+```json
+{
+  "type": "minecraft:smelting",
+  "ingredient": {"item": "modid:ore"},
+  "result": "modid:ingot",
+  "experience": 0.7,
+  "cookingtime": 200
+}
+```
+- `type` 用 `smelting` / `blasting` / `smoking` / `campfire_cooking`；`result` 是单 item 字符串（1.20.1），`cookingtime` 单位 tick（200=10秒）。
+
+### 锻造台（smithing）
+```json
+{
+  "type": "minecraft:smithing_transform",
+  "template": {"item": "minecraft:netherite_upgrade_smithing_template"},
+  "base": {"item": "minecraft:diamond_sword"},
+  "addition": {"item": "minecraft:netherite_ingot"},
+  "result": {"item": "minecraft:netherite_sword"}
+}
+```
+- 1.20+ 分 `smithing_transform`（有模板）和 `smithing_trim`（盔甲纹饰）；1.19 及以前是 `smithing`（无 template 字段）。
+
+### 切石机（stonecutting）
+```json
+{
+  "type": "minecraft:stonecutting",
+  "ingredient": {"item": "minecraft:stone"},
+  "result": "modid:slab",
+  "count": 2
+}
+```
+
+## 自定义配方类型
+1. 实现 `Recipe<Container>`（`matches`/`assemble`/`getSerializer`/`getType`）。
+2. `RecipeSerializer`：实现 `fromJson` / `toNetwork` / `fromNetwork`，用 `Codec` 或手动读 JSON。
+3. 注册：Forge `DeferredRegister.create(ForgeRegistries.RECIPE_SERIALIZERS/RECIPE_TYPES)`；Fabric `Registry.register(Registries.RECIPE_SERIALIZER/RECIPE_TYPE)`。
+4. 配方 JSON 的 `type` 写自定义序列化器 id，如 `"type": "modid:my_recipe"`。
+5. 复杂配方类型标【⚠️人工复核】，并给 JEI 兼容提示。
+
+## 战利品表 JSON
+目录 `data/<ns>/loot_tables/blocks/<name>.json`（方块）、`loot_tables/entities/<id>.json`（实体）、`loot_tables/chests/<name>.json`（战利品箱）。结构：
+```json
+{
+  "type": "minecraft:block",
+  "pools": [
+    {
+      "rolls": 1,
+      "bonus_rolls": 0,
+      "entries": [
+        {"type": "minecraft:item", "name": "modid:example", "functions": [], "conditions": []}
+      ],
+      "conditions": []
+    }
+  ]
+}
+```
+- **pools**：多个池独立掷骰；`rolls` 掷的次数，`bonus_rolls` 每级幸运加的次数。
+- **entries**：`item` / `tag` / `loot_table`（引用别的表）/ `empty` / `alternatives` / `group`；`weight` 权重、`quality` 受幸运影响。
+- **functions**：`set_count`、`set_damage`、`enchant_randomly`、`set_nbt`、`looting_enchant`、`furnace_smelt`、`set_name`、`explosion_decay`。
+- **conditions**：`survives_explosion`、`killed_by_player`、`random_chance`、`match_tool`、`table_bonus`、`entity_properties`。
+- 方块默认掉落由 `Block.getLootTable()` 决定；改方块掉落优先换战利品表路径，不要重写 `getDrops`。
+
+## 常见坑
+- 1.20.1 配方用 `{"item":"...","count":n}`，1.20.5+ 用 `{"id":"..."}`；混用直接解析失败。
+- 战利品条件不满足时整条 entry 不落，不是“落一半”。
+- `explosion_decay` 让方块被炸掉时按概率掉落，矿石类要加。
+- 配方解锁：`data/<ns>/advancements/recipes/...` 的 `criteria` 决定玩家何时学会配方；漏掉则知识书里不显示。
+""",
+    },
+    {
+        "id": "mod-progression",
+        "name": "进度配置标签页与 JEI",
+        "description": "进度系统、配置项、创造模式标签页与 JEI 兼容思路。",
+        "body": """# 进度 / 配置 / 创造标签页 / JEI
+
+## 进度（Advancement）
+目录 `data/<ns>/advancements/<category>/<name>.json`。结构：
+```json
+{
+  "display": {
+    "icon": {"item": "modid:example"},
+    "title": {"translate": "advancements.modid.example.title"},
+    "description": {"translate": "advancements.modid.example.desc"},
+    "frame": "task",
+    "background": "minecraft:textures/gui/advancements/backgrounds/stone.png",
+    "show_toast": true, "announce_to_chat": true, "hidden": false
+  },
+  "parent": "modid:category/root",
+  "criteria": {
+    "got_item": {"trigger": "minecraft:inventory_changed", "conditions": {"items": [{"items": ["modid:example"]}]}}
+  }
+}
+```
+- 根进度（无 `parent`）要设 `background`；`frame` 用 `task`/`goal`/`challenge`。
+- `criteria` 的 `trigger` 用原版触发器（`inventory_changed`、`entity_killed_player`、`tick`、`recipe_unlocked`、`location` 等）+ `conditions`；多条件用 `requirements` 数组控制 AND/OR。
+- 语言键写进 `lang/en_us.json`、`zh_cn.json`。
+- 进度树：根 → 子级用 `parent` 链起来；`hidden` 进度不预先显示，达成才出现。
+
+## 配置项（Config）
+- Forge 1.20.1：用 `ForgeConfigSpec`（`COMMON`/`CLIENT`/`SERVER` 三个 spec），构造器里 `Builder` 定义条目，`ModLoadingContext.get().registerConfig(...)` 挂载；`FMLPaths.CONFIGDIR` 定位配置目录。
+- NeoForge：`ModConfigSpec` 替代 `ForgeConfigSpec`；`ModContainer.registerConfig`。
+- Fabric：用 `fabric-loader` 的 `config` 或 Cloth Config / `AutoConfig`；`FabricLoader.getInstance().getConfigDir()` 定位。
+- 配置值用 getter 包装，不要在运行中改 `ConfigSpec` 定义；布尔/整数/枚举/列表都支持。
+- 服务器配置与客户端配置分开；同步型配置走网络包标【⚠️人工复核】。
+
+## 创造模式标签页
+- Forge：`DeferredRegister.create(ForgeRegistries.CREATIVE_MODE_TABS, MODID)`，注册 `CreativeModeTab`，`displayItems` 用 `output.accept(item)` 填充。
+- 1.20.1 用 `CreativeModeTab.builder().title(...).icon(...).displayItems((params, output) -> {...}).build()`。
+- Fabric：`Registries.ITEM_GROUP` + `ItemGroup.Builder` + `ItemGroupEvents.modifyEntriesEvent(...)`。
+- 图标要注册名对应的物品纹理；自定义排序用 `output.accept` 顺序，不要靠名字排序。
+- 客户端图标渲染别进服务端注册路径。
+
+## JEI 兼容思路
+- 显示自定义配方：给配方类型写 JEI 插件类（`@JeiPlugin` 或 `IModPlugin`），`registerRecipeCatalysts`/`registerRecipes` 把配方类型和合成台类型绑起来。
+- 配方类别 `RecipeCategory` + `RecipeType`，渲染用 `IRecipeSlotDrawable`；复杂类别（多方块、自定义 GUI）标【⚠️人工复核】。
+- `getRecipeType` 必须与注册的 `RecipeType` 一致，否则 JEI 不显示。
+- 没有 JEI 依赖时先留扩展点，不把 JEI 类打进生产构建（用 `Optional` 或独立模块）。
+
+## 检查
+- 进度 criteria 的 trigger 名和条件字段拼写正确，语言键齐全；根进度有 background。
+- 配置默认值合理、有注释；服务器/客户端配置不混淆。
+- 标签页物品能正常显示图标；JEI 插件类只在 JEI 存在时加载。
+""",
+    },
+    {
+        "id": "mod-gui-network",
+        "name": "GUI 网络与方块实体同步",
+        "description": "GUI（Screen/Menu/AbstractContainerMenu）、网络包（SimpleChannel/自定义 payload）与方块实体同步。",
+        "body": """# GUI / 网络 / 方块实体同步
+
+## GUI 组成（服务端容器 + 客户端屏幕）
+- 服务端：`MenuType` + `AbstractContainerMenu`（原版）子类；客户端：`Screen<Menu>` 子类。
+- Forge 1.20.1：`DeferredRegister.create(ForgeRegistries.MENU_TYPES, MODID)`，`IContainerFactory` 构造菜单；`MenuScreens.register(menuType, MyScreen::new)` 在客户端。
+- Fabric：`Registries.SCREEN_HANDLER` + `ScreenHandler`（`ScreenHandlerType`），`HandledScreens.register` 在客户端。
+
+## AbstractContainerMenu（Forge）/ ScreenHandler（Fabric）
+- 构造器保存容器引用、槽位；`quickMoveStack`（快速移动）逻辑：先容器内槽位，再玩家背包，返回 `ItemStack.EMPTY` 或剩余物。
+- `stillValid(Player)` 判断玩家距离容器是否太远，远则关闭。
+- `addSlot` 逐个加槽位；槽位索引要与客户端 `Screen` 的槽位渲染顺序一致，否则物品错位。
+- 方块实体菜单：方块实体实现 `MenuProvider`（`createMenu` 返回菜单），方块交互用 `NetworkHooks.openScreen`（Forge）/ `ServerPlayerEntity.openHandledScreen`（Fabric）。
+
+## Screen 客户端
+- `Screen` 子类绑定纹理（`getBackgroundTexture`），`renderBg`/`render` 画背景和文字；槽位用 `Slot` 渲染。
+- GUI 纹理 256×256 九宫格；槽位 18×18，按钮三态（normal/hover/disabled）；文字对比度足够（见 visual-design）。
+- 客户端只读菜单里的数据（`containerData`/`getSlot`），不要直接在 `Screen` 里改服务端状态。
+
+## 网络包
+### Forge 1.20.1：SimpleChannel
+```java
+SimpleChannel CHANNEL = NetworkRegistry.newSimpleChannel(
+    new ResourceLocation(MODID, "main"),
+    () -> PROTOCOL_VERSION, PROTOCOL_VERSION::equals, PROTOCOL_VERSION::equals);
+CHANNEL.registerMessage(0, MyPacket.class, MyPacket::encode, MyPacket::decode, MyPacket::handle);
+```
+- 每个包一个唯一 index；`encode`/`decode` 写读 `FriendlyByteBuf`；`handle` 里 `context.get().enqueueWork(...)` 切回主线程再改游戏状态，`setPacketHandled(true)` 收尾。
+- 发送：`CHANNEL.send(PacketDistributor.SERVER.noArg(), packet)`（客户端→服务端）、`send(PacketDistributor.PLAYER.with(() -> serverPlayer), packet)`（服务端→某玩家）。
+- 版本常量（`PROTOCOL_VERSION`）升级时同步改，否则联机报协议不匹配。
+
+### NeoForge / Fabric：自定义 Payload
+- NeoForge：`CustomPacketPayload` + `FriendlyByteBuf` codec，`RegisterPayloadHandlersEvent` 注册 play 双向处理器，`PayloadRegistrar.playToClient/playToServer`。
+- Fabric：`PayloadTypeRegistry.playC2S/playS2C` 注册，`CustomPayload` 实现 `getId`，`ServerPlayNetworking`/`ClientPlayNetworking` 收发；`FabricPacket` + `PacketType` 是更简封装。
+- 网络包一律标【⚠️人工复核】：说明发送侧、接收侧、线程切换、字段含义。
+
+## 方块实体同步
+- 方块实体继承 `BlockEntity`，构造器传 `BlockEntityType` 和 `pos`/`state`；注册 `BlockEntityType.Builder.of(MyBE::new, block).build()`（Forge）/ `BlockEntityType.Builder.create(...)`（Fabric）。
+- 读写 NBT：1.20.1 `load`/`saveAdditional`（`CompoundTag`），1.20.5+ `loadAdditional`/`saveAdditional`（`Tag`）；同步客户端用 `getUpdateTag`/`handleUpdateTag` 或 `ClientboundBlockEntityDataPacket`。
+- `markDirty`/`setChanged` 通知保存；`getUpdatePacket` 返回同步包让客户端看到变化。
+- 只在状态变化时同步，不要每 tick 全量发（性能红线，见 code-engineering）。
+- 库存型方块实体实现 `Container`（原版）或自定义，配合菜单同步槽位。
+
+## 检查
+- 菜单/屏幕/网络包注册时机正确；客户端类不进服务端。
+- `quickMoveStack` 边界不越界；槽位索引一致；`stillValid` 生效。
+- 网络包版本号一致、线程切换到位；方块实体 NBT 键稳定不漂移。
+- GUI、网络、方块实体同步全部标【⚠️人工复核】。
+""",
+    },
+    {
         "id": "reference-research",
         "name": "真实代码检索",
         "description": "写代码前先查真实实现：GitHub 仓库、grep.app、Modrinth，处理限流和网络失败，避免凭记忆猜 API。",
@@ -707,6 +1255,40 @@ SKILL_HINTS: dict[str, tuple[str, ...]] = {
     "mca-reborn-compat": (
         "mca", "凡家", "村民", "身份同步", "外观同步", "接管身份", "结婚",
         "生小孩", "生育", "关系", "comes alive",
+    ),
+    "large-mod-playbook": (
+        "大模组", "暮色森林", "工程方法", "目录组织", "里程碑", "注册中心",
+        "渐进构建", "模组架构", "mod架构", "大型模组",
+    ),
+    "mod-registry": (
+        "注册", "registry", "deferredregister", "registerevent", "注册表",
+        "registries", "注册中心", "创造标签页", "附魔注册", "药水注册",
+    ),
+    "mod-model-texture": (
+        "模型json", "blockstates", "multipart", "variants", "cuboid", "纹理规范",
+        "16x16", "32x32", "display", "elements", "uv映射", "模型规范",
+    ),
+    "mod-worldgen": (
+        "世界生成", "worldgen", "biome", "生物群系", "feature", "placement",
+        "维度", "dimension", "noise", "地形", "结构", "structure", "矿脉", "ore",
+        "biomemodifier",
+    ),
+    "mod-entity": (
+        "实体", "entity", "entitytype", "渲染器", "renderer", "modellayer",
+        "ai", "goal", "spawn egg", "生成蛋", "怪物", "生物",
+        "attribute", "属性",
+    ),
+    "mod-recipe-loot": (
+        "配方", "recipe", "战利品", "loot", "合成", "熔炼", "锻造台", "切石机",
+        "smithing", "stonecutting", "无序", "有序", "loottable",
+    ),
+    "mod-progression": (
+        "进度", "advancement", "成就", "配置", "config", "创造标签页",
+        "jei", "标签页", "creative",
+    ),
+    "mod-gui-network": (
+        "gui", "screen", "menu", "容器", "container", "网络包", "网络",
+        "simplechannel", "payload", "方块实体同步", "同步", "packet", "network",
     ),
     "reference-research": (
         "参考", "搜索", "源码", "github", "grep", "别人代码", "查一下",

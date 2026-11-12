@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from ..gradle import windows_command
-from .build import _java_env, ensure_gradle, gradle_command
+from .build import _java_env, ensure_gradle, forge_flags, gradle_command, local_maven_args
 from .util import McmodError, iter_files, log, read_json, run, write_json, write_text
 from .versions import VersionProfile
 
@@ -64,7 +64,7 @@ def _sources_candidates(project: Path) -> list[Path]:
 
 def run_gen_sources(project: Path, profile: VersionProfile, timeout: int = 1200) -> dict[str, Any]:
     cmd = gradle_command(project) or ensure_gradle(profile)
-    full = [*cmd, "genSources", "--console=plain"]
+    full = [*cmd, "genSources", *local_maven_args(), *forge_flags(profile), "--console=plain"]
     env = _java_env(profile)
     log("提取 sources（首次会下载并反编译，可能需要几分钟）…")
     result = run(windows_command(full), cwd=project, timeout=timeout, env=env)

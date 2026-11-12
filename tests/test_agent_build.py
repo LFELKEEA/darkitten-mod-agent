@@ -128,11 +128,11 @@ class BuildReportTests(unittest.TestCase):
         self.assertNotIn("fix_build_setup", TOOL_PROTOCOL)
 
     def test_failure_keeps_tail_and_marks_truncation(self) -> None:
-        result = BuildOutcome(ok=False, code=1, output="x" * 30000)
+        result = BuildOutcome(ok=False, code=1, output="x" * 200000)
         text = _build_report(result)
         self.assertIn("编译失败（退出码 1）", text)
         self.assertIn("只保留末尾部分", text)
-        self.assertLessEqual(len(text), 24200)
+        self.assertLessEqual(len(text), 96200)
 
     def test_success_without_jars_explains(self) -> None:
         result = BuildOutcome(ok=True, code=0, output="BUILD SUCCESSFUL")

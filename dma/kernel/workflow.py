@@ -418,11 +418,18 @@ def plan_tasks(spec: ModSpec, *, include_runtime: bool = True) -> Workflow:
         ),
     ]
     feature_tasks: dict[str, str] = {"core": "T01-scaffold"}
+    # Build the full id -> task_id map first: a feature may depend on another
+    # feature that appears later in the spec list, and looking the dependency
+    # up while iterating silently drops those edges.
+    for feature in spec.features:
+        if feature.id in {"core", "acceptance"}:
+            continue
+        feature_tasks[feature.id] = f"F-{feature.id}"
     order_index = 2
     for feature in spec.features:
         if feature.id in {"core", "acceptance"}:
             continue
-        task_id = f"F-{feature.id}"
+        task_id = feature_tasks[feature.id]
         deps = ["T01-scaffold"]
         for dep in feature.depends_on:
             mapped = feature_tasks.get(dep)

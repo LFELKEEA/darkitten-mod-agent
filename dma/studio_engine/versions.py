@@ -323,14 +323,14 @@ def _tier_for(loader: str, mc: str, loader_version: str) -> str:
     if loader == "forge" and key < _version_key("1.7.10"):
         return "design-only"
     # Versions with a maintained modern toolchain and bundled template.
+    # 1.21.8 / 26.x 的生成器产物尚未按 1.21.2+ 的 Java 改写(高级 Java 全部
+    # 跳过)，标注 full 会误导用户，这里降为 scaffold(基础骨架 + 保守生成)。
     modern_full = {
         ("neoforge", "1.20.4"), ("neoforge", "1.20.6"), ("neoforge", "1.21"),
-        ("neoforge", "1.21.1"), ("neoforge", "1.21.4"), ("neoforge", "1.21.8"),
-        ("neoforge", "26.1.2"), ("neoforge", "26.2"), ("neoforge", "26.3"),
+        ("neoforge", "1.21.1"), ("neoforge", "1.21.4"),
         ("forge", "1.20.1"), ("forge", "1.19.2"), ("forge", "1.18.2"),
-        ("forge", "1.12.2"), ("forge", "1.21.8"),
+        ("forge", "1.12.2"),
         ("fabric", "1.20.1"), ("fabric", "1.21.1"), ("fabric", "1.21.4"),
-        ("fabric", "1.21.8"), ("fabric", "26.3"),
     }
     if (loader, mc) in modern_full:
         return "full"
@@ -386,8 +386,10 @@ def resolve(
         java_major=java_major,
         # ForgeGradle 6 breaks on Gradle 8.9+ with "project services has been
         # closed" while running MCP steps; 8.8 is the last known-good line.
+        # Fabric Loom 1.19+ on Java 25 requires Gradle 9.8+.
         gradle_version=("8.8" if loader == "forge"
-                        else ("8.14.3" if java_major <= 21 else "9.1.0")),
+                        else ("8.14.3" if java_major <= 21
+                              else ("9.8" if loader == "fabric" else "9.1.0"))),
         mappings="",
         template=_template_for(loader, mc),
         tier=tier,

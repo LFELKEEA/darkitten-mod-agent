@@ -160,6 +160,10 @@ def restore_incompatible_scaffold(root: str | Path, *, log=None) -> str:
     src_root = project / "src" / "main" / "java"
     package = ""
     if src_root.is_dir():
+        # 骨架里除了主入口类还有 content/ 等子包（如 ModRegistries），
+        # 按路径排序第一个文件可能是子包里的类；主工程的根包是所有
+        # package 声明里最短的那个，用它恢复入口文件位置。
+        packages: list[str] = []
         for item in sorted(src_root.rglob("*.java")):
             try:
                 head = item.read_text(encoding="utf-8", errors="replace")[:400]
@@ -167,8 +171,9 @@ def restore_incompatible_scaffold(root: str | Path, *, log=None) -> str:
                 continue
             match = re.search(r"^\s*package\s+([\w.]+)\s*;", head, re.MULTILINE)
             if match:
-                package = match.group(1)
-                break
+                packages.append(match.group(1))
+        if packages:
+            package = min(packages, key=len)
     mod_version = "1.0.0"
     props_file = project / "gradle.properties"
     if props_file.is_file():
