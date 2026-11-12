@@ -20,7 +20,7 @@ class WrapperTests(TempDataCase):
             self.tmp / "projects",
             name="Wrapper Mod",
             mod_id="wrapper_mod",
-            mc_version="1.21.1",
+            mc_version="1.19.2",
             loader="Fabric",
         )
         self.assertFalse(wrapper.has_wrapper(project.root))
@@ -96,7 +96,7 @@ class WrapperTests(TempDataCase):
             self.tmp / "projects",
             name="MCA",
             mod_id="mca_test",
-            mc_version="1.21.1",
+            mc_version="1.19.2",
             loader="NeoForge",
         )
         (project.root / "build.gradle").write_text(

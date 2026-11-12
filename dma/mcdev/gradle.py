@@ -305,6 +305,146 @@ def _ensure_gradle_distribution(root: Path, log=None) -> None:
             log(f"[gradle] 预装 Gradle 失败，交给 gradlew 自行下载：{exc}")
 
 
+def _wrapper_self_heal(root: Path, log=None) -> None:
+    """构建前自愈 Wrapper:非法 distributionUrl 与损坏的 gradle-wrapper.jar。
+
+    模型手写工程时两个坑都会出现:1) 带反斜杠的 URL（YAML 风格转义）让 gradlew
+    下载失败;2) 用 write_file 写出的 gradle-wrapper.jar 只是占位文本(如
+    "placeholder")而不是真实二进制,gradlew 启动直接
+    ClassNotFoundException: org.gradle.wrapper.GradleWrapperMain。这里保留
+    原版本号,把 wrapper 三件套(gradlew/gradle-wrapper.jar/properties)全部重写。
+    """
+    import zipfile
+
+    from .. import wrapper
+
+    try:
+        has = wrapper.has_wrapper(root)
+        jar = Path(root) / "gradle" / "wrapper" / "gradle-wrapper.jar"
+        jar_bad = False
+        if not jar.is_file() or jar.stat().st_size < 1000:
+            jar_bad = True
+        else:
+            try:
+                with zipfile.ZipFile(jar) as zf:
+                    if "org/gradle/wrapper/GradleWrapperMain.class" not in zf.namelist():
+                        jar_bad = True
+            except Exception:  # noqa: BLE001 - 不是合法 zip 一律视为损坏
+                jar_bad = True
+        props_bad = not wrapper.properties_valid(root)
+        if not has:
+            # 工程完全没有 gradlew：模型手写工程可能漏写。只有已经出现构建
+            # 脚本时才注入（空目录还在搭骨架阶段，不提前制造文件）。
+            if not ((Path(root) / "build.gradle").is_file() or (Path(root) / "settings.gradle").is_file()):
+                return
+            jar_bad = True
+        if not jar_bad and not props_bad:
+            return
+        current = wrapper.current_distribution(root) or ""
+        written = wrapper.ensure_wrapper(root, current or None)
+        if log and written:
+            if not has:
+                reason = "工程缺少 gradlew，已注入标准 Wrapper"
+            elif jar_bad:
+                reason = "gradle-wrapper.jar 损坏"
+            else:
+                reason = "distributionUrl 非法"
+            log(f"[gradle] 已自愈 Wrapper({reason})→ 重写 {', '.join(written)}")
+    except Exception:  # noqa: BLE001 - 自愈失败不阻塞构建
+        pass
+
+
+def _detect_system_proxy() -> str | None:
+    """返回系统代理 host:port，未启用返回 None。"""
+    if os.name == "nt":
+        try:
+            import winreg
+
+            with winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                r"Software\Microsoft\Windows\CurrentVersion\Internet Settings",
+            ) as key:
+                enabled, _ = winreg.QueryValueEx(key, "ProxyEnable")
+                if enabled:
+                    server, _ = winreg.QueryValueEx(key, "ProxyServer")
+                    if server:
+                        server = str(server).split(";")[0].strip()
+                        if "=" in server:
+                            server = server.split("=", 1)[1]
+                        return server
+        except OSError:
+            pass
+    for name in ("https_proxy", "http_proxy", "all_proxy", "HTTPS_PROXY", "HTTP_PROXY"):
+        value = os.environ.get(name)
+        if value:
+            value = value.replace("https://", "").replace("http://", "")
+            return value.rstrip("/")
+    return None
+
+
+def _proxy_blocks_gradle(proxy: str) -> bool:
+    """直连 services.gradle.org 可达、但经系统代理被拒(400/连接失败)时返回 True。"""
+    import http.client
+    import socket
+
+    host, _, port_text = proxy.partition(":")
+    try:
+        port = int(port_text) if port_text else 8080
+    except ValueError:
+        port = 8080
+    try:
+        sock = socket.create_connection(("services.gradle.org", 443), timeout=5)
+        sock.close()
+        direct_ok = True
+    except OSError:
+        direct_ok = False
+    try:
+        conn = http.client.HTTPConnection(host, port, timeout=5)
+        conn.set_tunnel("services.gradle.org", 443)
+        conn.request("GET", "/distributions/", headers={"Range": "bytes=0-99"})
+        resp = conn.getresponse()
+        proxy_ok = 200 <= resp.status < 400
+        conn.close()
+    except Exception:  # noqa: BLE001 - 代理连不上、超时、被重置都算坏
+        proxy_ok = False
+    return direct_ok and not proxy_ok
+
+
+def _proxy_self_heal(root: Path, log=None) -> None:
+    """系统代理健康检查：代理对 Gradle 仓库返回 400/拒绝时，给工程
+    gradle.properties 写 systemProp.java.net.useSystemProxies=false，让
+    daemon 直连下载。幂等：每轮构建前补写(模型可能重写 gradle.properties)，
+    写入后停掉旧 daemon，让下一轮构建用新配置启动。"""
+    try:
+        proxy = _detect_system_proxy()
+        if not proxy:
+            return
+        if not _proxy_blocks_gradle(proxy):
+            return
+        props = Path(root) / "gradle.properties"
+        if not props.is_file():
+            return
+        text = props.read_text(encoding="utf-8", errors="replace")
+        if "systemProp.java.net.useSystemProxies" in text:
+            return
+        add = (
+            "\n# DMA: 系统代理对 Gradle 仓库返回错误，自动切直连\n"
+            "systemProp.java.net.useSystemProxies=false\n"
+        )
+        props.write_text(text.rstrip() + "\n" + add, encoding="utf-8")
+        if log:
+            log(
+                "[gradle] 检测到系统代理拦截 Gradle 仓库，已写 "
+                "systemProp.java.net.useSystemProxies=false（直连模式）。"
+            )
+        try:
+            stop_gradle_daemon(root)
+        except Exception:  # noqa: BLE001 - 停 daemon 失败不阻塞
+            pass
+    except Exception:  # noqa: BLE001 - 自愈失败不阻塞构建
+        pass
+
+
 class _Watchdog:
     """独立线程盯着子进程：取消、总超时、长时间无输出都能立刻终止。"""
 
@@ -440,6 +580,8 @@ def run_gradle(
     if not root.is_dir():
         raise GradleError(f"工程目录不存在：{root}")
     check_toolchain(root)
+    _wrapper_self_heal(root, log)
+    _proxy_self_heal(root, log)
     probe = preflight(root, log)
     offline = bool(probe["offline"])
     init_script: Path | None = None

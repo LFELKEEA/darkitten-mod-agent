@@ -1,5 +1,13 @@
 # Changelog
 
+## 3.0.3 — 2026-11-12
+
+修掉环境层面的三类“下载即失败”：系统代理拦截仓库域名、Gradle Wrapper 被写成坏文件、Fabric 1.21.1 缺少内置骨架。
+
+- 修复“系统代理把 Gradle 全挡死”：构建前自动检测 Windows 系统代理（如 Clash）对 `services.gradle.org` / `maven.fabricmc.net` 返回 400/REJECT 的情况，检测到就向工程 `gradle.properties` 注入 `systemProp.java.net.useSystemProxies=false` 强制直连，并停掉旧 daemon 让下一轮构建生效，代理规则挡掉仓库域名时不再无限重试。
+- 新增 Fabric 1.21.1 内置骨架（对称 NeoForge 1.21.1）：不再因为缺少内置模板而被迫手写构建脚本，Loom 1.9 + Java 21 + yarn 1.21.1 生成即用。
+- 修复“反复卡死在下载 Gradle”：构建前自动检查并修复 gradle-wrapper 三件套——`gradle-wrapper.jar` 被写成占位文本（`ClassNotFoundException: GradleWrapperMain`）或 `distributionUrl` 带反斜杠时，直接重写为正确的 wrapper（保留原 Gradle 版本），不再无限重试。
+
 ## 3.0.1 — 2026-11-12
 
 3.0 是围绕大模组与长时间运行的规模版本：放宽 Agent 的步数与上下文预算，补齐资源生成工具和模组技能，并修掉停止、证书与长任务误判这几类会中断生成的问题。

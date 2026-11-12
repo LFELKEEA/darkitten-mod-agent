@@ -17,8 +17,9 @@ FORGE_VERSION = "47.4.28"
 NEOFORGE_VERSION = "47.1.106"
 PROBE_JAR_NAME = "mcdev-probe-dev.jar"
 
-# 内置骨架只覆盖 1.20.1：1.20.1 的 Forge / Fabric / NeoForge 构建链差异最小，
-# 也能共用同一套探针验证流程。其他版本由助手按目标版本生成构建脚本。
+# 内置骨架覆盖的 MC 版本。Forge 1.20.1 之后被 NeoForge 取代，故 Forge 只有 1.20.1；
+# Fabric / NeoForge 额外提供 1.21.1。其他版本由助手按目标版本生成构建脚本。
+SCAFFOLD_MC_VERSIONS = ("1.20.1", "1.21.1")
 SCAFFOLD_LOADERS = ("Forge", "Fabric", "NeoForge")
 
 TEXT_SUFFIXES = {
@@ -119,7 +120,10 @@ def _copy_template(source: Path, target: Path, values: dict[str, str]) -> None:
 
 
 def supports_scaffold(loader: str, mc_version: str = MC_VERSION) -> bool:
-    return (mc_version or "").strip() == MC_VERSION and loader in SCAFFOLD_LOADERS
+    version = (mc_version or "").strip()
+    if loader == "Forge":
+        return version == MC_VERSION and loader in SCAFFOLD_LOADERS
+    return version in SCAFFOLD_MC_VERSIONS and loader in SCAFFOLD_LOADERS
 
 
 def restore_incompatible_scaffold(root: str | Path, *, log=None) -> str:
@@ -310,13 +314,15 @@ def create_fabric_project(
     mc_version: str = MC_VERSION,
     mod_version: str = "1.0.0",
 ) -> Path:
-    """生成 Fabric 1.20.1 骨架：fabric-loom + Yarn + ModInitializer。"""
-    if (mc_version or "").strip() != MC_VERSION:
+    """生成 Fabric 骨架：fabric-loom + Yarn + ModInitializer。"""
+    version = (mc_version or "").strip()
+    if version not in SCAFFOLD_MC_VERSIONS:
         raise ValueError(
-            f"内置 Fabric 骨架只覆盖 {MC_VERSION}；{mc_version} 请先核对 Yarn / Loom 版本再生成。"
+            f"内置 Fabric 骨架只覆盖 {', '.join(SCAFFOLD_MC_VERSIONS)}；"
+            f"{mc_version} 请先核对 Yarn / Loom 版本再生成。"
         )
     target = Path(str(root)).expanduser()
-    source = resources_dir() / "fabric-1.20.1"
+    source = resources_dir() / f"fabric-{version}"
     if not source.is_dir():
         raise FileNotFoundError(f"内置 Fabric 模板缺失：{source}")
     values = _values(
@@ -340,13 +346,15 @@ def create_neoforge_project(
     neo_version: str = NEOFORGE_VERSION,
     mod_version: str = "1.0.0",
 ) -> Path:
-    """生成 NeoForge 1.20.1 骨架：NeoGradle + mods.toml + DeferredRegister 入口。"""
-    if (mc_version or "").strip() != MC_VERSION:
+    """生成 NeoForge 骨架：NeoGradle + mods.toml + DeferredRegister 入口。"""
+    version = (mc_version or "").strip()
+    if version not in SCAFFOLD_MC_VERSIONS:
         raise ValueError(
-            f"内置 NeoForge 骨架只覆盖 {MC_VERSION}；{mc_version} 请先核对 NeoGradle / NeoForge 版本再生成。"
+            f"内置 NeoForge 骨架只覆盖 {', '.join(SCAFFOLD_MC_VERSIONS)}；"
+            f"{mc_version} 请先核对 NeoGradle / NeoForge 版本再生成。"
         )
     target = Path(str(root)).expanduser()
-    source = resources_dir() / "neoforge-1.20.1"
+    source = resources_dir() / f"neoforge-{version}"
     if not source.is_dir():
         raise FileNotFoundError(f"内置 NeoForge 模板缺失：{source}")
     values = _values(

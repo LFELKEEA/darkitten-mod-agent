@@ -53,6 +53,67 @@ class ToolchainTests(TempDataCase):
         )
 
 
+class ProxySelfHealTests(TempDataCase):
+    """系统代理拦截 Gradle 仓库时自动切直连(systemProp.java.net.useSystemProxies=false)。"""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self._patchers: list = []
+        self.stop_calls = 0
+
+    def _setup(self, proxy: str | None, blocked: bool) -> Path:
+        root = self.tmp / "mod"
+        root.mkdir()
+        (root / "gradle.properties").write_text("org.gradle.jvmargs=-Xmx2G\n", encoding="utf-8")
+        self._patchers.append(mock.patch.object(mcdev_gradle, "_detect_system_proxy", return_value=proxy))
+        self._patchers.append(mock.patch.object(mcdev_gradle, "_proxy_blocks_gradle", return_value=blocked))
+        self._patchers.append(mock.patch.object(mcdev_gradle, "stop_gradle_daemon", side_effect=self._count_stop))
+        for p in self._patchers:
+            p.start()
+        return root
+
+    def _count_stop(self, root) -> None:
+        self.stop_calls += 1
+
+    def tearDown(self) -> None:
+        for p in getattr(self, "_patchers", []):
+            p.stop()
+        super().tearDown()
+
+    def test_no_proxy_leaves_properties_alone(self) -> None:
+        root = self._setup(proxy=None, blocked=False)
+        mcdev_gradle._proxy_self_heal(root)
+        text = (root / "gradle.properties").read_text(encoding="utf-8")
+        self.assertNotIn("useSystemProxies", text)
+        self.assertEqual(self.stop_calls, 0)
+
+    def test_healthy_proxy_leaves_properties_alone(self) -> None:
+        root = self._setup(proxy="127.0.0.1:7890", blocked=False)
+        mcdev_gradle._proxy_self_heal(root)
+        text = (root / "gradle.properties").read_text(encoding="utf-8")
+        self.assertNotIn("useSystemProxies", text)
+        self.assertEqual(self.stop_calls, 0)
+
+    def test_broken_proxy_writes_direct_mode_once(self) -> None:
+        root = self._setup(proxy="127.0.0.1:7890", blocked=True)
+        logs: list[str] = []
+        mcdev_gradle._proxy_self_heal(root, log=logs.append)
+        text = (root / "gradle.properties").read_text(encoding="utf-8")
+        self.assertIn("systemProp.java.net.useSystemProxies=false", text)
+        self.assertTrue(any("useSystemProxies" in line for line in logs))
+        self.assertEqual(self.stop_calls, 1)
+        # 幂等：已存在该行时不再写、不再停 daemon
+        mcdev_gradle._proxy_self_heal(root, log=logs.append)
+        self.assertEqual(text.count("useSystemProxies"), 1)
+        self.assertEqual(self.stop_calls, 1)
+
+    def test_missing_gradle_properties_skips(self) -> None:
+        root = self._setup(proxy="127.0.0.1:7890", blocked=True)
+        (root / "gradle.properties").unlink()
+        mcdev_gradle._proxy_self_heal(root)
+        self.assertFalse((root / "gradle.properties").exists())
+
+
 class ScenarioAssertTests(unittest.TestCase):
     def test_path_lookup(self) -> None:
         value = {"data": {"items": [{"id": "a"}], "ok": True}}
@@ -372,7 +433,9 @@ class TemplateTests(TempDataCase):
 
     def test_supports_scaffold(self) -> None:
         self.assertTrue(mcdev.templates.supports_scaffold("Fabric", "1.20.1"))
-        self.assertFalse(mcdev.templates.supports_scaffold("Fabric", "1.21.1"))
+        self.assertTrue(mcdev.templates.supports_scaffold("Fabric", "1.21.1"))
+        self.assertTrue(mcdev.templates.supports_scaffold("NeoForge", "1.21.1"))
+        self.assertFalse(mcdev.templates.supports_scaffold("Fabric", "1.19.2"))
         self.assertFalse(mcdev.templates.supports_scaffold("Architectury", "1.20.1"))
 
     def test_gametest_task_per_loader(self) -> None:

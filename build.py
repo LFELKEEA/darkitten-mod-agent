@@ -22,6 +22,10 @@ BUILD = ROOT / "build"
 APP_DIST = DIST / "DarkittenModAgent"
 ZIP_NAME = f"DarkittenModAgent-{APP_VERSION}.zip"
 NOTES = [
+    "修复“系统代理把 Gradle 全挡死”：构建前自动检测 Windows 系统代理（如 Clash）对 services.gradle.org / maven.fabricmc.net 返回 400/REJECT 的情况，检测到就向工程 gradle.properties 注入 systemProp.java.net.useSystemProxies=false 强制直连，并停掉旧 daemon 让下轮构建生效——代理规则把仓库域名挡掉时不再无限重试。",
+
+    "新增 Fabric 1.21.1 内置骨架（对称 NeoForge 1.21.1）：Fabric 1.21.1 工程不再因为没有内置模板而被迫手写构建脚本，loom 1.9 + Java 21 + yarn 1.21.1 生成即用。",
+    "修复“做模组反复卡死在下载 Gradle”：构建前自动检查并修复 gradle-wrapper 三件套——gradle-wrapper.jar 被写成占位文本（ClassNotFoundException: GradleWrapperMain）或 distributionUrl 带反斜杠时，直接重写为正确的 wrapper（保留原 Gradle 版本），模型手写的坏 wrapper 不再导致无限重试。",
     "修复“做模组依赖下载全崩”：启动/编译开发端时不再无条件注入 Windows-ROOT 证书信任（JDK 17 读 Windows 证书存储会报 KeyStoreException error 5，SSL 初始化即崩）。现在默认不注入，界面设置里“Gradle 使用 Windows 证书”开关真正生效。",
     "修复“无法停止”：停止构建或停止开发端时，除了杀 gradlew 进程树，现在还会执行 gradlew --stop 停掉后台常驻的 Gradle daemon，不再残留多个 java.exe 继续烧 CPU / 下载。",
     "Agent 规模升级：默认步数 32→128（上限 4000）、上下文轮数 32→128（上限 600）、模型输出 8192→16384 tokens、历史预算 12 万→60 万字符、消息预算 48 万→200 万字符，老配置自动升级且保留用户自定义值，大型模组不再因“达到工具调用轮数上限”卡壳。",

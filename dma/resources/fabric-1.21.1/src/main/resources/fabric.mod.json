@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "id": "{{mod_id}}",
+  "version": "${version}",
+  "name": "{{mod_name}}",
+  "description": "Created with Darkitten Mod Agent.",
+  "authors": [
+    "Developer"
+  ],
+  "license": "MIT",
+  "environment": "*",
+  "entrypoints": {
+    "main": [
+      "{{package}}.{{class_name}}"
+    ]
+  },
+  "depends": {
+    "fabricloader": ">=0.16.0",
+    "minecraft": "~1.21.1",
+    "java": ">=21",
+    "fabric-api": "*"
+  }
+}
