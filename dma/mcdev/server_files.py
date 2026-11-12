@@ -47,11 +47,35 @@ def run_dir_for(project_root: str | Path, side: str = "server") -> Path:
         name = Path(value).name.lower()
         if side in name:
             return root / value
-    for fallback in (f"run-{side}", "run"):
+    # ModDevGradle / Loom 默认就用 run/，不能因为旁边恰好有个 run-server
+    # 目录就把 eula.txt 和 server.properties 写到游戏根本不读的地方。
+    for fallback in ("run", f"run-{side}"):
         candidate = root / fallback
         if candidate.is_dir():
             return candidate
-    return root / f"run-{side}"
+    # 两个目录都还不存在（工程第一次启动）：按 ModDevGradle / Loom / Forge MDK
+    # 的默认值用 run/。写成 run-server 会让游戏去 run/ 找 eula.txt，首次启动直接退出。
+    return root / "run"
+
+
+def server_port(project_root: str | Path, default: int = 25566) -> int:
+    """读取游戏实际监听的端口（server.properties 的 server-port）。"""
+    path = run_dir_for(project_root, "server") / "server.properties"
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return default
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key, value = stripped.split("=", 1)
+        if key.strip() == "server-port":
+            try:
+                return max(1, min(int(value.strip()), 65535))
+            except ValueError:
+                return default
+    return default
 
 
 def ensure_eula(project_root: str | Path, side: str = "server") -> list[str]:

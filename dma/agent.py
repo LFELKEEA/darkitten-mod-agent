@@ -17,6 +17,7 @@ from . import (
     ai,
     connectors,
     mcdev,
+    netclient,
     paths,
     project as project_mod,
     research,
@@ -90,6 +91,26 @@ MAX_STEP_RESULT = 300_000
 MAX_BUILD_RESULT = 24_000
 MAX_BUILD_SUCCESS = 4_000
 MAX_FENCE_FILES = 40
+# runServer / runClient 是常驻任务，Gradle 不会自己结束；放进 build_project
+# 只会一直等到超时，然后把正常的开发端杀掉。
+LONG_RUNNING_GRADLE_TASKS = {
+    "runserver", "runclient", "runserverdata", "runclientdata",
+}
+
+
+def _build_task_error(task: str) -> str:
+    if str(task or "").strip().lower() not in LONG_RUNNING_GRADLE_TASKS:
+        return ""
+    return (
+        "build_project 不能用来启动开发端：runServer / runClient "
+        "是常驻任务，Gradle 不会自己结束，套在编译超时里只会空等到"
+        "超时并杀掉正常运行的进程。\n"
+        "请改用 mcdev_prepare（kind=server/client/both）启动；"
+        "需要先编译就执行 build_project task=build。"
+    )
+# 连续多久没有任何“有效进展”（写入文件或完成编译）就主动停下。
+# 网络请求有 netclient 硬超时、Gradle 有 watchdog，这个兜底针对模型空转。
+PROGRESS_TIMEOUT = 20 * 60
 BUILD_TRIGGER_EXTS = {
     ".java", ".kt", ".kts", ".gradle", ".properties", ".json", ".json5",
     ".toml", ".xml", ".mcmeta", ".lang", ".yml", ".yaml", ".glsl", ".fsh",
@@ -387,6 +408,14 @@ def _compact_messages(messages: list[dict[str, Any]]) -> None:
         item = messages[index]
         content = str(item.get("content") or "")
         role = item.get("role")
+        if role == "assistant":
+            # 模型每轮都会重新贴一遍完整文件，长任务里这些回显比工具结果更大。
+            if len(content) <= 8000:
+                continue
+            shortened = content[:1200] + "\n…（较早的模型输出已折叠）"
+            item["content"] = shortened
+            total -= len(content) - len(shortened)
+            continue
         if role == "user":
             if not content.startswith("[工具结果："):
                 continue
@@ -667,6 +696,7 @@ class AgentWorker(QObject):
         self.mcdev.set_log(self._probe_log)
         self._cancel = threading.Event()
         self._thread: threading.Thread | None = None
+        self._progress_at = time.monotonic()
         self.kernel: KernelBridge | None = None
         self._file_cache = FileCache()
         self._read_offsets: dict[str, int] = {}
@@ -676,6 +706,11 @@ class AgentWorker(QObject):
     @property
     def cancelled(self) -> bool:
         return self._cancel.is_set()
+
+    @property
+    def alive(self) -> bool:
+        thread = self._thread
+        return thread is not None and thread.is_alive()
 
     def cancel(self) -> None:
         self._cancel.set()
@@ -694,6 +729,7 @@ class AgentWorker(QObject):
         self.pending_changed.emit(list(self.pending))
 
     def _run(self) -> None:
+        previous_cancel = netclient.bind_cancel(self._cancel)
         try:
             run = self._loop()
         except Exception as exc:
@@ -703,6 +739,7 @@ class AgentWorker(QObject):
             if not self.cancelled:
                 self.done.emit(run.text)
         finally:
+            netclient.restore_cancel(previous_cancel)
             self.finished.emit()
 
     # ------------------------------------------------------------------
@@ -809,6 +846,11 @@ class AgentWorker(QObject):
                 break
             if self.cancelled:
                 raise AgentError("已取消")
+            if time.monotonic() - self._progress_at > PROGRESS_TIMEOUT:
+                raise AgentError(
+                    f"本轮已有 {PROGRESS_TIMEOUT // 60} 分钟没有写入文件或完成编译，"
+                    "已停止，避免一直空转。请检查网络/模型输出后再发送「继续」。"
+                )
             step += 1
             run.steps = step
             if limit <= 0:
@@ -980,6 +1022,7 @@ class AgentWorker(QObject):
             else:
                 self.applied.append(relative)
                 run.applied = list(self.applied)
+                self._progress_at = time.monotonic()
                 self.status.emit(f"已自动写入 {relative}")
                 # 自动写入也要在面板里留记录，否则用户只会看到“0 个”，无法确认写过什么。
                 staged.applied = True
@@ -1007,6 +1050,7 @@ class AgentWorker(QObject):
 
     def _auto_build(self) -> tuple[bool, str]:
         self.status.emit("文件已写入，正在自动编译…")
+        self._progress_at = time.monotonic()
         if self.kernel is not None:
             self.kernel.before_build("auto-build")
         try:
@@ -1130,6 +1174,7 @@ class AgentWorker(QObject):
         except Exception:  # noqa: BLE001 - 元数据保存失败不影响工程
             pass
         self.project = new_project
+        self._progress_at = time.monotonic()
         self.project_created.emit(str(target))
         package_name = package or f"com.example.{mod_id}"
         probe_hint = (
@@ -1246,6 +1291,7 @@ class AgentWorker(QObject):
         except Exception as exc:  # noqa: BLE001 - 生成失败要把原因带回对话
             return f"规格驱动生成失败：{exc}"
         target = Path(result["project"])
+        self._progress_at = time.monotonic()
         try:
             new_project = project_mod.load_project(target)
             new_project.save()
@@ -1728,6 +1774,9 @@ class AgentWorker(QObject):
                 )[:MAX_TOOL_RESULT]
             if name == "build_project":
                 task = str(args.get("task") or "build").strip()
+                blocked = _build_task_error(task)
+                if blocked:
+                    return blocked
                 try:
                     limit = float(args.get("timeout") or 900)
                 except (TypeError, ValueError):
@@ -1741,6 +1790,7 @@ class AgentWorker(QObject):
                     )
                 except mcdev.gradle.GradleError as exc:
                     return f"编译没有开始：{exc}"
+                self._progress_at = time.monotonic()
                 report = _build_report(result)
                 if self.kernel is not None and task == "build":
                     verdict = self.kernel.record_build(result.ok, result.output)
@@ -1753,7 +1803,9 @@ class AgentWorker(QObject):
                 url = str(args.get("url") or "").strip()
                 if not url:
                     return "fetch_url 缺少 url。"
-                return connectors.fetch_url(url)[:MAX_FETCH_RESULT]
+                return connectors.fetch_url(
+                    url, cancel=self._cancel
+                )[:MAX_FETCH_RESULT]
             if name == "studio_plan":
                 return self._studio_plan(args)
             if name == "studio_generate":
@@ -1772,6 +1824,7 @@ class AgentWorker(QObject):
                     self.project.root, timeout=min(max(limit, 120), 3600),
                     fix=bool(args.get("fix", True)), progress=self._build_log,
                 )
+                self._progress_at = time.monotonic()
                 summary = studio_bridge.build_mod.summarize(report)
                 errors = report.get("errors") or []
                 if errors:
@@ -1822,6 +1875,9 @@ class AgentWorker(QObject):
                 "screenshot_collect、offline_cache。"
             )
         except Exception as exc:
+            if self.cancelled:
+                # 工具在取消后被网络层/子进程提前打断，不能当作普通失败继续跑。
+                raise AgentError("已取消") from exc
             return f"工具执行失败：{exc}"
 
     # ------------------------------------------------------------------

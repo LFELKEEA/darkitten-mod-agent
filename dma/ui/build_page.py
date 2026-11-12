@@ -26,6 +26,7 @@ from .workbench_panel import ArtifactPanel, RunPanel
 class _Signals(QObject):
     line = Signal(str)
     done = Signal(str, bool)
+    refresh = Signal()
 
 
 class BuildPage(QWidget):
@@ -38,6 +39,7 @@ class BuildPage(QWidget):
         self._signals = _Signals()
         self._signals.line.connect(self._append)
         self._signals.done.connect(self._on_done)
+        self._signals.refresh.connect(self._refresh_status)
         self._cancel = threading.Event()
         self._thread: threading.Thread | None = None
         self._run_busy = False
@@ -290,7 +292,7 @@ class BuildPage(QWidget):
                 self._signals.line.emit(f"启动失败：{exc}")
             finally:
                 self._run_busy = False
-                self._refresh_status()
+                self._signals.refresh.emit()
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -308,7 +310,7 @@ class BuildPage(QWidget):
                 self._signals.line.emit(f"停止失败：{exc}")
             finally:
                 self._run_busy = False
-                self._refresh_status()
+                self._signals.refresh.emit()
 
         threading.Thread(target=work, daemon=True).start()
 

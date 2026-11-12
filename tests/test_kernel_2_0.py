@@ -233,7 +233,7 @@ class PrepareHonestyTests(TempDataCase):
         root = self.tmp / "project"
         root.mkdir()
         manager = LaunchManager()
-        manager.launch = lambda kind, path, timeout: {"kind": kind, "pid": 1}
+        manager.launch = lambda kind, path, timeout, **kwargs: {"kind": kind, "pid": 1}
         result = manager.prepare(root, "client", wait_join=False)
         self.assertFalse(result["ok"])
         self.assertFalse(result["results"][0]["joined"])
@@ -242,9 +242,9 @@ class PrepareHonestyTests(TempDataCase):
         root = self.tmp / "project"
         root.mkdir()
         manager = LaunchManager()
-        manager.launch = lambda kind, path, timeout: {"kind": kind, "pid": 1}
+        manager.launch = lambda kind, path, timeout, **kwargs: {"kind": kind, "pid": 1}
         manager._sleep = lambda seconds: None
-        manager._join_client = lambda root, client, timeout, port: {"kind": "client", "joined": False}
+        manager._join_client = lambda root, client, timeout, port, **kwargs: {"kind": "client", "joined": False}
         result = manager.prepare(root, "client", wait_join=True)
         self.assertFalse(result["ok"])
 
@@ -252,9 +252,9 @@ class PrepareHonestyTests(TempDataCase):
         root = self.tmp / "project"
         root.mkdir()
         manager = LaunchManager()
-        manager.launch = lambda kind, path, timeout: {"kind": kind, "pid": 1}
+        manager.launch = lambda kind, path, timeout, **kwargs: {"kind": kind, "pid": 1}
         manager._sleep = lambda seconds: None
-        manager._join_client = lambda root, client, timeout, port: {"kind": "client", "joined": True}
+        manager._join_client = lambda root, client, timeout, port, **kwargs: {"kind": "client", "joined": True}
         result = manager.prepare(root, "client", wait_join=True)
         self.assertTrue(result["ok"])
 

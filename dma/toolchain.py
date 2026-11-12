@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from . import deps, envcheck, gradle, paths, wrapper
+from . import deps, envcheck, gradle, netclient, paths, wrapper
 
 USER_AGENT = "DarkittenModAgent/0.1 (+https://lfelkeea.github.io/darkitten-launcher/)"
 DOWNLOAD_TIMEOUT = 30
@@ -115,8 +115,7 @@ def sha256_file(path: Path) -> str:
 
 def _fetch_text(url: str, timeout: int = 20, limit: int = 2_000_000) -> str:
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        raw = response.read(limit + 1)
+    raw = netclient.fetch(request, timeout=timeout)
     return raw[:limit].decode("utf-8", "replace")
 
 
@@ -126,13 +125,12 @@ def _probe_ranges(url: str, timeout: int = 10) -> int | None:
         url, headers={"User-Agent": USER_AGENT, "Range": "bytes=0-0"}
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            if int(getattr(response, "status", 200)) != 206:
-                return None
-            response.read(1)
-            content_range = response.headers.get("Content-Range") or ""
-            match = re.search(r"/(\d+)\s*$", content_range)
-            return int(match.group(1)) if match else None
+        _raw, status, headers = netclient.fetch_info(request, timeout=timeout)
+        if status != 206:
+            return None
+        content_range = headers.get("Content-Range") or headers.get("content-range") or ""
+        match = re.search(r"/(\d+)\s*$", content_range)
+        return int(match.group(1)) if match else None
     except Exception:  # noqa: BLE001 - 探测失败就退回单连接
         return None
 
@@ -169,7 +167,9 @@ def _download_ranges(
                         "Range": f"bytes={start}-{end}",
                     },
                 )
-                with urllib.request.urlopen(request, timeout=DOWNLOAD_TIMEOUT) as response:
+                with netclient.open_stream(
+                    request, timeout=DOWNLOAD_TIMEOUT, cancel=cancel
+                ) as response:
                     if int(getattr(response, "status", 200)) != 206:
                         raise ToolchainError("服务器不支持分段下载")
                     received = 0
@@ -295,7 +295,11 @@ def _download_one(
             headers["Range"] = f"bytes={resume}-"
         request = urllib.request.Request(url, headers=headers)
         try:
-            response = urllib.request.urlopen(request, timeout=DOWNLOAD_TIMEOUT)
+            response = netclient.open_stream(
+                request, timeout=DOWNLOAD_TIMEOUT, cancel=cancel
+            )
+        except netclient.NetCancelled as exc:
+            raise DownloadCancelled("已取消") from exc
         except urllib.error.HTTPError as exc:
             if exc.code == 416 and resume:
                 part.replace(dest)

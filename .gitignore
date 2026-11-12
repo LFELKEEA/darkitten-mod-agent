@@ -7,3 +7,5 @@ dist/
 .smoke.py
 data/
 *.log
+
+.smoke_data_studio/

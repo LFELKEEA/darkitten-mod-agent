@@ -13,7 +13,8 @@ import urllib.parse
 import zipfile
 from pathlib import Path
 
-from ..gradle import windows_command
+from .. import envcheck
+from ..gradle import toolchain_args, windows_command
 
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
@@ -25,6 +26,8 @@ HEARTBEAT_SECONDS = 15.0
 PREFLIGHT_TIMEOUT = 3.0
 PREFLIGHT_LIMIT = 6
 GRADLE_FILES = ("build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts")
+_TOOLCHAIN_RE = re.compile(r"JavaLanguageVersion\.of\(\s*(\d+)\s*\)")
+_JVM_TOOLCHAIN_RE = re.compile(r"jvmToolchain\(\s*(\d+)\s*\)")
 _REPO_RE = re.compile(r"https?://[^\s\"'<>()]+")
 _NETWORK_MARKERS = (
     "could not resolve",
@@ -112,6 +115,9 @@ def _command(
             "先补齐 Wrapper，或让助手按当前加载器生成工程骨架。"
         )
     argv = [str(gradlew), task, "--console=plain"]
+    argv.extend(
+        toolchain_args([str(item) for item in envcheck.java_homes()])
+    )
     if init_script is not None:
         argv.extend(["--init-script", str(init_script)])
     if offline:
@@ -356,6 +362,55 @@ class _Watchdog:
                 )
 
 
+def required_java_major(project_dir: str | Path) -> int | None:
+    """从构建脚本里读出 toolchain 要求的 Java 大版本。"""
+    root = Path(str(project_dir))
+    for name in (*GRADLE_FILES, "gradle.properties"):
+        path = root / name
+        if not path.is_file():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for pattern in (_TOOLCHAIN_RE, _JVM_TOOLCHAIN_RE):
+            match = pattern.search(text)
+            if match:
+                return int(match.group(1))
+    return None
+
+
+def installed_java_majors() -> dict[int, Path]:
+    majors: dict[int, Path] = {}
+    for home in envcheck.java_homes():
+        version = envcheck.java_version_at(home) or envcheck.probe_java_home(home)
+        if not version:
+            continue
+        majors.setdefault(envcheck.java_major(version), Path(home))
+    return majors
+
+
+def check_toolchain(project_dir: str | Path) -> None:
+    """缺 JDK 时立刻给可读错误，不要让 Gradle 去 Adoptium 自动下载。
+
+    自动下载在部分网络里会卡在 TLS/正文读取上，表现为构建十几分钟没有任何
+    输出；这里提前失败，让用户或 Agent 去安装对应 JDK。
+    """
+    root = Path(str(project_dir))
+    required = required_java_major(root)
+    if required is None:
+        return
+    installed = installed_java_majors()
+    if required in installed:
+        return
+    known = "、".join(f"JDK {major}" for major in sorted(installed)) or "无"
+    raise GradleError(
+        f"这个工程要求 JDK {required}，但本机没有检测到（已安装：{known}）。"
+        f"请先在「环境」页安装 JDK {required}，或把 build.gradle 里的 "
+        f"JavaLanguageVersion.of({required}) 改成本机已有的版本。"
+    )
+
+
 def run_gradle(
     project_dir: str | Path,
     task: str,
@@ -368,6 +423,7 @@ def run_gradle(
     root = Path(str(project_dir)).expanduser()
     if not root.is_dir():
         raise GradleError(f"工程目录不存在：{root}")
+    check_toolchain(root)
     probe = preflight(root, log)
     offline = bool(probe["offline"])
     init_script: Path | None = None

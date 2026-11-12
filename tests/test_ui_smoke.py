@@ -222,5 +222,71 @@ class UiSmokeTests(TempDataCase):
         self.app.processEvents()
 
 
+    def test_chat_busy_resets_when_worker_thread_died(self) -> None:
+        """worker 线程已结束但 finished 信号没到时，计时器要主动收尾。"""
+        import time
+
+        from dma.ui import theme
+        from dma.ui.main_window import MainWindow
+
+        theme.apply_theme(self.app, 13)
+        window = MainWindow()
+        window.config.shortcut_offered = True
+        window.config.update_url = ""
+        page = window.chat_page
+
+        class DeadWorker:
+            alive = False
+
+        page._worker = DeadWorker()
+        page._busy_started = time.time() - 10
+        page._tick_busy()
+        self.app.processEvents()
+        self.assertIsNone(page._worker)
+        self.assertEqual(page._busy_started, 0.0)
+        self.assertEqual(page.send_btn.text(), "发送")
+        window.close()
+        window.memory.close()
+        self.app.processEvents()
+
+    def test_chat_stop_can_abandon_a_stuck_worker(self) -> None:
+        """停止迟迟不返回时，第二次点击要能释放界面。"""
+        from dma.ui import theme
+        from dma.ui.main_window import MainWindow
+
+        theme.apply_theme(self.app, 13)
+        window = MainWindow()
+        window.config.shortcut_offered = True
+        window.config.update_url = ""
+        page = window.chat_page
+
+        class StuckWorker:
+            alive = True
+
+            def __init__(self) -> None:
+                self.cancelled = False
+                self.blocked = False
+
+            def cancel(self) -> None:
+                self.cancelled = True
+
+            def blockSignals(self, value: bool) -> None:
+                self.blocked = value
+
+        worker = StuckWorker()
+        page._worker = worker
+        page._set_running(True)
+        page._stop()
+        self.assertTrue(worker.cancelled)
+        self.assertIs(page._worker, worker)
+        page._stop()
+        self.assertTrue(worker.blocked)
+        self.assertIsNone(page._worker)
+        self.assertFalse(page._busy_started)
+        window.close()
+        window.memory.close()
+        self.app.processEvents()
+
+
 if __name__ == "__main__":
     unittest.main()

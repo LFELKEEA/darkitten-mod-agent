@@ -1,5 +1,49 @@
 # Changelog
 
+## 2.0.9 — 2026-11-11
+
+修复“开发端无法运行”：NeoForge Maven 直连返回 502，`runServer` / `runClient` 卡在 `createMinecraftArtifacts`。
+
+- 启动开发端时也会像编译一样启用本地 Maven 镜像代理并传入 `--init-script`。之前只有 `build_project` 走了镜像，界面上的“启动开发端”仍在直连 `https://maven.neoforged.net/...`，插件动态添加的仓库地址不会被构建脚本里的 repositories 覆盖。
+- 启动阶段如果 Gradle 报依赖下载/证书错误，会自动强制切换镜像并换端口重试一次，不再把网络问题直接报成开发端启动失败。
+- 镜像模式下同步放宽 Gradle 的 HTTP 超时（`slow=True`），上游慢速镜像吐大文件时不会在 30 秒 socket 超时处断掉。
+- 启动开发端的默认等待时间从 180 秒提高到 600 秒。NeoForge 首次运行要生成 Minecraft artifacts，3 分钟不够；界面按钮和 Agent 走同一套默认值。
+- 工程第一次启动、`run/` 与 `run-server/` 都不存在时，运行目录按 ModDevGradle / Loom / Forge MDK 的默认值使用 `run/`。之前会写成 `run-server/`，游戏去 `run/` 找不到 `eula.txt` 直接退出。
+- 新增回归测试：断言启动命令包含 `--init-script` 和镜像脚本路径。
+
+## 2.0.8 — 2026-11-11
+
+修复“一直在运行 runServer”：服务端其实已经启动，工坊却在等一个不存在的探针，超时后把正常进程杀掉，然后再启动下一轮。
+
+- `build_project` 不再接受 `runServer` / `runClient`。这两个是常驻 Gradle 任务，套在编译超时里只会空等到超时并杀掉开发端；启动开发端统一走 `mcdev_prepare`。
+- 没有游戏内探针的加载器（NeoForge / Fabric 等）不再等待 39001/39002 探针端口：改为识别 Gradle 输出里的 `Done (…)`、`For help, type`、`Backend library` 等启动标记；到截止时间进程仍存活就按“已启动”处理，不再误杀。
+- `server.properties` 定位修正：工程同时存在 `run/` 和 `run-server/` 时优先使用 `run/`，避免把 eula/端口写进游戏根本不读的目录。ModDevGradle 默认就是 `run/`。
+- 启动服务端前检查实际 `server-port` 是否已被占用；已被占用（例如上次退出后残留的服务端）时直接返回 `alreadyRunning`，不再重复启动导致端口冲突。
+- 同一会话内重复调用 `mcdev_prepare` 时复用已跟踪的进程，不再叠加多份 `runServer`。
+- 新增 run 目录、端口读取、启动标记、重复启动拦截等回归测试。
+
+## 2.0.7 — 2026-11-11
+
+修复构建卡在 Gradle 自动下载 JDK：界面显示“生成中”，实际是 Gradle 在等 Adoptium 的响应。
+
+- 构建、GameTest、启动开发端和 Studio 构建统一把本机检测到的所有 JDK 通过 `-Porg.gradle.java.installations.paths` 告诉 Gradle。像 `D:\developer\Java\jdk-21` 这种自定义目录现在能被正确识别，不再因为只看到 JAVA_HOME 里的 JDK 17 而去下载 JDK 21。
+- 统一关闭 `org.gradle.java.installations.auto-download`：缺 JDK 时立刻返回可读错误（说明工程要求哪个版本、本机有哪些版本），不再卡在 TLS 握手或 5 分钟一次的 socket 读取超时上。
+- 构建前预检工程声明的 `JavaLanguageVersion.of(N)` / `jvmToolchain(N)`，版本不匹配时直接提示安装对应 JDK，而不是启动一个注定失败的构建。
+- 新增对应的 toolchain 解析与失败快速返回测试。
+
+## 2.0.6 — 2026-11-11
+
+修复“一轮生成跑几十分钟还不结束”的根本原因，并补上停止、超时与线程安全相关的一批问题。
+
+- 新增网络访问层 `dma/netclient.py`：所有 HTTP 请求改为带硬性截止时间的后台线程 + 主线程等待，`urlopen(timeout=30)` 在打包运行时里卡在 TLS 握手（实测 `SSLSocket.do_handshake` 卡 50 分钟以上）的情况不再拖死整个 Agent。超时或取消后会立刻返回，不再无限阻塞。
+- 无响应的主机记入 10 分钟黑名单，后续请求直接快速失败，避免对同一个黑洞地址反复重试。
+- `cdn.jsdelivr.net` / `raw.githubusercontent.com` 的链接自动改写为 `api.github.com` 的 contents 接口（`Accept: application/vnd.github.raw`），这两个域名在部分网络环境下会完全不通。
+- 工具层统一接入 `fetch_url`、`toolchain` 探测/下载、Studio 下载等网络出口，全部支持取消。
+- 停止按钮真正生效：取消事件贯穿到网络请求与工具执行；点一次开始停止，再点一次可放弃等待并切回可输入状态。卡死的旧 Worker 信号不会再污染新任务。
+- 新增“20 分钟无进展”看门狗：如果长时间没有写入文件、也没有完成构建，自动停止并提示用户，不再空转。
+- UI 线程安全：编译/运行页的进程退出回调改为通过信号回主线程刷新，不再从后台线程直接改控件。
+- 新增 `tests/test_netclient.py`（11 项）以及 Agent 取消、UI 自愈相关回归测试。
+
 ## 2.0.5 — 2026-11-09
 
 修复模板、运行文件、场景卡片与工具健壮性问题，并补上 CI。

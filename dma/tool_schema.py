@@ -55,7 +55,7 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
         {"loader": {"type": "string", "enum": ["Forge", "Fabric", "NeoForge"]},
          "mod_id": _TEXT, "name": _TEXT, "package": _TEXT, "dest": _TEXT,
          "mc_version": _TEXT, "version": _TEXT, "overwrite": {"type": "boolean"}}),
-    _fn("build_project", "执行 Gradle 任务",
+    _fn("build_project", "执行有限的 Gradle 任务；runServer/runClient 请用 mcdev_prepare",
         {"task": {"type": "string"}, "timeout": {"type": "number"}}),
     _fn("lint_project", "运行 176 项静态检查",
         {"level": {"type": "string"}, "checker": {"type": "string"},

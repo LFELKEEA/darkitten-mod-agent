@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -10,7 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import paths
+from . import netclient, paths
 
 MAX_RESPONSE_BYTES = 300_000
 ENV_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
@@ -206,8 +207,10 @@ def fetch_url(
     headers: dict[str, Any] | None = None,
     timeout: int = 30,
     max_bytes: int = MAX_RESPONSE_BYTES,
+    cancel: threading.Event | None = None,
 ) -> str:
     text = str(url or "").strip()
+    text, extra_headers = _rewrite_blocked_url(text)
     scheme = urllib.parse.urlparse(text).scheme.lower()
     if scheme not in ("http", "https"):
         raise ConnectorError("只允许访问 http:// 或 https:// 地址。")
@@ -217,14 +220,24 @@ def fetch_url(
             {
                 "User-Agent": "DarkittenModAgent/0.1",
                 "Accept": "application/json, text/plain, */*",
+                **(extra_headers or {}),
                 **(headers or {}),
             }
         ),
         method="GET",
     )
     try:
-        with urllib.request.urlopen(request, timeout=max(5, min(120, timeout))) as response:
-            raw = response.read(max_bytes + 1)
+        raw = netclient.fetch(
+            request,
+            timeout=max(5, min(60, timeout)),
+            cancel=cancel,
+        )
+    except netclient.NetCancelled as exc:
+        raise ConnectorError("请求已取消（本轮已停止）。") from exc
+    except netclient.NetTimeout as exc:
+        raise ConnectorError(
+            f"连接超时：{exc} 换一个来源再试，或者改用 github_file / 本地镜像。"
+        ) from exc
     except urllib.error.HTTPError as exc:
         detail = ""
         try:
@@ -244,6 +257,40 @@ def fetch_url(
     else:
         suffix = ""
     return raw.decode("utf-8", "replace") + suffix
+
+
+_JSDELIVR_RE = re.compile(
+    r"^https?://cdn\.jsdelivr\.net/gh/([^/@]+)/([^/@]+)@([^/]+)/(.+)$", re.IGNORECASE
+)
+_RAW_GITHUB_RE = re.compile(
+    r"^https?://raw\.githubusercontent\.com/([^/]+)/([^/]+)/([^/]+)/(.+)$",
+    re.IGNORECASE,
+)
+
+
+def _rewrite_blocked_url(url: str) -> tuple[str, dict[str, str]]:
+    """把常见但可能被网络黑洞的源码 CDN 改走 api.github.com。
+
+    很多环境里 cdn.jsdelivr.net / raw.githubusercontent.com 会一直卡在 TLS
+    握手；GitHub API 往往仍然可用。文件内容完全一致，只是换一条通路。
+    """
+    match = _JSDELIVR_RE.match(url)
+    if match:
+        owner, repo, ref, path = match.groups()
+        target = (
+            f"https://api.github.com/repos/{owner}/{repo}/contents/"
+            f"{urllib.parse.quote(path, safe='/')}?ref={urllib.parse.quote(ref, safe='')}"
+        )
+        return target, {"Accept": "application/vnd.github.raw"}
+    match = _RAW_GITHUB_RE.match(url)
+    if match:
+        owner, repo, ref, path = match.groups()
+        target = (
+            f"https://api.github.com/repos/{owner}/{repo}/contents/"
+            f"{urllib.parse.quote(path, safe='/')}?ref={urllib.parse.quote(ref, safe='')}"
+        )
+        return target, {"Accept": "application/vnd.github.raw"}
+    return url, {}
 
 
 def test_connector(connector: Connector) -> str:

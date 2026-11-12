@@ -8,7 +8,7 @@ from dma import agent as agent_mod
 from dma.agent import BuildOutcome
 from dma.agent import AgentRun, AgentWorker, PendingFile, ToolCall, apply_pending
 from dma.config import Config
-from dma.connectors import ConnectorStore
+from dma.connectors import ConnectorError, ConnectorStore
 from dma.memory import MemoryStore
 from dma.project import create_project
 from dma.skills import SkillStore
@@ -543,6 +543,23 @@ class AgentLoopTests(TempDataCase):
         self.assertIn("已折叠", messages[3]["content"])
         self.assertGreater(len(messages[-1]["content"]), 90_000)
 
+    def test_compact_messages_folds_old_assistant_output(self) -> None:
+        messages = [
+            {"role": "system", "content": "s"},
+            {"role": "user", "content": "u"},
+            {
+                "role": "assistant",
+                "content": "```file:src/A.java\n" + "y" * 120_000 + "\n```",
+            },
+            {"role": "user", "content": "[工具结果：write_file]\nok"},
+            {"role": "assistant", "content": "继续"},
+            {"role": "user", "content": "[工具结果：read_file]\n" + "z" * 400_000},
+        ]
+        with mock.patch("dma.agent.MESSAGE_CHAR_BUDGET", 100_000):
+            agent_mod._compact_messages(messages)
+        self.assertIn("较早的模型输出已折叠", messages[2]["content"])
+        self.assertLess(len(messages[2]["content"]), 2000)
+
     def test_history_window_strips_old_dsml_markup(self) -> None:
         dsml = (
             '<|DSML|calls><|DSML|invoke name="tool">'
@@ -596,6 +613,39 @@ class AgentLoopTests(TempDataCase):
             ToolCall(name="mcdev_prepare", args={"kind": "desktop"}), AgentRun()
         )
         self.assertIn("server、client 或 both", text)
+
+    def test_fetch_url_receives_cancel_event(self) -> None:
+        project = make_project(self)
+        worker = self.worker(project)
+        with mock.patch(
+            "dma.agent.connectors.fetch_url", return_value="ok"
+        ) as fetch:
+            text = worker._execute(
+                ToolCall(name="fetch_url", args={"url": "https://example.com/a"}),
+                AgentRun(),
+            )
+        self.assertEqual(text, "ok")
+        self.assertIs(fetch.call_args.kwargs.get("cancel"), worker._cancel)
+
+    def test_cancelled_tool_aborts_instead_of_continuing(self) -> None:
+        project = make_project(self)
+        worker = self.worker(project)
+        worker.cancel()
+        with mock.patch(
+            "dma.agent.connectors.fetch_url",
+            side_effect=ConnectorError("请求已取消（本轮已停止）。"),
+        ):
+            with self.assertRaises(agent_mod.AgentError):
+                worker._execute(
+                    ToolCall(name="fetch_url", args={"url": "https://example.com/a"}),
+                    AgentRun(),
+                )
+
+    def test_build_project_rejects_long_running_tasks(self) -> None:
+        for task in ("runServer", "runClient", "RunServer"):
+            self.assertTrue(agent_mod._build_task_error(task))
+        self.assertEqual(agent_mod._build_task_error("build"), "")
+        self.assertEqual(agent_mod._build_task_error("runGameTestServer"), "")
 
 
 if __name__ == "__main__":

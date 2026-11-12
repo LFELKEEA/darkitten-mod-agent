@@ -79,7 +79,7 @@ class McdevService:
         project_dir: str | Path,
         kind: str,
         *,
-        timeout_ms: int | None = 180_000,
+        timeout_ms: int | None = 600_000,
         wait_join: bool = True,
         join_port: int = 25566,
         install_probe: bool = True,
@@ -101,6 +101,7 @@ class McdevService:
             timeout_ms=timeout_ms,
             wait_join=wait_join and probe_ready,
             join_port=join_port,
+            wait_probe=probe_ready,
         )
         result["probe"] = probe_info
         return result

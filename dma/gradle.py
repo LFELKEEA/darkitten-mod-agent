@@ -42,6 +42,22 @@ SLOW_HTTP_TIMEOUT_OPTS = (
     "-Dorg.gradle.internal.http.socketTimeout=300000",
 )
 
+# Gradle 默认只认标准安装目录和 JAVA_HOME，像 D:\developer\Java\jdk-21 这种
+# 自定义位置找不到，就会去 Adoptium 自动下载 JDK。那个域名在部分网络里会
+# 卡在 TLS/正文读取上，表现为“构建十几分钟没有任何输出”。这里把所有检测到
+# 的 JDK 明确告诉 Gradle，并关闭自动下载：缺 JDK 时立刻报错，而不是干等。
+_AUTO_DOWNLOAD_ARG = "-Porg.gradle.java.installations.auto-download=false"
+_PATHS_ARG = "-Porg.gradle.java.installations.paths="
+
+
+def toolchain_args(java_homes: list[str] | tuple[str, ...] | None = None) -> list[str]:
+    """给 Gradle 命令行用的 toolchain 参数。"""
+    args = [_AUTO_DOWNLOAD_ARG]
+    homes = [str(Path(item)) for item in (java_homes or []) if str(item or "").strip()]
+    if homes:
+        args.append(_PATHS_ARG + ",".join(homes))
+    return args
+
 CERT_ERROR_MARKERS = (
     "PKIX path building failed",
     "unable to find valid certification path",

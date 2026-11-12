@@ -48,6 +48,8 @@ class ChatPage(QWidget):
         self.project = None
         self.history: list[dict[str, str]] = []
         self._worker: AgentWorker | None = None
+        self._stopping = False
+        self._abandoned: list[AgentWorker] = []
         self._pending: list[PendingFile] = []
         self.artifact_jars: list[dict] = []
         self.artifact_summary = ""
@@ -671,28 +673,37 @@ class ChatPage(QWidget):
         self.history.append({"role": "user", "content": text})
         sessions.save_history(self.project.root, self.history)
         self._set_pending([])
-        self._set_running(True)
 
-        worker = AgentWorker(
-            user_text=text,
-            history=self.history[:-1],
-            project=self.project,
-            config=self.main.config,
-            skill_store=self.main.skill_store,
-            memory=self.main.memory,
-            connector_store=self.main.connector_store,
-            knowledge=self.main.knowledge,
-        )
+        try:
+            worker = AgentWorker(
+                user_text=text,
+                history=self.history[:-1],
+                project=self.project,
+                config=self.main.config,
+                skill_store=self.main.skill_store,
+                memory=self.main.memory,
+                connector_store=self.main.connector_store,
+                knowledge=self.main.knowledge,
+            )
+        except Exception as exc:  # noqa: BLE001 - 启动失败必须把界面恢复
+            self._on_failed(f"启动失败：{exc}")
+            return
         self._worker = worker
         worker.status.connect(self.main.status)
         worker.assistant.connect(self._on_assistant)
         worker.pending_changed.connect(self._set_pending)
         worker.artifact_changed.connect(self._on_artifact_changed)
         worker.project_created.connect(self.open_project_path)
-        worker.done.connect(self._on_done)
-        worker.failed.connect(self._on_failed)
-        worker.finished.connect(self._on_finished)
-        worker.start()
+        worker.done.connect(lambda text, w=worker: self._on_worker_done(w, text))
+        worker.failed.connect(lambda text, w=worker: self._on_worker_failed(w, text))
+        worker.finished.connect(lambda w=worker: self._on_worker_finished(w))
+        self._set_running(True)
+        try:
+            worker.start()
+        except Exception as exc:  # noqa: BLE001 - 线程没起来也要恢复界面
+            self._worker = None
+            self._set_running(False)
+            self._on_failed(f"启动失败：{exc}")
 
     def _set_running(self, running: bool) -> None:
         self.send_btn.setEnabled(not running)
@@ -718,12 +729,23 @@ class ChatPage(QWidget):
     def _tick_busy(self) -> None:
         if not self._busy_started:
             return
+        worker = self._worker
+        if worker is not None and not worker.alive:
+            # 线程已经结束但 finished 信号没送达（极端情况下信号队列被阻塞）。
+            # 主动收尾，避免界面永远停在“生成中”。
+            QTimer.singleShot(0, self._on_finished)
+            return
         elapsed = int(time.time() - self._busy_started)
-        self.send_btn.setText(f"生成中… {elapsed}s")
-        self.stop_btn.setText(f"停止（{elapsed}s）")
+        if self._stopping:
+            self.send_btn.setText(f"正在停止… {elapsed}s")
+            self.stop_btn.setText("再点一次放弃等待")
+        else:
+            self.send_btn.setText(f"生成中… {elapsed}s")
+            self.stop_btn.setText(f"停止（{elapsed}s）")
         if elapsed >= 60:
             self.stop_btn.setToolTip(
-                "任务还在后台执行。超过 1 分钟没有进度时，可以点这里中止并查看日志。"
+                "任务还在后台执行。超过 1 分钟没有进度时，可以点这里中止；"
+                "如果一直停不下来，再点一次放弃等待（后台线程会自行退出）。"
             )
 
     def _on_assistant(self, text: str) -> None:
@@ -731,6 +753,21 @@ class ChatPage(QWidget):
         self.history.append({"role": "assistant", "content": text})
         if self.project is not None:
             sessions.save_history(self.project.root, self.history)
+
+    def _on_worker_done(self, worker: AgentWorker, text: str) -> None:
+        if self._worker is not worker:
+            return
+        self._on_done(text)
+
+    def _on_worker_failed(self, worker: AgentWorker, message: str) -> None:
+        if self._worker is not worker:
+            return
+        self._on_failed(message)
+
+    def _on_worker_finished(self, worker: AgentWorker) -> None:
+        if self._worker is not worker:
+            return
+        self._on_finished()
 
     def _on_done(self, text: str) -> None:
         text = (text or "").strip()
@@ -748,16 +785,49 @@ class ChatPage(QWidget):
         self.main.status(message)
 
     def _on_finished(self) -> None:
+        if self._worker is None:
+            return
         self._worker = None
+        self._stopping = False
         # Agent 线程结束后把日志回调还给界面，避免后续启动/停止写到已销毁的对象上。
         mcdev.shared().set_log(lambda text: self.run_log.emit(str(text)))
         self._set_running(False)
 
     def _stop(self) -> None:
-        if self._worker is not None:
-            self._worker.cancel()
-            self.main.status("正在停止…")
-            self.stop_btn.setEnabled(False)
+        if self._worker is None:
+            return
+        if self._stopping:
+            self._abandon_worker()
+            return
+        self._stopping = True
+        self._worker.cancel()
+        self.main.status("正在停止…（如果卡在系统调用里，再点一次“停止”可放弃等待）")
+        self.stop_btn.setEnabled(True)
+        self.stop_btn.setText("再点一次放弃等待")
+        self._tick_busy()
+
+    def _abandon_worker(self) -> None:
+        """停止请求迟迟不返回时，放弃等待后台线程，先把界面释放出来。
+
+        线程是 daemon；取消标志已经设置，它一旦从系统调用返回就会自行结束。
+        这里断开所有信号，避免它稍后完成时覆盖新一轮的界面状态。
+        """
+        worker = self._worker
+        if worker is None:
+            return
+        self._worker = None
+        self._stopping = False
+        try:
+            worker.blockSignals(True)
+        except Exception:  # noqa: BLE001 - 释放界面优先
+            pass
+        self._abandoned.append(worker)
+        self._abandoned = self._abandoned[-4:]
+        self._set_running(False)
+        self.main.status(
+            "已放弃等待后台任务。它可能仍会短暂占用网络/编译资源，"
+            "完成后不会写入当前对话。"
+        )
 
     # ------------------------------------------------------------------
     def _set_pending(self, items: list[PendingFile]) -> None:

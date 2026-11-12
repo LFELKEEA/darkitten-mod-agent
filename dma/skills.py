@@ -659,7 +659,8 @@ neoforge/      # NeoForge 入口与平台实现
 ## 失败处理
 - GitHub 403：匿名 API 每小时 60 次，换 `github_file` 走 jsDelivr CDN，或等一段时间。
 - grep.app 429：改用 GitHub 仓库搜索。
-- raw.githubusercontent 连接被拒：改用 GitHub API contents 或 jsDelivr。
+- raw.githubusercontent / jsDelivr 连接超时：直接改用 `github_file`（走 api.github.com）。`fetch_url` 已经把 jsDelivr 和 raw 链接自动改写到 GitHub API，不要反复重试同一个地址。
+- Maven 仓库超时：换用列表里的镜像域名；连续两次超时就停下来告诉用户网络有问题。
 - 网络完全不可用：明确告诉用户查不到，基于本地知识库/反编译源码实现，不要编造类名。
 
 ## 使用原则

@@ -5,11 +5,52 @@ import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+from unittest import mock
 
 from dma import mcdev
-from dma.mcdev import cards, scenario
+from dma.mcdev import cards, gradle as mcdev_gradle, process as mcdev_process
+from dma.mcdev import scenario, server_files
 
 from .base import TempDataCase
+
+
+class ToolchainTests(TempDataCase):
+    def test_required_java_major_reads_build_scripts(self) -> None:
+        root = self.tmp / "mod"
+        root.mkdir()
+        (root / "build.gradle").write_text(
+            "java.toolchain.languageVersion = JavaLanguageVersion.of(21)\n",
+            encoding="utf-8",
+        )
+        self.assertEqual(mcdev_gradle.required_java_major(root), 21)
+
+    def test_required_java_major_supports_jvm_toolchain(self) -> None:
+        root = self.tmp / "mod"
+        root.mkdir()
+        (root / "build.gradle.kts").write_text(
+            "kotlin { jvmToolchain(17) }\n", encoding="utf-8"
+        )
+        self.assertEqual(mcdev_gradle.required_java_major(root), 17)
+
+    def test_check_toolchain_fails_fast_when_jdk_missing(self) -> None:
+        root = self.tmp / "mod"
+        root.mkdir()
+        (root / "build.gradle").write_text(
+            "java.toolchain.languageVersion = JavaLanguageVersion.of(99)\n",
+            encoding="utf-8",
+        )
+        with mock.patch.object(
+            mcdev_gradle, "installed_java_majors", return_value={17: Path("x")}
+        ):
+            with self.assertRaises(mcdev_gradle.GradleError):
+                mcdev_gradle.check_toolchain(root)
+
+    def test_toolchain_args_disable_auto_download(self) -> None:
+        args = mcdev_gradle.toolchain_args([r"D:\Java\jdk-21"])
+        self.assertIn("-Porg.gradle.java.installations.auto-download=false", args)
+        self.assertIn(
+            r"-Porg.gradle.java.installations.paths=D:\Java\jdk-21", args
+        )
 
 
 class ScenarioAssertTests(unittest.TestCase):
@@ -354,6 +395,131 @@ class TemplateTests(TempDataCase):
         service = mcdev.McdevService()
         status = service.launch_status()
         self.assertEqual(status.get("processes"), [])
+
+
+class NoProbeLaunchTests(TempDataCase):
+    def test_run_dir_prefers_run(self) -> None:
+        root = self.tmp / "mod"
+        (root / "run").mkdir(parents=True)
+        (root / "run-server").mkdir()
+        self.assertEqual(server_files.run_dir_for(root), root / "run")
+
+    def test_run_dir_defaults_to_run_before_first_launch(self) -> None:
+        root = self.tmp / "mod"
+        root.mkdir()
+        self.assertEqual(server_files.run_dir_for(root), root / "run")
+        self.assertEqual(server_files.run_dir_for(root, "client"), root / "run")
+
+    def test_started_markers(self) -> None:
+        self.assertTrue(mcdev_process._looks_started("server", "Done (3.586s)!"))
+        self.assertTrue(
+            mcdev_process._looks_started("server", "For help, type \"help\"")
+        )
+        self.assertFalse(mcdev_process._looks_started("server", "BUILD FAILED"))
+        self.assertTrue(
+            mcdev_process._looks_started("client", "Backend library: LWJGL")
+        )
+
+    def test_server_port_reads_run_properties(self) -> None:
+        root = self.tmp / "mod"
+        (root / "run").mkdir(parents=True)
+        (root / "run" / "server.properties").write_text(
+            "server-port=25577\n", encoding="utf-8"
+        )
+        self.assertEqual(server_files.server_port(root), 25577)
+
+    def test_parse_netstat_pid(self) -> None:
+        text = (
+            "  TCP    0.0.0.0:25565          0.0.0.0:0              "
+            "LISTENING       4252\n"
+            "  TCP    [::]:25565             [::]:0                 "
+            "LISTENING       4252\n"
+            "  TCP    127.0.0.1:25565        127.0.0.1:50000        "
+            "ESTABLISHED     9999\n"
+        )
+        self.assertEqual(mcdev_process._parse_netstat_pid(text, 25565), 4252)
+        self.assertIsNone(mcdev_process._parse_netstat_pid(text, 25566))
+
+    def test_launch_does_not_duplicate_when_port_in_use(self) -> None:
+        root = self.tmp / "mod"
+        (root / "run").mkdir(parents=True)
+        (root / "run" / "server.properties").write_text(
+            "server-port=25566\n", encoding="utf-8"
+        )
+        manager = mcdev_process.LaunchManager()
+        with mock.patch.object(
+            mcdev_process.probe_mod, "probe_status_once", return_value=False
+        ), mock.patch.object(mcdev_process, "_port_open", return_value=True):
+            result = manager.launch("server", root, 5000)
+        self.assertTrue(result["alreadyRunning"])
+        self.assertEqual(result["gamePort"], 25566)
+
+    def test_prepare_skips_probe_wait_when_unsupported(self) -> None:
+        root = self.tmp / "mod"
+        root.mkdir()
+        service = mcdev.McdevService()
+        with mock.patch.object(
+            mcdev.templates, "supports_probe", return_value=False
+        ), mock.patch.object(
+            mcdev_process.LaunchManager,
+            "prepare",
+            return_value={"ok": True, "results": []},
+        ) as prepare:
+            result = service.prepare(root, "server")
+        self.assertFalse(prepare.call_args.kwargs["wait_probe"])
+        self.assertFalse(result["probe"]["available"])
+
+    def test_launch_uses_mirror_init_script(self) -> None:
+        root = self.tmp / "mod"
+        root.mkdir()
+        (root / "gradlew").write_text("#!/bin/sh\n", encoding="utf-8")
+        (root / "gradlew.bat").write_text("@echo off\n", encoding="utf-8")
+        script = self.tmp / "mirror.gradle"
+        script.write_text("// mirror\n", encoding="utf-8")
+        captured: dict = {}
+
+        class FakeProc:
+            pid = 4321
+            returncode = None
+            stdout = None
+
+            def poll(self):
+                return None
+
+            def wait(self):
+                return 0
+
+            def kill(self):
+                pass
+
+        def fake_popen(argv, **_kwargs):
+            captured["argv"] = argv
+            return FakeProc()
+
+        manager = mcdev_process.LaunchManager()
+        with mock.patch.object(
+            mcdev_process.probe_mod, "probe_status_once", return_value=False
+        ), mock.patch.object(
+            mcdev_process, "_port_open", return_value=False
+        ), mock.patch.object(
+            mcdev_process.gradle_mod, "check_toolchain"
+        ), mock.patch.object(
+            mcdev_process.gradle_mod, "toolchain_args", return_value=[]
+        ), mock.patch(
+            "dma.mirrors.prepare_launch_env", return_value=script
+        ) as prepare, mock.patch.object(
+            mcdev_process.subprocess, "Popen", side_effect=fake_popen
+        ), mock.patch.object(
+            mcdev_process.LaunchManager, "_wait_for_started", return_value=True
+        ):
+            result = manager.launch("server", root, 5000, wait_probe=False)
+        self.assertTrue(result["ready"])
+        self.assertTrue(result["mirrored"])
+        prepare.assert_called_once()
+        argv = captured["argv"]
+        rendered = argv if isinstance(argv, str) else " ".join(argv)
+        self.assertIn("--init-script", rendered)
+        self.assertIn(str(script), rendered)
 
 
 if __name__ == "__main__":

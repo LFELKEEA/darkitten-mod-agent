@@ -73,7 +73,10 @@ class BuildToolTests(TempDataCase):
             "dma.mcdev.gradle.run_gradle", return_value=(0, "BUILD SUCCESSFUL")
         ) as run:
             self.worker._execute(
-                ToolCall(name="build_project", args={"task": "runClient", "timeout": 5}),
+                ToolCall(
+                    name="build_project",
+                    args={"task": "runGameTestServer", "timeout": 5},
+                ),
                 AgentRun(),
             )
             self.assertEqual(run.call_args.kwargs["timeout"], 60)
@@ -81,6 +84,18 @@ class BuildToolTests(TempDataCase):
                 ToolCall(name="build_project", args={"timeout": 99999}), AgentRun()
             )
             self.assertEqual(run.call_args.kwargs["timeout"], 1800)
+
+    def test_build_tool_rejects_long_running_task(self) -> None:
+        with mock.patch("dma.mcdev.gradle.run_gradle") as run:
+            text = self.worker._execute(
+                ToolCall(
+                    name="build_project",
+                    args={"task": "runServer", "timeout": 900},
+                ),
+                AgentRun(),
+            )
+        run.assert_not_called()
+        self.assertIn("mcdev_prepare", text)
 
     def test_build_tool_reports_start_failure(self) -> None:
         with mock.patch(

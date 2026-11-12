@@ -15,7 +15,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from ..gradle import windows_command
+from ..gradle import toolchain_args, windows_command
 from .util import (
     McmodError, TOOLS_DIR, download, eprint, find_java_homes, log, pick_java, run,
     write_json, write_text,
@@ -353,7 +353,8 @@ def _run_gradle(
     extra_env: dict[str, str] | None = None,
 ) -> tuple[Any, Path]:
     cmd = gradle_command(project) or ensure_gradle(profile)
-    cmd = [*cmd, *args, *local_maven_args(), *mirror_args(), *forge_flags(profile),
+    cmd = [*cmd, *args, *toolchain_args([str(j.path) for j in find_java_homes()]),
+           *local_maven_args(), *mirror_args(), *forge_flags(profile),
            "--console=plain", "--stacktrace",
            "-Dorg.gradle.internal.http.connectionTimeout=60000",
            "-Dorg.gradle.internal.http.socketTimeout=180000"]

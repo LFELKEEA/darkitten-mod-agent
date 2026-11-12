@@ -20,6 +20,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
+from .. import netclient
+
 ROOT = Path(__file__).resolve().parent.parent
 CACHE_DIR = Path(os.environ.get("MCMOD_CACHE", Path.home() / ".mcmod" / "cache"))
 TOOLS_DIR = Path(os.environ.get("MCMOD_TOOLS", Path.home() / ".mcmod" / "tools"))
@@ -134,8 +136,9 @@ def http_get(
     for attempt in range(retries + 1):
         try:
             req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-            with urllib.request.urlopen(req, timeout=timeout, context=_ssl_context()) as resp:
-                data = resp.read()
+            data = netclient.fetch(
+                req, timeout=timeout, context=_ssl_context()
+            )
             cp.parent.mkdir(parents=True, exist_ok=True)
             cp.write_bytes(data)
             write_json(meta, {"url": url, "fetched": time.time(), "size": len(data)})
@@ -180,9 +183,15 @@ def download(
     for candidate in [url, *mirrors]:
         try:
             req = urllib.request.Request(candidate, headers={"User-Agent": USER_AGENT})
-            with urllib.request.urlopen(req, timeout=timeout, context=_ssl_context()) as resp:
+            with netclient.open_stream(
+                req, timeout=timeout, context=_ssl_context()
+            ) as resp:
                 with tempfile.NamedTemporaryFile(delete=False, dir=str(dest.parent)) as tmp:
-                    shutil.copyfileobj(resp, tmp)
+                    while True:
+                        chunk = resp.read(1 << 18)
+                        if not chunk:
+                            break
+                        tmp.write(chunk)
                     tmp_path = Path(tmp.name)
             if tmp_path.stat().st_size == 0:
                 raise McmodError("empty response")

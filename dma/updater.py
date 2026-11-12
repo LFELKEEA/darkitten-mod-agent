@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from . import paths, toolchain
+from . import netclient, paths, toolchain
 from .version import APP_EXE, APP_VERSION, UPDATE_MANIFEST_URL
 
 MAX_MANIFEST_BYTES = 512 * 1024
@@ -159,8 +159,7 @@ def fetch_manifest(url: str, timeout: int = 20) -> dict:
         text, headers={"User-Agent": "DarkittenModAgent-Updater/1.0"}
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            raw = response.read(MAX_MANIFEST_BYTES + 1)
+        raw = netclient.fetch(request, timeout=timeout)[: MAX_MANIFEST_BYTES + 1]
     except Exception as exc:
         raise UpdateError(f"无法连接更新源：{exc}") from exc
     if len(raw) > MAX_MANIFEST_BYTES:

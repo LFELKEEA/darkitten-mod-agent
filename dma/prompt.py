@@ -101,7 +101,7 @@ TOOL_PROTOCOL = """【工程工具协议】
 - scaffold_project 生成工程骨架（1.20.1 内置 Forge / Fabric / NeoForge；目标目录已有工程时需 overwrite=true）:
   {"tool":"scaffold_project","loader":"Fabric","mod_id":"examplemod","name":"Example Mod","package":"com.example.examplemod","dest":"D:/mods/examplemod"}
   // loader 可选 Forge / Fabric / NeoForge；Architectury 或其他 MC 版本没有内置骨架，按官方模板手写
-- build_project 执行 Gradle: {"tool":"build_project","task":"build"}  // task 可选 build / runServer / runClient / runGameTestServer / runGametest
+- build_project 执行有限 Gradle 任务: {"tool":"build_project","task":"build"}  // 如 build / runGameTestServer；启动开发端必须用 mcdev_prepare，不能把 runServer / runClient 放进 build_project
 
 规格驱动生成器（做完整模组时优先用它打底，再用文件工具细化）：
 - studio_plan 生成 mod-spec.json 规格和 GDD.md（当前有工程时写入工程；没有工程时只返回规格）:
