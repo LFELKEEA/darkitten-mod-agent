@@ -131,13 +131,52 @@ class BuildReportTests(unittest.TestCase):
         result = BuildOutcome(ok=False, code=1, output="x" * 200000)
         text = _build_report(result)
         self.assertIn("编译失败（退出码 1）", text)
-        self.assertIn("只保留末尾部分", text)
+        self.assertIn("相关日志尾部", text)
         self.assertLessEqual(len(text), 96200)
+
+    def test_failure_structured_errors(self) -> None:
+        # javac 逐文件错误应被转成结构化清单，精确定位到文件:行，而不是整段日志。
+        output = (
+            "> Task :compileJava FAILED\n"
+            "D:/proj/src/main/java/com/x/PersonalityLogic.java:45: error: cannot find symbol\n"
+            "    PersonalitySlimeEntity slime = null;\n"
+            "  symbol:   class PersonalitySlimeEntity\n"
+            "  location: class PersonalityLogic\n"
+            "D:/proj/src/main/java/com/x/ModEntities.java:12: error: incompatible types\n"
+            "BUILD FAILED in 5s\n"
+        )
+        text = _build_report(BuildOutcome(ok=False, code=1, output=output))
+        self.assertIn("编译失败，共解析出", text)
+        self.assertIn("PersonalityLogic.java:45", text)
+        self.assertIn("cannot find symbol", text)
+        self.assertIn("ModEntities.java:12", text)
+        self.assertIn("错误分布", text)
 
     def test_success_without_jars_explains(self) -> None:
         result = BuildOutcome(ok=True, code=0, output="BUILD SUCCESSFUL")
         text = _build_report(result)
         self.assertIn("没有在 build/libs 里找到 jar", text)
+
+    def test_success_reports_contract_snapshot(self) -> None:
+        # 编译成功后应附一份「契约快照」（已声明的类 + 注册 id），帮模型引用一致。
+        import tempfile
+        from pathlib import Path
+
+        from dma.compile_feedback import success_symbols
+
+        with tempfile.TemporaryDirectory() as td:
+            src = Path(td) / "src" / "main" / "java" / "com" / "example" / "demo"
+            src.mkdir(parents=True)
+            (src / "DemoMod.java").write_text(
+                "package com.example.demo;\n"
+                "public class DemoMod {\n"
+                "  public static final String ID = \"demo:example_item\";\n"
+                "}\n",
+                encoding="utf-8",
+            )
+            snap = success_symbols(Path(td))
+            self.assertIn("com.example.demo", snap)
+            self.assertIn("DemoMod", snap)
 
 
 if __name__ == "__main__":

@@ -16,6 +16,7 @@ from PySide6.QtCore import QObject, Signal
 from . import (
     ai,
     arttools,
+    compile_feedback,
     connectors,
     mcdev,
     netclient,
@@ -1104,7 +1105,7 @@ class AgentWorker(QObject):
             result = _run_gradle(self.project.root, "build", 900, self._cancel, self._build_log)
         except Exception as exc:  # noqa: BLE001 - 自动编译失败不应吞掉本轮结果
             return False, f"自动编译没有开始：{exc}"
-        report = _build_report(result)
+        report = _build_report(result, root=self.project.root)
         if self.kernel is not None:
             verdict = self.kernel.record_build(result.ok, result.output)
             if verdict.get("action") == "stop":
@@ -1944,7 +1945,7 @@ class AgentWorker(QObject):
                 except mcdev.gradle.GradleError as exc:
                     return f"编译没有开始：{exc}"
                 self._progress_at = time.monotonic()
-                report = _build_report(result)
+                report = _build_report(result, root=self.project.root)
                 if self.kernel is not None and task == "build":
                     verdict = self.kernel.record_build(result.ok, result.output)
                     if verdict.get("action") == "stop":
@@ -2633,7 +2634,7 @@ def _run_gradle(
     return BuildOutcome(ok=code == 0, code=code, output=output, jars=jars)
 
 
-def _build_report(result: BuildOutcome) -> str:
+def _build_report(result: BuildOutcome, root: Path | None = None) -> str:
     if result.ok:
         head = "编译成功（退出码 0）。"
     else:
@@ -2648,11 +2649,39 @@ def _build_report(result: BuildOutcome) -> str:
         parts.append("没有在 build/libs 里找到 jar；如果这是运行或测试任务，可以忽略。")
     output = (result.output or "").strip()
     if output:
-        limit = MAX_BUILD_RESULT if not result.ok else MAX_BUILD_SUCCESS
-        tail = output[-limit:]
-        if len(output) > len(tail):
-            tail = "（日志较长，只保留末尾部分）\n" + tail
-        parts.append(f"Gradle 日志：\n{tail}")
+        if not result.ok:
+            # 编译失败：走结构化反馈引擎，把错误精确定位到「文件:行 + 修复提示 +
+            # 候选符号」，而不是把上百 KB 日志整段丢给模型猜。
+            try:
+                structured = compile_feedback.analyze_failures(output, root=root)
+            except Exception:  # noqa: BLE001 - 结构化失败回退到原始日志
+                structured = ""
+            if structured:
+                parts.append(structured)
+                tail = output[-8000:]
+                if len(output) > len(tail):
+                    tail = "（原始日志尾部，供需要时核对）\n" + tail
+                parts.append(tail)
+            else:
+                limit = MAX_BUILD_RESULT
+                tail = output[-limit:]
+                if len(output) > len(tail):
+                    tail = "（日志较长，只保留末尾部分）\n" + tail
+                parts.append(f"Gradle 日志：\n{tail}")
+        else:
+            # 编译成功：附一份「契约快照」（当前已声明的类 + 注册 id），让模型
+            # 写下一个类时引用一致，避免大工程里类名/注册 id 前后对不上。
+            try:
+                snapshot = compile_feedback.success_symbols(root)
+            except Exception:  # noqa: BLE001
+                snapshot = ""
+            if snapshot:
+                parts.append(snapshot)
+            limit = MAX_BUILD_SUCCESS
+            tail = output[-limit:]
+            if len(output) > len(tail):
+                tail = "（日志较长，只保留末尾部分）\n" + tail
+            parts.append(f"Gradle 日志：\n{tail}")
     if result.message:
         parts.append(f"启动信息：{result.message}")
     return "\n\n".join(parts)[:MAX_TOOL_RESULT]
