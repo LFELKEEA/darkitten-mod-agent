@@ -22,6 +22,9 @@ BUILD = ROOT / "build"
 APP_DIST = DIST / "DarkittenModAgent"
 ZIP_NAME = f"DarkittenModAgent-{APP_VERSION}.zip"
 NOTES = [
+    "任务拆分层根治「占位冒充实现」：需求里出现「变身/夺舍/换肤/社交聊天/物品框」这类复杂机制时，会为每个机制生成独立任务，验收强制要求产出 mixins.json / mixin 目录 / 渲染器 / Screen+ScreenHandler 等真实现必需文件，并附「可玩性人工确认」提示——不再只按「物品/方块/实体」静态拆任务。",
+    "Agent 能力升级：新增「复杂机制实现门槛」硬规则 + 「复杂机制实现映射」技能——做「玩家变身/夺舍/换皮肤/聊天框/物品框/社交关系」这类模组时，不再用「spawn 实体 + 改 customName + 发消息 + 存 List」冒充实现，而是按状态机（状态/触发/数据归属/渲染/控制/退出还原）用 mixin/相机/Screen+ScreenHandler 真正落地，空 mixins.json 视为未实现。",
+    "新增内置技能「复杂机制实现映射」(mechanism-playbook)：机制→真实现对照表（变身/夺舍/换肤/对话/物品框/社交）+ 可逆状态机模板 + 技术手段速查 + 红线，做复杂机制模组时自动加载。",
     "修复“系统代理把 Gradle 全挡死”：构建前自动检测 Windows 系统代理（如 Clash）对 services.gradle.org / maven.fabricmc.net 返回 400/REJECT 的情况，检测到就向工程 gradle.properties 注入 systemProp.java.net.useSystemProxies=false 强制直连，并停掉旧 daemon 让下轮构建生效——代理规则把仓库域名挡掉时不再无限重试。",
 
     "新增 Fabric 1.21.1 内置骨架（对称 NeoForge 1.21.1）：Fabric 1.21.1 工程不再因为没有内置模板而被迫手写构建脚本，loom 1.9 + Java 21 + yarn 1.21.1 生成即用。",

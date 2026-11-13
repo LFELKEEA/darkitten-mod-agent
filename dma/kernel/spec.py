@@ -378,6 +378,91 @@ FEATURE_RULES: list[dict[str, Any]] = [
 ]
 
 
+# 复杂机制规则：这些不是「内容」（物品/方块/实体），而是「跨实体的动态行为」
+# （玩家变身/夺舍/换肤/社交聊天/物品框）。agent 极易用「spawn 实体 + 改
+# customName + 发消息 + 存 List」冒充实现——每个命中的机制生成一个独立
+# feature，acceptance 用 file 硬门槛强制产出 mixin / 渲染器 / GUI 等「真实现」
+# 必需的文件，配合 prompt 里的机制门槛规则一起根除「占位冒充实现」。
+MECHANISM_RULES: list[dict[str, Any]] = [
+    {
+        "id": "transform",
+        "title": "变身与夺舍（玩家控制权切换）",
+        "keywords": ["变身", "变成", "夺舍", "附身", "附体", "进入身体", "形态切换",
+                     "灵魂", "transform", "possess", "possession", "inhabit", "morph", "soul"],
+        "files": [
+            "src/main/resources/*.mixins.json",
+            "src/main/java/**/mixin/**",
+            "src/main/java/**/client/render/**",
+        ],
+        "rules": ["P1-34"],
+        "playable": "玩家/实体变身与夺舍通过状态机实现：触发后本体冻结（渲染成躺地空壳）、相机/控制权切换到目标实体、退出可逆还原；必须 mixin 切换控制权，而不是在玩家旁边 spawn 一个实体。",
+    },
+    {
+        "id": "skin",
+        "title": "皮肤与外观切换",
+        "keywords": ["皮肤", "换肤", "换装", "外观", "littleskin", "skin", "appearance"],
+        "files": [
+            "src/main/java/**/client/render/**",
+            "src/main/resources/assets/**/textures/entity/**",
+        ],
+        "rules": [],
+        "playable": "皮肤纹理按 id 动态切换（从 littleskin 拉取或本地多套纹理），渲染器不是恒返回一张固定 default.png。",
+    },
+    {
+        "id": "dialogue",
+        "title": "对话/聊天框/社交互动",
+        "keywords": ["聊天", "对话", "聊天框", "交谈", "社交", "关系", "好感", "村民",
+                     "互动", "dialogue", "dialog", "chat", "social", "relationship",
+                     "affinity", "villager", "interact"],
+        "files": [
+            "src/main/java/**/client/gui/**",
+            "src/main/java/**/screen/**",
+            "src/main/java/**/menu/**",
+        ],
+        "rules": ["P2-20", "P2-21"],
+        "playable": "对话/聊天通过 Screen 打开可交互 GUI，AI 行为读取社交关系 NBT 数据，不是只发一条硬编码消息。",
+    },
+    {
+        "id": "inventory_ui",
+        "title": "物品框/背包交换界面",
+        "keywords": ["物品框", "背包", "交换", "物品栏", "inventory", "item slot", "storage"],
+        "files": [
+            "src/main/java/**/menu/**",
+            "src/main/java/**/client/gui/**",
+        ],
+        "rules": ["P2-20", "P2-21"],
+        "playable": "物品框通过 Screen+ScreenHandler 打开可交换，不是直接 setStack 覆盖玩家背包且不暂存原背包。",
+    },
+]
+
+
+def _mechanism_acceptance(rule: dict[str, Any], files: list[str]) -> list[AcceptanceItem]:
+    """机制类功能的验收：除 build/lint 外，用 file 硬门槛强制产出真实现必需的
+    文件（mixins.json / mixin 目录 / 渲染器 / GUI），并用 required=False 的 manual
+    项提示「可玩性人工确认」但不阻塞交付（可玩性由 prompt 机制门槛规则把关）。"""
+    items: list[AcceptanceItem] = [
+        AcceptanceItem("build", "build", "Gradle 编译必须成功", True, {"task": "build"}),
+        AcceptanceItem("lint-p0", "lint", "P0 静态检查不得有 error", True,
+                       {"levels": ["P0"], "fail_on": "error"}),
+    ]
+    rule_ids = [item for item in (rule.get("rules") or []) if item]
+    if rule_ids:
+        items.append(AcceptanceItem(
+            "lint-mechanism", "lint",
+            f"机制相关检查通过：{', '.join(rule_ids)}",
+            True, {"rule_ids": rule_ids, "fail_on": "error"},
+        ))
+    items.append(AcceptanceItem(
+        "mechanism-files", "file",
+        f"机制真实现必需的文件/目录至少存在一个（{rule['title']}）",
+        True, {"patterns": files},
+    ))
+    items.append(AcceptanceItem(
+        "playable", "manual", rule["playable"], False, {},
+    ))
+    return items
+
+
 def _acceptance_for(feature_id: str, rules: Iterable[str], files: list[str]) -> list[AcceptanceItem]:
     items: list[AcceptanceItem] = [
         AcceptanceItem(
@@ -472,6 +557,25 @@ def derive_spec(
                     _acceptance_for(rule["id"], rule["rules"], list(rule["files"])),
                 )
             )
+
+    # 复杂机制：识别「变身/夺舍/换肤/社交聊天/物品框」这类跨实体动态行为，
+    # 为每个命中机制生成独立 feature，验收强制产出 mixin/渲染器/GUI 等真实现
+    # 必需文件——从任务拆分层根治「占位冒充实现」的能力天花板。
+    entity_selected = "entity" in selected
+    for rule in MECHANISM_RULES:
+        keywords = [str(item).lower() for item in rule["keywords"]]
+        if any(word in lowered for word in keywords):
+            deps = ["registry"] + (["entity"] if entity_selected else [])
+            features.append(
+                Feature(
+                    rule["id"], rule["title"],
+                    f"复杂机制：{rule['title']}（非静态内容，需状态机/mixin/GUI）",
+                    list(rule["files"]),
+                    deps,
+                    _mechanism_acceptance(rule, list(rule["files"])),
+                )
+            )
+
     if not selected:
         # A vague request still gets a generic content feature so the gate has
         # something concrete to verify.
