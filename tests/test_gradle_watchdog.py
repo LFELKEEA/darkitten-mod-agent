@@ -70,6 +70,15 @@ class GradleWatchdogTests(TempDataCase):
         patcher = mock.patch("dma.mirrors.prepare_launch_env", return_value=None)
         patcher.start()
         self.addCleanup(patcher.stop)
+        # _wrapper_self_heal 会给「有 gradlew.bat 但无 wrapper 三件套」的工程注入
+        # wrapper（含 gradle-wrapper.properties），随后 _ensure_gradle_distribution
+        # 会据此触发上百 MB 的真实 Gradle 下载、阻塞并超时。看门狗测试不关心发行版
+        # 下载，直接短路掉。
+        dist_patcher = mock.patch(
+            "dma.mcdev.gradle._ensure_gradle_distribution", return_value=None
+        )
+        dist_patcher.start()
+        self.addCleanup(dist_patcher.stop)
 
     def _run(self, process: _HangingProcess, **kwargs):
         lines: list[str] = []

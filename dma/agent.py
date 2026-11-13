@@ -117,6 +117,10 @@ READ_ONLY_TOOLS = {
     "read_file", "list_files", "search_text", "search_knowledge",
     "read_knowledge", "read_skill", "search_code", "fetch_url",
 }
+# 连续只读（无任何写入）多少次后，强制打断探索循环、要求模型立即写代码。
+# 只读工具刷新 _progress_at 会让 PROGRESS_TIMEOUT 永远不触发，导致「只读死循环」卡死；
+# 这里用 streak 主动打断，而不是等 45 分钟兜底。
+READONLY_STREAK_LIMIT = 8
 AUTO_BUILD_MAX = 5
 BUILD_TRIGGER_EXTS = {
     ".java", ".kt", ".kts", ".gradle", ".properties", ".json", ".json5",
@@ -716,6 +720,7 @@ class AgentWorker(QObject):
         self._cancel = threading.Event()
         self._thread: threading.Thread | None = None
         self._progress_at = time.monotonic()
+        self._readonly_streak = 0
         self.kernel: KernelBridge | None = None
         self._file_cache = FileCache()
         self._read_offsets: dict[str, int] = {}
@@ -872,6 +877,23 @@ class AgentWorker(QObject):
                 )
             step += 1
             run.steps = step
+            if self._readonly_streak >= READONLY_STREAK_LIMIT:
+                # 连续只读多次却没有任何写入，说明模型陷入了「反复读文件、不动手」的
+                # 探索死循环（只读工具会刷新 _progress_at，PROGRESS_TIMEOUT 拦不住）。
+                # 主动注入强指令打断循环，要求立即开始写代码。
+                self._readonly_streak = 0
+                self.status.emit("连续多次只读未写入，正在要求模型立即写代码…")
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "你已经连续多次只读文件（list_files / read_file）却没有写任何代码，"
+                            "陷入了探索循环。停止继续读取，立即开始实现："
+                            "用 write_file 直接写出第一个代码文件（入口类或注册类），"
+                            "然后继续写后续文件。不要再输出「我先看看」这类描述，直接调用写文件工具。"
+                        ),
+                    }
+                )
             if limit <= 0:
                 self.status.emit(f"正在请求模型（第 {step} 轮，不限制）…")
             else:
@@ -1047,6 +1069,7 @@ class AgentWorker(QObject):
                 self.applied.append(relative)
                 run.applied = list(self.applied)
                 self._progress_at = time.monotonic()
+                self._readonly_streak = 0
                 self.status.emit(f"已自动写入 {relative}")
                 # 自动写入也要在面板里留记录，否则用户只会看到“0 个”，无法确认写过什么。
                 staged.applied = True
@@ -2011,8 +2034,15 @@ class AgentWorker(QObject):
                 raise AgentError("已取消") from exc
             return f"工具执行失败：{exc}"
         finally:
-            if not failed and name in READ_ONLY_TOOLS:
-                self._progress_at = time.monotonic()
+            if not failed:
+                if name in READ_ONLY_TOOLS:
+                    # 只读也刷新进展，避免纯阅读阶段被 PROGRESS_TIMEOUT 误杀；
+                    # 但累计连续只读次数，超过阈值时由 _loop 主动打断探索循环。
+                    self._readonly_streak += 1
+                    self._progress_at = time.monotonic()
+                else:
+                    self._readonly_streak = 0
+                    self._progress_at = time.monotonic()
 
     # ------------------------------------------------------------------
     def _execute_kernel(self, name: str, args: dict[str, Any]) -> str:
