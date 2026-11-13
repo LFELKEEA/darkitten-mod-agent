@@ -22,6 +22,7 @@ BUILD = ROOT / "build"
 APP_DIST = DIST / "DarkittenModAgent"
 ZIP_NAME = f"DarkittenModAgent-{APP_VERSION}.zip"
 NOTES = [
+    "新增「机制语义自检」检查器：验收时不再只看「mixins.json 文件存不存在」，而是真的读 mixins.json 内容——mixins/client/server 全空（占位实现）会被判 error 拦截；换肤机制没有渲染器类、或渲染器恒返回单一固定纹理（不按皮肤 id 切换）也会被拦；聊天框/物品框机制没有 extends Screen / ScreenHandler 的类同样报 error。从根源堵住「spawn 个实体 + 空 mixins.json 冒充做完」。",
     "任务拆分层根治「占位冒充实现」：需求里出现「变身/夺舍/换肤/社交聊天/物品框」这类复杂机制时，会为每个机制生成独立任务，验收强制要求产出 mixins.json / mixin 目录 / 渲染器 / Screen+ScreenHandler 等真实现必需文件，并附「可玩性人工确认」提示——不再只按「物品/方块/实体」静态拆任务。",
     "Agent 能力升级：新增「复杂机制实现门槛」硬规则 + 「复杂机制实现映射」技能——做「玩家变身/夺舍/换皮肤/聊天框/物品框/社交关系」这类模组时，不再用「spawn 实体 + 改 customName + 发消息 + 存 List」冒充实现，而是按状态机（状态/触发/数据归属/渲染/控制/退出还原）用 mixin/相机/Screen+ScreenHandler 真正落地，空 mixins.json 视为未实现。",
     "新增内置技能「复杂机制实现映射」(mechanism-playbook)：机制→真实现对照表（变身/夺舍/换肤/对话/物品框/社交）+ 可逆状态机模板 + 技术手段速查 + 红线，做复杂机制模组时自动加载。",

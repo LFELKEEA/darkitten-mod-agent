@@ -405,7 +405,7 @@ MECHANISM_RULES: list[dict[str, Any]] = [
             "src/main/java/**/client/render/**",
             "src/main/resources/assets/**/textures/entity/**",
         ],
-        "rules": [],
+        "rules": ["P1-08"],
         "playable": "皮肤纹理按 id 动态切换（从 littleskin 拉取或本地多套纹理），渲染器不是恒返回一张固定 default.png。",
     },
     {

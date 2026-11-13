@@ -1,5 +1,11 @@
 # Changelog
 
+## 3.0.6 — 2026-11-13
+
+验收从“看文件在不在”升级为“读文件内容”，占位实现会在验收阶段被拦下。
+
+- 新增「机制语义自检」检查器（`dma/kernel/checks/mechanism.py`）：不再只看 `mixins.json` 是否存在，而是解析其内容——`mixins` / `client` / `server` 全空视为占位实现并判 error；换肤机制缺少渲染器类，或渲染器恒返回单一固定纹理（不按皮肤 id 切换）同样拦截；聊天框 / 物品框机制没有 `extends Screen` / `ScreenHandler` 的类也报 error。从根源堵住“spawn 个实体 + 空 `mixins.json` 冒充做完”。
+
 ## 3.0.5 — 2026-11-13
 
 阻止复杂机制模组用“实体 + 改名 + 发消息”冒充实现，任务拆分、Agent 硬规则与技能三处同时收紧。
