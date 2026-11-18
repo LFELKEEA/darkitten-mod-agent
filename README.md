@@ -281,7 +281,19 @@ python build.py
 - `dist/DarkittenModAgent-<版本>.zip`：上传到下载站 / GitHub Release 的更新包。
 - `dist/mod_agent_release.json`：更新清单，包含版本、大小、SHA-256 与更新说明。
 
-发布时把 ZIP 上传到 GitHub Release（标签 `mod-agent-v<版本>`），把清单放到站点根目录；清单里的 `download_url` 指向 Release 资源。
+发布时把 ZIP、`mod_agent_release.json`、`mod_agent_bootstrap.json` 一起放进下载站仓库（GitHub Pages）根目录；清单里的 `download_url` 直接指向站点上的 ZIP，避免 Release 未创建时 404。
+
+## 源码同步
+
+源码仓库：[LFELKEEA/darkitten-mod-agent](https://github.com/LFELKEEA/darkitten-mod-agent)。
+
+```bash
+python tools/sync_github.py            # 扫描敏感信息 -> 提交 -> 推送
+python tools/sync_github.py --dry-run  # 只看会改哪些文件
+python tools/sync_github.py --no-push  # 只提交到本地
+```
+
+`build.py` 在打包成功后会调用同一脚本自动同步源码；设置环境变量 `DMA_NO_SYNC=1` 可跳过。脚本会先拒绝 `config.json`、`social.json`、`data/`、`logs/` 等本地文件，并扫描 `sk-`、`gho_`、私钥与常见密钥字段；遇到校园网 DNS 投毒或 Schannel 吊销检查失败时，自动改用可达 IP 与进程级 TLS 兼容参数，不修改全局 Git 配置。
 
 ## 边界
 
