@@ -66,6 +66,7 @@ class Config:
     last_project: str = ""
     auto_apply: bool = True
     auto_build: bool = True
+    auto_reference: bool = True
     max_steps: int = DEFAULT_MAX_STEPS
     context_turns: int = 128
     context_turns_upgraded: bool = False
@@ -125,6 +126,7 @@ class Config:
             last_project=self.last_project.strip(),
             auto_apply=bool(self.auto_apply),
             auto_build=bool(self.auto_build),
+            auto_reference=bool(self.auto_reference),
             max_steps=normalize_max_steps(max_steps),
             context_turns=max(2, min(600, turns)),
             context_turns_upgraded=True,

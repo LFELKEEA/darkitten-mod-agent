@@ -1260,6 +1260,191 @@ CHANNEL.registerMessage(0, MyPacket.class, MyPacket::encode, MyPacket::decode, M
 - 引用来源写进答复，方便用户核对。
 """,
     },
+    {
+        "id": "version-facts",
+        "name": "版本事实核对",
+        "description": "跨版本差异速查：Java、元数据、数据目录、物品定义、映射与 ID API；写代码前先核对目标版本。",
+        "body": """# 版本事实核对
+
+## 先做
+1. 确认 MC 版本、加载器、目标 Java。三者缺一不可。
+2. 调 `version_facts` 看静态基线；工程已打开时调 `project_fact_check` 扫冲突。
+3. 不确定的 API 一律 `dev_docs lookup` 查 sources，不靠记忆。
+
+## 版本基线
+| MC | Java | 元数据 | 数据目录 | 物品定义 | ID API |
+| --- | --- | --- | --- | --- | --- |
+| 1.20.1 | 17 | mods.toml | 复数 | models/item | new ResourceLocation |
+| 1.20.5–1.21.1 | 21 | NeoForge 用 neoforge.mods.toml | 复数 | models/item | ResourceLocation.fromNamespaceAndPath |
+| 1.21–1.21.8 | 21 | 同上 | 单数 | 1.21.4+ 用 assets/<ns>/items | ResourceLocation.fromNamespaceAndPath |
+| 1.21.9+ / 26.x | 25 | 同上 | 单数 | assets/<ns>/items | Identifier.fromNamespaceAndPath |
+
+## 构建插件
+- Forge：ForgeGradle（1.20.1 用 6.x）。
+- NeoForge 1.20.1：NeoGradle；1.20.2+：ModDevGradle 2.x。
+- Fabric：fabric-loom；26.x 未混淆、非 remap。
+- Quilt：org.quiltmc.loom。
+- 多加载器：Architectury / MultiLoader。
+
+## 高频错误
+- 1.21+ 还写 `recipes` / `loot_tables` / `tags/blocks`。
+- NeoForge 1.20.5+ 还写 `mods.toml`。
+- 1.21.4+ 只有 `models/item` 没有 `assets/<ns>/items`。
+- Java 17 编译 1.21.x，或 Java 21 编译 26.x。
+- 26.x 还配 Yarn 映射或 `new ResourceLocation`。
+- 混淆名残留：class_1234 / method_5678_。
+
+## 输出
+说明“基于哪个版本事实”，列出冲突文件和修复动作；不确定的写“需在线核实”，不要猜。
+""",
+    },
+    {
+        "id": "multiversion",
+        "name": "多版本 / 多加载器",
+        "description": "Stonecutter、Architectury、MultiLoader、Modstitch、Stonecraft 的选型、目录骨架、插件坐标与验证顺序。",
+        "body": """# 多版本 / 多加载器
+
+## 选型
+- 多 MC 版本、单加载器 → Stonecutter（预处理指令裁剪代码）。
+- 单版本、Fabric + NeoForge → Architectury（common + 平台子项目）。
+- 单版本、双加载器、想少一层抽象 → MultiLoader-Template。
+- 多目标（含 Vanilla/Forge）、接受 KTS → Modstitch。
+- 多版本 × 多加载器 → Stonecraft（Stonecutter + 加载器编排）。
+
+## Stonecutter 要点
+- `settings.gradle` 声明 `vers("<mc>-<loader>", "<mc>")`，目标名与 `versions/dependencies/<target>.properties` 必须一致。
+- `stonecutter.gradle` 里 `stonecutter active "<target>"`。
+- 差异代码用 `//? if >=1.21 { ... //?} else { ... //?}` 包裹。
+- 插件 `dev.kikugie.stonecutter`，版本按官方文档。
+
+## Architectury 要点
+- 从官方模板生成器开始，保留同一套版本 pin。
+- common 只依赖原版 + Architectury API。
+- 平台差异用 `@ExpectPlatform`，实现类放 `<包>.fabric` / `<包>.neoforge`。
+- 不要把 Fabric API 或 NeoForge API 写进 common。
+
+## 验证顺序
+1. 逐个目标 `build`。
+2. 至少一个目标启动开发端，看注册与加载日志。
+3. GameTest / 场景断言。
+4. 再发布多版本产物。
+
+只生成目录不算完成；没有逐目标构建和运行证据，必须写“未验证”。
+""",
+    },
+    {
+        "id": "access-widener-transformer",
+        "name": "Access Widener / Transformer",
+        "description": "Fabric Access Widener 与 Forge/NeoForge Access Transformer 的写法、声明位置、命名空间和常见崩溃。",
+        "body": """# Access Widener / Transformer
+
+## Fabric：Access Widener
+- 文件扩展名 `.accesswidener`，首行 `accessWidener v2 named`（命名空间按工程映射）。
+- 条目：`accessible class net/minecraft/...`、`accessible method ... (...)...V`、`mutable field ...`。
+- 必须在 `fabric.mod.json` 声明：`"accessWidener": "<modid>.accesswidener"`。
+- 构建里用 loom 的 `accessWidenerPath` 指向文件。
+
+## Forge / NeoForge：Access Transformer
+- 文件 `META-INF/accesstransformer.cfg`。
+- 条目：`public net.minecraft.world.level.Level field_12345`（Mojang 映射用官方名）。
+- ForgeGradle / ModDevGradle 里声明 accessTransformer 文件；NeoForge 用 `accessTransformers` 配置。
+- 1.20.1 与 1.21.x 的映射名不同，AT 条目必须按目标版本重写。
+
+## 常见崩溃
+- `Invalid access transformer`：行格式错、类/成员不存在、命名空间不匹配。
+- `AccessWidenerFormatException`：版本头缺失或 v1/v2 混用。
+- 改完没生效：忘了在元数据/构建里声明，或缓存未刷新。
+
+## 原则
+- 能用官方 API 就不要拓宽访问；拓宽面越小越好。
+- 每条都要写清为什么需要，交付时列出。
+""",
+    },
+    {
+        "id": "gametest",
+        "name": "GameTest 自动化验证",
+        "description": "Fabric / Forge / NeoForge 的 GameTest 结构、注册、运行任务与断言写法。",
+        "body": """# GameTest 自动化验证
+
+## 通用结构
+- 测试类放 `src/main/java/.../gametest/` 或 `src/test/java`（按加载器约定）。
+- 测试方法带 `@GameTest`，参数 `GameTestHelper`；用 `helper.assert*` 做断言。
+- 结构模板：`@GameTest(template = "<ns>:empty")` 或代码生成平台。
+- 注册：Fabric 用 `fabric-gametest-api-v1` 的入口；Forge/NeoForge 用 `@GameTestHolder` / `@PrefixGameTestTemplate` 并注册到 mod bus。
+
+## 运行
+- Fabric：`./gradlew runGametest`。
+- Forge 1.20.1：`./gradlew runGameTestServer`。
+- NeoForge：`./gradlew runGameTestServer` 或 `runClientGameTest`（按模板）。
+- 本工坊也可用 `mcdev_gametest` 包装执行并返回汇总。
+
+## 断言原则
+- 测行为，不测实现：方块是否出现、实体是否生成、容器是否有物品、状态是否切换。
+- 每个测试独立清理现场；不要依赖上一个测试的世界状态。
+- 失败要能定位：断言消息写清期望值、实际值、坐标。
+
+## 交付
+写明运行了哪些测试、通过数量、失败项与日志路径。没有运行就不要说“测试通过”。
+""",
+    },
+    {
+        "id": "architecture-patterns",
+        "name": "大型模组架构范式",
+        "description": "Create / GregTech / Mekanism / Botania 的架构模式：注册分层、材料体系、RecipeMap、多方块、能力 API、配置与文档。",
+        "body": """# 大型模组架构范式
+
+## 什么时候读
+需求包含多种机器、多方块、材料体系、能力网络、复杂玩法、几十个以上内容节点时。
+
+## 四个参考
+- **Create**：注册辅助层统一声明内容；动力学/应力抽象成接口与网络快照；Ponder 可视化教程；装置蓝图用结构化快照；配方数据驱动。
+- **GregTech Modern**：Material 注册表派生锭/粉/板/流体；每种机器一个 RecipeMap；多方块控制器 + 结构定义 + 成型状态机；能源等级统一类型；生成器产出内容。
+- **Mekanism**：API 与实现分模块；机器基类承载能量/背包/升级；多方块数据独立；配置集中；容器同步统一。
+- **Botania**：魔力网络接口 + 缓冲；功能花基类 + 组件；游戏内词典数据化；仪式状态机与回滚。
+
+## 落地顺序
+1. 先定数据模型（材料/配方/内容描述）。
+2. 再做注册与数据生成基础设施。
+3. 然后写机器/玩法状态机。
+4. 最后做客户端渲染、GUI、文档。
+5. 公开 API 包从第一天分出来。
+
+## 禁止
+- 不复制源码、美术、文本；只学结构与交互。
+- 不把几百个内容手写注册；用生成器并做快照测试。
+- 不让渲染线程改世界状态，不让 common 依赖平台类。
+""",
+    },
+    {
+        "id": "publishing-ci",
+        "name": "发布与 CI",
+        "description": "GitHub Actions 构建矩阵、JAR 命名、Modrinth/CurseForge 发布、版本号与校验和。",
+        "body": """# 发布与 CI
+
+## 构建矩阵
+- 维度：MC 版本 × 加载器 × Java。
+- 每个组合独立 `build`，产物按 `<modid>-<modversion>+<mc>-<loader>.jar` 命名。
+- 矩阵用 `fail-fast: false`，避免一个组合失败掩盖其他结果。
+
+## GitHub Actions 要点
+- `actions/setup-java` 用 `temurin`，版本按矩阵。
+- 缓存 `~/.gradle/caches` 与 `~/.gradle/wrapper`。
+- 上传 `build/libs/*.jar`，排除 `-sources`、`-dev`、`-javadoc`。
+- 发布前跑 GameTest 或至少 `runGameTestServer`。
+
+## 发布元数据
+- Modrinth/CurseForge 需要：版本号、支持的 MC 版本、加载器、依赖、changelog。
+- 版本号与 `gradle.properties` 单一来源，不要在多个文件手改。
+- 产物附 SHA-256，发布页写清 Java 要求。
+
+## 交付检查
+- [ ] 所有矩阵组合构建通过
+- [ ] JAR 能在干净客户端加载
+- [ ] 元数据版本区间正确
+- [ ] changelog 与代码一致
+- [ ] 校验和与下载链接可用
+""",
+    },
 ]
 
 
@@ -1341,6 +1526,30 @@ SKILL_HINTS: dict[str, tuple[str, ...]] = {
     "reference-research": (
         "参考", "搜索", "源码", "github", "grep", "别人代码", "查一下",
         "api", "文档",
+    ),
+    "version-facts": (
+        "版本", "java", "映射", "元数据", "mods.toml", "neoforge.mods.toml",
+        "数据目录", "26.x", "1.21", "1.20.1", "版本差异", "跨版本",
+    ),
+    "multiversion": (
+        "多版本", "跨版本", "多加载器", "双加载器", "stonecutter", "architectury",
+        "multiloader", "modstitch", "stonecraft", "同时支持",
+    ),
+    "access-widener-transformer": (
+        "accesswidener", "access widener", "accesstransformer", "access transformer",
+        "at", "aw", "拓宽访问", "访问权限",
+    ),
+    "gametest": (
+        "gametest", "game test", "自动化测试", "断言", "runGametest",
+        "rungametestserver", "测试通过",
+    ),
+    "architecture-patterns": (
+        "大型模组", "架构", "多方块", "材料体系", "recipeline", "能力", "机器体系",
+        "gregtech", "mekanism", "botania", "create", "工厂", "自动化",
+    ),
+    "publishing-ci": (
+        "发布", "ci", "github actions", "modrinth", "curseforge", "工作流",
+        "构建矩阵", "版本号", "校验和",
     ),
 }
 

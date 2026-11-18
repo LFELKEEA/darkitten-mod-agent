@@ -47,6 +47,11 @@ class StudioPageTest(unittest.TestCase):
         page.idea.setPlainText("深海遗迹、发光珊瑚矿、潜水装备")
         page.loader.setCurrentText("Forge")
         page.mc.setCurrentText("1.20.1")
+        from dma.ui.widgets import SelectComboBox
+
+        for combo in (page.loader, page.mc, page.scope):
+            self.assertIsInstance(combo, SelectComboBox)
+            self.assertFalse(combo.isEditable())
         values = page._form_values()
         self.assertEqual(values["loader"], "Forge")
         self.assertEqual(values["mc"], "1.20.1")

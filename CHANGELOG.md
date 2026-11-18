@@ -1,5 +1,90 @@
 # Changelog
 
+## 3.4.2 — 2026-11-18
+
+参考开源 MC 模组 Agent 的确定性调度、契约冻结与离线签名索引，把已有内核真正接到 Agent 循环里。
+
+- **任务图工具**：新增 `workflow_plan` / `workflow_status` / `workflow_next` / `workflow_complete` / `workflow_fail` / `workflow_skip` / `workflow_reopen`。模型只负责决策，任务状态由 `.dma/workflow.json` 推进；`workflow_complete` 会先跑验收门禁，缺少 build / lint / file / runtime 证据时返回阻断项，`force` 仅作为显式人工覆盖。
+- **需求合并**：`workflow_plan` 把新需求合并进 `.dma/spec.json`，补充缺失功能并重建 DAG，同时保留已完成任务状态，避免重复规划把进度清零。
+- **公共契约冻结**（`dma/kernel/contract.py`）：`contract_freeze` 把 public/protected 类、方法、字段与资源清单写入 `.dma/contract.json`；`contract_check` 报告被删除的类/方法/字段、方法签名变更、父类/接口变化与资源缺失。新增允许，删除和改签名视为破坏。
+- **离线 API 签名索引**（`dma/apiindex.py`）：从缓存或按需下载的 `sources.jar` 建立紧凑索引，`api_lookup` 直接返回类、方法参数、返回类型、字段类型与 static 信息；索引按 jar 时间戳缓存，后续查询不再扫描整包。
+- **提示词与工具协议**：新增强制工作流——先 `workflow_status` / `workflow_next`，完成节点必须过 `workflow_complete`；重构前 `contract_freeze`、重构后 `contract_check`；查 API 优先 `api_lookup`，需要实现细节再 `dev_docs lookup`。工具总数 95。
+- **回归测试**：新增契约审计、API 索引、工作流门禁与需求重规划测试。
+
+## 3.4.1 — 2026-11-18
+
+修掉开发中心版本选择仍会滚动改值、快速生成版本列表不全的问题。
+
+- **开发中心改为纯点选**：版本中心的 Minecraft / 加载器、开发资料的加载器、模组学习与智能参考的加载器 / Minecraft 全部换成点选下拉，滚轮经过不再改值。
+- **开发中心版本不再截断**：优先读取在线正式版本清单，再合并本地目录，去掉原来的 120 条 / 40 条上限；即使启动器检测失败也会继续加载版本。
+- **快速生成拉取真实版本清单**：按所选加载器在线获取该加载器实际发布过构建的全部 Minecraft 版本（例如 Fabric、Forge、NeoForge 各自完整列表），切换加载器自动重载并尽量保留当前选择；离线时退回完整内置版本表，不再只有 9 个。
+- **新工程兜底表同步扩全**：内置版本表补齐 26.3、26.2、26.1.x、1.21.11–1.21.3 等版本。
+
+## 3.4.0 — 2026-11-18
+
+深度强化 Agent 的版本事实、架构参考与多版本工程能力。
+
+- **版本事实层**（`dma/modfacts.py`）：新增 `version_facts` 与 `project_fact_check`。覆盖 Java 版本、元数据文件名、数据目录单复数、1.21.4+ 物品定义、映射与 ID API、构建插件；`project_fact_check` 会扫描工程并输出冲突文件与修复动作，`lint_project` 也接入同一套事实检查。
+- **跨版本修正**：1.21+ 用单数数据目录；1.21.4+ 需要 `assets/<ns>/items`；NeoForge 1.20.5+ 用 `neoforge.mods.toml`；26.x 未混淆、非 remap，并使用 `Identifier.fromNamespaceAndPath`；1.21.2–1.21.8 使用 `ResourceLocation.fromNamespaceAndPath`。
+- **大型模组架构参考**（`dma/archref.py` + `arch_ref`）：提炼 Create、GregTech Modern、Mekanism、Botania 的注册分层、材料/RecipeMap、多方块、能力 API、配置、游戏内文档与渲染分层模式，支持按玩法检索；只学结构，不复制源码。
+- **多版本 / 多加载器**（`dma/multiversion.py` + `multiversion_plan`）：在 Stonecutter、Architectury、MultiLoader、Modstitch、Stonecraft 之间自动选型，输出目标矩阵、目录骨架、官方插件坐标、迁移步骤与逐目标验证要求。
+- **调试闭环**：崩溃分类新增 Java class 版本（61/65/69 → 17/21/25）、映射改名、Access Widener/Transformer、元数据文件名、数据生成与配方错误；编译提示同步补充 26.x 与 Identifier 改名说明。
+- **技能与计划**：新增 version-facts、multiversion、access-widener-transformer、gametest、architecture-patterns、publishing-ci 六个内置技能；`large_mod_plan` 新增 facts 阶段，reference 阶段加入 `arch_ref`，spec 阶段加入 `multiversion_plan`；工具总数 85。
+- **提示词**：新增强制顺序——先 `version_facts` / `project_fact_check`，再 `dev_docs` / `mod_reference` / `arch_ref`，最后动手；不确定的版本差异必须在线核实，禁止把猜测写成事实。
+
+## 3.3.3 — 2026-11-18
+
+- **版本与 API 改为纯点选列表**：新建工程的 MC 版本、加载器版本、Fabric API 不再是可以输入文字的编辑框，改成和「加载器」一样的下拉列表：点一下展开，点选一项生效，滚轮经过不改值。列表仍来自在线目录并合并启动器实例。
+- **快速生成页同步调整**：一键生成里的加载器、MC 版本、规模也改成同样的点选下拉，滚轮不再误改；MC 版本只列出骨架真实支持的版本。
+
+## 3.3.2 — 2026-11-18
+
+修掉新建工程里滚轮误改版本的问题，并把下载直链改为站点托管。
+
+- **版本与 API 只按选择切换**：MC 版本、加载器、加载器版本、Fabric API、运行端、任务类型都改成滚轮不改值的下拉框。鼠标滚轮经过时不会再把 26.3 滚成别的版本，只有点开列表或键盘选择才切换；可编辑输入保持不变。
+- **下载直链指向站点**：`mod_agent_release.json` 的 `download_url` 现在指向站点上的 ZIP，不再依赖 GitHub Release 是否已创建，避免网站按钮 404。
+
+## 3.3.1 — 2026-11-18
+
+修掉“更新日志点了没反应、Forge / NeoForge / Quilt 永远是空的”，并把新建工程从固定 10 个版本扩展到完整版本目录。
+
+- **更新日志真正联网同步**：开发资料的「刷新更新日志」以前只重读本地缓存，现在会实际拉取；同步完成后自动刷新列表并显示来源。
+- **加载器版本记录补齐**：Fabric 走 GitHub Releases；Forge / NeoForge / Quilt 没有 Release 时自动回退到 Maven 元数据（优先 BMCLAPI / 高校镜像），再失败才用 GitHub Tags。Forge / NeoForge / Quilt 现在都能看到最近 12 个版本。
+- **新建工程读取完整版本目录**：MC 版本不再写死 10 个，改为读取在线 Mojang 清单（正式版 + 快照），并合并启动器里已安装的实例；列表可编辑，任何版本都能直接输入。
+- **加载器与依赖版本可选**：新增「加载器版本」下拉（Fabric / Quilt 全量、Forge / NeoForge 按当前 MC 过滤），Fabric 工程新增「Fabric API」下拉；两者都会写入工程 `.dma/project.json` 并进入系统提示，避免实现时猜版本。
+- **Quilt 工程**：新建工程允许选择 Quilt；没有内置骨架时由 Agent 按官方模板生成构建脚本。
+- **对话框联网刷新**：新建工程里可直接「联网刷新」Mojang 与四家加载器清单，不阻塞界面。
+- **自动参考覆盖更全**：对话任务开始前的自动参考从 1 个模组提高到 2 个，代码片段上限提高到 8 条；仍然只读、不写入用户工程。
+
+## 3.3.0 — 2026-11-17
+
+工坊改为在线优先：程序本体保持轻量，开发环境和资料从网站与镜像按需拉取；Agent 在做功能前会自动联网找同类模组、反编译并阅读实现。
+
+- **在线资源层**（`dma/resources.py`）：新增 `resource_ensure`，按 jdk / gradle / catalog / mdk / sources / docs 在线准备环境。官方源优先，失败自动切换华为、腾讯、中科大与 BMCLAPI 镜像；所有下载落在程序 `data` 目录。发布清单附带 `bootstrap.json`，明确每个资源的来源。
+- **在线开发资料**（`dma/devdocs.py`）：按加载器直接获取 `sources.jar`——Forge / NeoForge 走版本目录，Fabric / Quilt 走官方 Maven——在本地解包检索类、方法与注解；本地没有源码时回退 GitHub 代码搜索，不再依赖预置文档。
+- **智能参考管线**（`dma/reference.py`）：从需求识别实体、方块、GUI、世界生成、渲染、Mixin、网络、数据、配方、命令、配置、药水效果、村民、任务、皮肤、社交、载具、存储等 19 类机制，自动搜索 Modrinth、下载合适版本、反编译并建立索引，再把相关代码片段作为只读参考注入任务。
+- **自动参考默认开启**：`auto_reference` 配置与对话页「自动参考」开关；反编译源码只读、不写入用户工程，始终附带许可证提示。
+- **大型模组规划器**（`dma/planner.py`）：`large_mod_plan` 按 small / medium / large / epic 生成阶段、任务与包结构；large 目标为 40 个类 / 10 个包 / 8 个阶段 / 16 项测试。这里的“2G 标准”指大型应用的工程能力，不是安装包体积。
+- **Agent 工具**：新增 `mod_reference`（auto / search / prepare / snippets / status）、`dev_docs`（lookup / sources / official / status）、`resource_ensure`、`large_mod_plan`，工具总数 81。系统提示要求先 `resource_ensure` / `dev_docs` / `large_mod_plan`，再写代码。
+- **开发中心 UI**：新增「智能参考」页与「在线环境」面板；可查看 JDK / Gradle / 源码构件状态、一键在线准备、自动搜索反编译并展示片段、打开参考源码目录。
+- **发布方式**：`python build.py` 只打轻量在线版，并输出 `mod_agent_release.json`（`kind: online`、`bootstrap_url`、`online_resources`）与 `mod_agent_bootstrap.json`；`build_full.py` 改为必须显式 `--offline` 才构建内置缓存的离线版。
+
+## 3.2.0 — 2026-11-17
+
+工坊不再是一个孤立的代码助手：它和启动器连成一套开发环境，自己维护版本清单与开发资料，并能把成熟模组拉下来反编译学习。
+
+- 新增「开发中心」页（`dma/ui/center_page.py`），四个分区：版本中心、开发资料、测试中心、模组学习，所有操作都在工坊内完成，不用来回切窗口。
+- 启动器联动桥（启动器 `darkitten/bridge.py`）：只监听 `127.0.0.1`，端口随机、每次启动生成随机 token，令牌写在 `bridge.json`。工坊可读取启动器已安装版本、Mojang 版本下载地址（含 BMCLAPI 镜像）、Modrinth 搜索结果与版本，并可请求启动器启动指定实例。
+- 工坊侧 `dma/launcher_bridge.py`：优先走联动桥；启动器没开时回退读取 `config.json` 与 `versions/`，仍能列出实例，不会因为启动器关闭就整页空白。
+- 新增开发生态目录（`dma/catalog.py`）：持续同步 Mojang 版本清单与 Java 要求、Fabric / Quilt 的游戏与加载器版本、Yarn / Quilt Mappings、Forge / NeoForge Maven 版本、Gradle 当前版本、Adoptium JDK、四家加载器的 MDK 与 Javadoc 地址，以及更新日志。后台每 6 小时自动同步，断网时保留上一次成功数据。
+- 新增模组学习（`dma/modlibrary.py`）：按加载器和 MC 版本搜索 Modrinth，下载 JAR（SHA-1 校验、上限 512MB），用 Vineflower 反编译成源码和 `INDEX.md`，只写入本机 `data/library`，不碰用户工程。
+- 新增「全量离线发行版」构建脚本（`build_full.py`）：把程序本体、JDK 21、Gradle wrapper、依赖缓存、NeoForm / Loom 缓存、镜像缓存和生态目录一起打包，解压后首次构建不需要再下载几个 GB 环境；按 core / jdk / gradle / assets 分组生成不超过 1900MB 的分卷，并输出 SHA-256 清单。
+- 启动器侧新增模组学习入口：模组页「模组学习」可搜索 Modrinth、下载到学习库、反编译成源码并打开目录；反编译支持 `META-INF/jarjar` 与 `META-INF/jars` 内的嵌套 JAR。
+- Agent 新增 11 个工具：`catalog_sync`、`catalog_query`、`catalog_download`、`mod_search`、`mod_download`、`mod_decompile`、`launcher_versions`、`launcher_downloads`、`launcher_vanilla`、`launcher_launch`、`launcher_status`，对话里可以直接查版本、下 MDK / Javadoc、拉模组反编译、启动测试实例。
+- 修复联动桥端口在 descriptor 中显示为 0 的问题；新增启动器桥 10 项端到端测试与工坊 17 项目录 / 模组库 / 联动测试。
+- Forge / NeoForge 没有 `javadoc.jar` 时自动回退到 `sources.jar` 并附官方文档站；NeoForge MDK 改从 NeoForgeMDKs 仓库按版本获取；Quilt 所有 loader 被标记为非 stable 时回退到最新发布版，避免资料下载 404。
+- 全量发行版改用最终目录统计分组体积，`--reuse` 增量构建也能在清单里看到 JDK / Gradle / 镜像 / 目录的真实占用。
+
 ## 3.1.0 — 2026-11-13
 
 把编译错误变成结构化的修复清单，并在每次编译后固化工程契约，解决大工程“写错→编译失败→猜错→又写错”。

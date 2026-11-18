@@ -34,6 +34,32 @@ class ProjectTests(TempDataCase):
         self.assertTrue(loaded.meta.complete())
         self.assertEqual(loaded.meta.missing(), [])
 
+    def test_loader_and_fabric_api_versions_persist(self) -> None:
+        project = project_mod.create_project(
+            self.tmp / "projects",
+            name="星尘工具",
+            mod_id="stardust_tools",
+            mc_version="1.21.1",
+            loader="Fabric",
+            loader_version="0.16.9",
+            fabric_api="0.115.0+1.21.1",
+        )
+        loaded = project_mod.load_project(project.root)
+        self.assertEqual(loaded.meta.loader_version, "0.16.9")
+        self.assertEqual(loaded.meta.fabric_api, "0.115.0+1.21.1")
+
+    def test_quilt_project_is_allowed(self) -> None:
+        project = project_mod.create_project(
+            self.tmp / "projects",
+            name="星尘工具",
+            mod_id="stardust_quilt",
+            mc_version="1.21.1",
+            loader="Quilt",
+            loader_version="0.27.0",
+        )
+        self.assertEqual(project.meta.loader, "Quilt")
+        self.assertEqual(project.meta.loader_version, "0.27.0")
+
     def test_validate_mod_id(self) -> None:
         self.assertEqual(project_mod.validate_mod_id(" My_Mod1 "), "my_mod1")
         for value in ("", "1abc", "ab-c", "中文", "a"):

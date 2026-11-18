@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .. import catalog as catalog_mod
 from .. import config as config_mod
 from .. import mcdev, paths, shortcut, updater
 from ..connectors import ConnectorStore
@@ -26,6 +27,7 @@ from ..skills import SkillStore
 from ..version import APP_NAME_CN, APP_VERSION
 from . import theme
 from .build_page import BuildPage
+from .center_page import CenterPage
 from .chat_page import ChatPage
 from .connectors_page import ConnectorsPage
 from .environment_page import EnvironmentPage
@@ -72,6 +74,10 @@ class MainWindow(QMainWindow):
         self.memory = MemoryStore()
         self.knowledge = KnowledgeStore()
         self.connector_store = ConnectorStore()
+        self.catalog = catalog_mod.Catalog()
+        self.catalog_service = catalog_mod.CatalogSyncService(
+            self.catalog, interval=6 * 3600
+        )
         self.active_project = None
         self._startup_worker = None
         self._update_info = None
@@ -88,6 +94,7 @@ class MainWindow(QMainWindow):
         self.project_changed.connect(self._track_project)
         QTimer.singleShot(800, self._offer_shortcut)
         QTimer.singleShot(2200, self._check_update_startup)
+        QTimer.singleShot(5000, self._start_catalog_sync)
 
     # ------------------------------------------------------------------
     def _build(self) -> None:
@@ -117,6 +124,7 @@ class MainWindow(QMainWindow):
         self.studio_page = StudioPage(self)
         self.tutorial_page = TutorialPage(self)
         self.build_page = BuildPage(self)
+        self.center_page = CenterPage(self)
         self.skills_page = SkillsPage(self)
         self.connectors_page = ConnectorsPage(self)
         self.environment_page = EnvironmentPage(self)
@@ -128,6 +136,7 @@ class MainWindow(QMainWindow):
             ("快速生成", self.studio_page),
             ("教程", self.tutorial_page),
             ("编译运行", self.build_page),
+            ("开发中心", self.center_page),
             ("技能", self.skills_page),
             ("连接器", self.connectors_page),
             ("环境", self.environment_page),
@@ -243,6 +252,10 @@ class MainWindow(QMainWindow):
         self.status("桌面快捷方式已创建")
 
     # ------------------------------------------------------------------
+    def _start_catalog_sync(self) -> None:
+        if not self.catalog_service.running:
+            self.catalog_service.start()
+
     def _check_update_startup(self) -> None:
         if not str(self.config.update_url or "").strip():
             return
@@ -291,6 +304,10 @@ class MainWindow(QMainWindow):
         self.save_config()
         try:
             self.build_page.shutdown()
+        except Exception:
+            pass
+        try:
+            self.catalog_service.stop()
         except Exception:
             pass
         try:

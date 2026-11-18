@@ -27,8 +27,10 @@ class UiSmokeTests(TempDataCase):
         window.config.update_url = ""
         window.show()
         self.app.processEvents()
-        self.assertEqual(window.stack.count(), 10)
+        self.assertEqual(window.stack.count(), 11)
         self.assertIsNotNone(window.chat_page)
+        self.assertIsNotNone(window.center_page)
+        self.assertIsNotNone(window.center_page.instance_list)
         self.assertIsNotNone(window.studio_page)
         self.assertIsNotNone(window.studio_page.generate_btn)
         self.assertIsNotNone(window.tutorial_page)
@@ -68,6 +70,86 @@ class UiSmokeTests(TempDataCase):
         window.close()
         window.memory.close()
         self.app.processEvents()
+
+    def test_new_project_dialog_reads_catalog_versions(self) -> None:
+        from dma import catalog
+        from dma.ui.widgets import NewProjectDialog
+
+        store = catalog.Catalog(self.tmp / "dialog-catalog.json")
+        store._data["sections"] = {
+            "mojang": {
+                "versions": [
+                    {"id": "1.21.1", "type": "release"},
+                    {"id": "1.20.1", "type": "release"},
+                    {"id": "26.3", "type": "release"},
+                    {"id": "26.3-snapshot", "type": "snapshot"},
+                ]
+            },
+            "fabric": {
+                "loader": [
+                    {"version": "0.16.9", "stable": True},
+                    {"version": "0.17.0", "stable": True},
+                ],
+                "loader_latest": "0.17.0",
+                "fabric_api": ["0.115.0+1.21.1", "0.100.0+1.20.1"],
+            },
+            "forge": {"versions": ["1.21.1-52.0.1", "1.20.1-47.2.0"]},
+            "neoforge": {"versions": ["21.1.80", "20.4.100"]},
+            "quilt": {"loader": [{"version": "0.27.0", "stable": True}]},
+        }
+        store._save()
+
+        dialog = NewProjectDialog(None, root=str(self.tmp / "projects"), catalog=store)
+        try:
+            self.assertGreaterEqual(dialog.mc_version.count(), 4)
+            self.assertEqual(dialog.mc_version.currentText(), "1.21.1")
+            self.assertEqual(dialog.version_status.text().find("在线目录") >= 0, True)
+            # 版本和 API 是点选列表，不是可输入的文本框。
+            self.assertFalse(dialog.mc_version.isEditable())
+            self.assertFalse(dialog.loader_version.isEditable())
+            self.assertFalse(dialog.fabric_api.isEditable())
+
+            dialog.loader.setCurrentText("Fabric")
+            dialog._refresh_loader_choices()
+            self.assertEqual(dialog.loader_version.currentText(), "0.17.0")
+            self.assertEqual(dialog.fabric_api.currentText(), "0.115.0+1.21.1")
+
+            dialog.loader.setCurrentText("Forge")
+            dialog._refresh_loader_choices()
+            self.assertEqual(dialog.loader_version.currentText(), "52.0.1")
+            values = [dialog.loader_version.itemText(i) for i in range(dialog.loader_version.count())]
+            self.assertIn("52.0.1", values)
+            self.assertNotIn("47.2.0", values)
+
+            # 滚轮经过不应改版本或 API，只有点开列表/键盘选择才切换。
+            from PySide6.QtCore import QPoint, QPointF, Qt
+            from PySide6.QtGui import QWheelEvent
+            from dma.ui.widgets import SelectComboBox
+
+            for combo in (
+                dialog.mc_version,
+                dialog.loader,
+                dialog.loader_version,
+                dialog.fabric_api,
+                dialog.runtime,
+                dialog.task,
+            ):
+                self.assertIsInstance(combo, SelectComboBox)
+                before = combo.currentIndex()
+                event = QWheelEvent(
+                    QPointF(5, 5),
+                    QPointF(5, 5),
+                    QPoint(0, 0),
+                    QPoint(0, -120),
+                    Qt.NoButton,
+                    Qt.NoModifier,
+                    Qt.NoScrollPhase,
+                    False,
+                )
+                self.app.sendEvent(combo, event)
+                self.assertEqual(combo.currentIndex(), before)
+        finally:
+            dialog.close()
 
     def test_pending_panel_shows_auto_written_files(self) -> None:
         from dma.agent import PendingFile

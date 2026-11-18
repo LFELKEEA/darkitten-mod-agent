@@ -5,7 +5,18 @@ build/
 dist/
 .testdata*/
 .smoke.py
+.smoke_data*/
 data/
 *.log
+.pytest_cache/
+.writing/
 
-.smoke_data_studio/
+# 本地配置与运行数据绝不入库
+config.json
+social.json
+logs/
+skins/
+minecraft/
+.wrangler/
+website/reports/
+website/qa/

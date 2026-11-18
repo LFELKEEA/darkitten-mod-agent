@@ -2,7 +2,69 @@
 
 只写 Minecraft Java 模组的桌面 Agent。界面用 PySide6，内置对话工作台、技能、连接器、知识库与反编译能力。模组开发闭环来自 [yan-mc/minecraft-mod-dev](https://github.com/yan-mc/minecraft-mod-dev)：真实开发端启动、回环 HTTP 探针、场景卡片断言和 GameTest。
 
-当前版本：`3.1.0`
+当前版本：`3.4.2`
+
+## 3.4.2 确定性任务图、契约冻结与离线 API 索引
+
+3.4.2 参考开源 MC 模组 Agent 的做法，把“模型负责决策、宿主负责状态”落到已有内核上：
+
+- **任务图工具**：`workflow_plan` / `workflow_status` / `workflow_next` / `workflow_complete` / `workflow_fail` / `workflow_skip` / `workflow_reopen`。任务 DAG 存在 `.dma/workflow.json`，完成节点前必须通过验收门禁；缺少构建、静态检查、文件或运行时证据时会返回阻断项。
+- **需求重规划**：`workflow_plan` 把新需求合并进 `.dma/spec.json`，补齐功能并重建 DAG，同时保留已完成状态，不会把进度清零。
+- **公共契约审计**：`contract_freeze` 冻结 public/protected 类、方法、字段和资源清单到 `.dma/contract.json`；`contract_check` 报告删除的符号、签名变更、父类/接口变化与资源缺失。新增允许，删除与改签名必须显式迁移。
+- **离线 API 签名索引**：`api_lookup` 从 `sources.jar` 建立紧凑索引并缓存，直接查类、方法参数、返回类型、字段类型；第一次按需下载源码，之后不再扫描整包。
+- **工具总数**：95。
+
+## 3.4.0 版本事实、架构参考与多版本工程
+
+3.4 把“跨版本写错”从提示词提醒变成可查询、可校验的工程能力：
+
+- **版本事实层**：新增 `version_facts` 与 `project_fact_check`。写代码前先核对 Java、元数据文件名、数据目录单复数、物品定义、映射与 ID API、构建插件；现有工程可直接扫出冲突文件与修复动作，并接入 `lint_project`。
+- **跨版本专项**：1.21+ 数据目录改单数、1.21.4+ 物品定义放 `assets/<ns>/items`、NeoForge 1.20.5+ 用 `neoforge.mods.toml`、26.x 未混淆且非 remap、1.21.9+/26.x 用 `Identifier.fromNamespaceAndPath`，都有明确基线。
+- **大型模组架构参考**：新增 `arch_ref`，提炼 Create、GregTech Modern、Mekanism、Botania 的注册分层、材料体系、RecipeMap、多方块、能力 API、配置与游戏内文档模式；写大型功能前先检索结构，再拆阶段。
+- **多版本 / 多加载器**：新增 `multiversion_plan`，在 Stonecutter、Architectury、MultiLoader、Modstitch、Stonecraft 之间自动选型，输出目录骨架、官方插件坐标、迁移步骤与逐目标验证顺序。
+- **调试闭环**：崩溃分类补齐 Java class 版本、映射改名、Access Widener/Transformer、元数据文件名、数据生成与配方错误；编译日志可直接把 class 版本换算成 Java 17/21/25。
+- **技能包**：新增 version-facts、multiversion、access-widener-transformer、gametest、architecture-patterns、publishing-ci 六个技能；大型模组计划新增 facts 阶段。工具总数 85。
+
+## 3.3.3 版本选择方式
+
+- **版本与 API 改为纯点选列表**：新建工程里的 MC 版本、加载器版本、Fabric API 与「加载器」一致，点开下拉列表选择，不再是可输入的编辑框；滚轮经过也不会改值。快速生成页的加载器、MC 版本、规模同步改为点选下拉。
+
+## 3.3.2 交互修正
+
+- **版本与 API 只按选择切换**：新建工程里的 MC 版本、加载器、加载器版本、Fabric API、运行端、任务类型改为滚轮不改值的下拉框，避免鼠标滚轮经过时误改版本；点开列表或键盘选择才切换。
+- **下载直链改为站点托管**：发布清单的 `download_url` 指向站点上的 ZIP，不再依赖 GitHub Release 是否已创建。
+
+## 3.3.1 版本目录与更新日志
+
+3.3.1 修掉了开发资料里「更新日志永远加载不出来」，并让新建工程直接对接在线版本目录：
+
+- **更新日志真正联网同步**：开发资料的刷新按钮现在会实际拉取，而不是只重读缓存；同步完自动刷新列表并标出来源。
+- **加载器版本记录补齐**：Fabric 优先 GitHub Releases；Forge / NeoForge / Quilt 没有 Release 时回退 Maven 元数据（优先 BMCLAPI 与高校镜像），再失败才用 GitHub Tags。四家加载器都能看到最近 12 个版本。
+- **新建工程读取完整版本目录**：MC 版本不再写死 10 个，改为读取在线 Mojang 清单（正式版 + 快照），并合并启动器里已安装的实例；下拉框可编辑，任何版本都能直接输入。
+- **加载器与依赖版本可选**：新增「加载器版本」下拉（Fabric / Quilt 全量，Forge / NeoForge 按当前 MC 过滤），Fabric 工程新增「Fabric API」下拉；两者写入 `.dma/project.json` 并进入系统提示，避免实现时猜版本。
+- **Quilt 工程**：新建工程允许选择 Quilt，没有内置骨架时由 Agent 按官方模板生成构建脚本。
+- **自动参考覆盖更全**：任务开始前的自动参考提升到 2 个模组 / 8 条片段，仍然只读、不写入用户工程。
+
+## 3.3 在线优先与智能参考
+
+3.3 不再把开发环境塞进安装包，而是让工坊按需从网站和镜像拉取：
+
+- **轻量本体**：安装包只包含程序和运行库。JDK 21、Gradle 发行版、版本目录、MDK、`sources.jar` 和参考模组都在第一次需要时下载到程序 `data` 目录，可删除后重新拉取。
+- **在线资源层**：`resource_ensure` 支持 `status / all / jdk / gradle / catalog / mdk / sources / docs`。官方源优先，失败自动切华为、腾讯、中科大与 BMCLAPI 镜像；发布清单 `mod_agent_bootstrap.json` 公开每个资源的来源。
+- **在线开发资料**：`dev_docs` 直接拉取各加载器的 `sources.jar` 并检索类、方法与注解；本地没有源码时回退 GitHub 代码搜索，不依赖预置文档。
+- **智能参考**：实现功能前自动识别机制（实体、方块、GUI、世界生成、渲染、Mixin、网络、配方、皮肤、社交等 19 类），搜索并下载同类模组，反编译、建索引，再把相关片段作为只读参考注入本轮任务。源码不写入用户工程，始终附带许可证提示。
+- **大型模组规划**：`large_mod_plan` 生成阶段、任务与包结构；large 目标为 40 个类 / 10 个包 / 8 个阶段 / 16 项测试。这里的“2G 标准”指大型模组所需的工程能力，不是安装包体积。
+- **可关闭**：对话页「自动参考」开关与 `auto_reference` 配置；不做参考时仍可用 `mod_reference` / `dev_docs` 手动查询。
+
+## 3.2 开发中心与启动器联动
+
+3.2 把工坊、启动器和模组资料连成一条线：
+
+- **开发中心**：侧边栏「开发中心」包含版本中心、开发资料、测试中心、模组学习四个分区。版本中心列出启动器里的实例，可直接用启动器启动；也可以在这里下载 MDK、Javadoc / 源码、原版 client.jar / server.jar。
+- **启动器联动桥**：启动器运行时会在本机随机端口开一个只接受随机 token 的 HTTP 服务（仅 `127.0.0.1`）。工坊通过它读取实例、下载地址和 Modrinth 数据，并请求启动器打开或启动实例。启动器没开时自动回退到读取 `config.json` 和 `versions/`。
+- **持续同步开发资料**：后台每 6 小时同步 Mojang 版本清单、Fabric / Quilt 游戏与加载器、Yarn / Quilt Mappings、Forge / NeoForge 版本、Gradle 与 Adoptium JDK、四家加载器的 MDK / Javadoc / 源码地址和更新日志；所有数据保存到 `data/catalog/catalog.json`，断网时继续使用上次结果。
+- **模组学习**：在工坊或启动器里搜索 Modrinth 模组，下载后反编译成可读源码，写入本机学习库并生成索引。源码只作阅读与排错参考，不写入用户工程，也不重新分发。
+- **离线版（可选）**：默认发布使用 `python build.py` 生成轻量在线版。只有在明确需要离线交付时，才用 `python build_full.py --offline` 把 JDK 21、Gradle 依赖与 NeoForm / Loom 缓存一起打包成分卷发行版。
 
 ## 2.0 内核
 

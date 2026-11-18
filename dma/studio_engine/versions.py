@@ -274,6 +274,40 @@ def neoforge_mc_prefix(mc: str) -> str:
     return mc
 
 
+def _forge_mc_ids(versions: list[str]) -> set[str]:
+    ids: set[str] = set()
+    for version in versions:
+        match = re.match(r"^(\d[0-9A-Za-z._]*)-", str(version or ""))
+        if match:
+            ids.add(match.group(1))
+    return ids
+
+
+def supported_mc_ids(loader: str, refresh: bool = False) -> list[str]:
+    """该加载器真实发布过构建的 Minecraft 正式版本（新到旧）。
+
+    元数据拉取失败时退回全部正式版本：界面仍然列出所有版本，由
+    resolve() 给出“这个加载器没有该版本”的精确提示，而不是悄悄隐藏。
+    """
+    loader = str(loader or "").lower()
+    releases = minecraft_release_ids(refresh=refresh)
+    if loader == "fabric":
+        games = _fabric_games(refresh=refresh)
+        return [mc for mc in releases if mc in games] if games else releases
+    if loader == "forge":
+        ids = _forge_mc_ids(_forge_versions(refresh=refresh))
+        return [mc for mc in releases if mc in ids] if ids else releases
+    if loader == "neoforge":
+        artifacts = [str(v or "") for v in _neoforge_versions(refresh=refresh)]
+        out = []
+        for mc in releases:
+            prefix = neoforge_mc_prefix(mc)
+            if any(v == prefix or v.startswith(prefix + ".") for v in artifacts):
+                out.append(mc)
+        return out or releases
+    return releases
+
+
 def _latest_for_mc(versions: list[str], mc: str, loader: str) -> str:
     if loader == "forge":
         matches = [v for v in versions if v.startswith(mc + "-")]

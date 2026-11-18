@@ -239,9 +239,10 @@ def _checkers() -> list[tuple[str, CheckFn]]:
     from . import assets, datapack, packaging, docs, gradle, mixin
     from . import client_thread, network, registry, domain, antipattern
     from . import world, render_gui, serialization, thirdparty, logging_version
-    from . import security_i18n, stress, ecosystem, version, mechanism
+    from . import security_i18n, stress, ecosystem, version, mechanism, facts
     return [
         ("gradle", gradle.run),
+        ("facts", facts.run),
         ("mixin", mixin.run),
         ("mechanism", mechanism.run),
         ("client", client_thread.run),

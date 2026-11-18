@@ -79,6 +79,8 @@ class ProjectMeta:
     loader: str = "Forge"
     runtime: str = "双端"
     dependencies: str = ""
+    loader_version: str = ""
+    fabric_api: str = ""
     task_type: str = "创建全新模组"
     notes: str = ""
     created_at: str = ""
@@ -156,6 +158,8 @@ def create_project(
     loader: str,
     runtime: str = "双端",
     dependencies: str = "",
+    loader_version: str = "",
+    fabric_api: str = "",
     task_type: str = "创建全新模组",
     notes: str = "",
     package: str = "",
@@ -165,8 +169,8 @@ def create_project(
     loader = (loader or "").strip()
     if not mc_version:
         raise ProjectError("请填写 MC 版本。")
-    if loader not in {"Forge", "Fabric", "NeoForge", "Architectury"}:
-        raise ProjectError("加载器只能是 Forge、Fabric、NeoForge 或 Architectury。")
+    if loader not in {"Forge", "Fabric", "NeoForge", "Quilt", "Architectury"}:
+        raise ProjectError("加载器只能是 Forge、Fabric、NeoForge、Quilt 或 Architectury。")
     base = Path(root).expanduser().resolve()
     target = base / mod_id
     target.mkdir(parents=True, exist_ok=True)
@@ -177,6 +181,8 @@ def create_project(
         loader=loader,
         runtime=(runtime or "双端").strip(),
         dependencies=dependencies.strip(),
+        loader_version=(loader_version or "").strip(),
+        fabric_api=(fabric_api or "").strip(),
         task_type=task_type,
         notes=notes.strip(),
         created_at=_now(),
@@ -216,8 +222,11 @@ def create_project(
         readme.write_text(
             f"# {meta.name}\n\n"
             f"- Minecraft: {mc_version}\n"
-            f"- Loader: {loader}\n"
-            f"- Mod ID: `{mod_id}`\n\n"
+            f"- Loader: {loader}"
+            f"{(' ' + meta.loader_version) if meta.loader_version else ''}\n"
+            f"- Mod ID: `{mod_id}`\n"
+            + (f"- Fabric API: {meta.fabric_api}\n" if meta.fabric_api else "")
+            + "\n"
             f"{note}\n"
             "由 Darkitten Mod Agent 创建。\n",
             encoding="utf-8",

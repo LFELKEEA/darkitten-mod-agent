@@ -14,7 +14,7 @@ from typing import Any
 
 from .kernel.checks import run_checks
 from .kernel.findings import Report
-from .kernel.gate import verify
+from .kernel.gate import feature_for, verify
 from .kernel.loopguard import LoopGuard
 from .kernel.snapshot import SnapshotStore
 from .kernel.spec import (
@@ -122,6 +122,146 @@ class KernelBridge:
                 task.status = previous.status
                 task.detail = previous.detail
                 task.attempts = previous.attempts
+
+    # ------------------------------------------------------------------
+    def status(self) -> dict[str, Any]:
+        """Snapshot of spec, DAG progress and the next executable tasks."""
+        if self.spec is None or self.workflow is None:
+            return {"ok": False, "reason": "当前没有规格或任务图。"}
+        ready = self.workflow.next_actions(limit=8)
+        return {
+            "ok": True,
+            "spec": self.spec.summary(),
+            "progress": self.workflow.progress(),
+            "current": (
+                {"id": self.workflow.current().id, "title": self.workflow.current().title}
+                if self.workflow.current() is not None
+                else None
+            ),
+            "next": [item.to_dict() for item in ready],
+        }
+
+    def replan(self, idea: str = "", *, include_runtime: bool = True) -> dict[str, Any]:
+        """Merge a new request into the spec and rebuild the task DAG."""
+        if self.spec is None or self.workflow is None:
+            return {"ok": False, "reason": "当前没有规格或任务图。"}
+        text = (idea or self.idea or "").strip()
+        if not text:
+            return {"ok": False, "reason": "缺少需求描述。"}
+        fresh = derive_spec(
+            text,
+            self.spec.loader,
+            self.spec.mc,
+            modid=self.spec.modid or None,
+            package=self.spec.package or None,
+            scope=self.spec.scope or "medium",
+        )
+        existing = set(self.spec.feature_ids())
+        added = [item for item in fresh.features if item.id not in existing]
+        if added:
+            self.spec.features.extend(added)
+        self.spec.idea = text
+        self.spec.updated_at = fresh.updated_at
+        self.idea = text
+        old = self.workflow
+        self.workflow = plan_tasks(self.spec, include_runtime=include_runtime)
+        self._carry_status(old, self.workflow)
+        if self.root is not None:
+            save_spec(self.spec, self.root)
+            save_workflow(self.workflow, self.root)
+        return {
+            "ok": True,
+            "added": [item.id for item in added],
+            "spec": self.spec.summary(),
+            "progress": self.workflow.progress(),
+        }
+
+    def complete_task(
+        self,
+        task_id: str,
+        *,
+        evidence: list[str] | None = None,
+        manual_ok: bool | None = None,
+        force: bool = False,
+    ) -> dict[str, Any]:
+        """Run the acceptance gate before marking a task done.
+
+        A task is only completed when every required acceptance item has real
+        evidence.  ``force=True`` is the explicit manual override and leaves a
+        note in the task detail.
+        """
+        if self.root is None or self.spec is None or self.workflow is None:
+            return {"ok": False, "reason": "当前没有工程，无法更新任务图。"}
+        try:
+            task = self.workflow.require(task_id)
+        except KeyError as exc:
+            return {"ok": False, "reason": str(exc)}
+        if task.is_terminal:
+            return {
+                "ok": True,
+                "already": task.status,
+                "task": task.to_dict(),
+                "markdown": f"任务 `{task_id}` 已经是 {task.status}。",
+            }
+
+        gate = verify(
+            self.spec,
+            task,
+            self.root,
+            build_ok=self.last_build_ok,
+            test_ok=self.last_test_ok,
+            runtime_ok=self.last_runtime_ok,
+            manual_ok=manual_ok,
+            report=self.last_lint,
+        )
+        needs_lint = any(
+            item.kind == "lint" and not item.passed and "尚未执行" in item.message
+            for item in gate.checks
+        )
+        if needs_lint:
+            report, _ = self.lint()
+            gate = verify(
+                self.spec,
+                task,
+                self.root,
+                build_ok=self.last_build_ok,
+                test_ok=self.last_test_ok,
+                runtime_ok=self.last_runtime_ok,
+                manual_ok=manual_ok,
+                report=report,
+            )
+
+        if not gate.passed and not force:
+            return {
+                "ok": False,
+                "blocked": [item.to_dict() for item in gate.blocking],
+                "task": task.to_dict(),
+                "markdown": gate.markdown()
+                + "\n请先补齐上面未通过的验收项；确实无法自动验证时，用 manual_ok=true 明确人工确认。",
+            }
+
+        merged = list(evidence or [])
+        merged.extend(gate.evidence())
+        try:
+            if force:
+                self.workflow.complete(task.id, evidence=merged, force=True)
+                task.detail = "人工强制确认"
+            else:
+                self.workflow.complete(task.id, evidence=merged)
+        except Exception as exc:  # noqa: BLE001 - 回报拒绝原因
+            return {"ok": False, "reason": str(exc), "task": task.to_dict()}
+
+        feature = feature_for(self.spec, task)
+        if feature is not None:
+            feature.status = "done"
+        save_workflow(self.workflow, self.root)
+        save_spec(self.spec, self.root)
+        return {
+            "ok": True,
+            "task": task.to_dict(),
+            "progress": self.workflow.progress(),
+            "markdown": gate.markdown(),
+        }
 
     # ------------------------------------------------------------------
     def prompt_block(self) -> str:

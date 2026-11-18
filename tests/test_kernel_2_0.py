@@ -65,7 +65,7 @@ class RuleCatalogTests(unittest.TestCase):
 class ToolSchemaTests(unittest.TestCase):
     def test_tool_definitions_are_unique(self) -> None:
         names = [item["function"]["name"] for item in TOOL_DEFINITIONS]
-        self.assertEqual(len(names), 66)
+        self.assertEqual(len(names), 95)
         self.assertEqual(len(names), len(set(names)))
 
     def test_new_kernel_tools_are_exposed(self) -> None:
@@ -383,6 +383,7 @@ class AgentIntegrationTests(TempDataCase):
         self.memory = MemoryStore()
         config = Config()
         config.ai.provider = "pollinations"
+        config.auto_reference = False  # 单测不访问网络/不下载参考模组
         config.max_steps = 4
         self.worker = AgentWorker(
             user_text="添加一个物品",

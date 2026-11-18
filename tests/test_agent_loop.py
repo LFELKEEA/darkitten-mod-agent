@@ -41,6 +41,7 @@ class AgentLoopTests(TempDataCase):
         config = Config()
         config.ai.provider = "pollinations"
         config.auto_apply = auto_apply
+        config.auto_reference = False  # 单测不访问网络/不下载参考模组
         config.max_steps = 4
         memory = MemoryStore()
         self._stores.append(memory)

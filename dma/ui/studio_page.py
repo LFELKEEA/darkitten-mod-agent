@@ -5,10 +5,9 @@ from __future__ import annotations
 import threading
 from pathlib import Path
 
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject, QTimer, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
-    QComboBox,
     QFileDialog,
     QFormLayout,
     QHBoxLayout,
@@ -22,13 +21,14 @@ from PySide6.QtWidgets import (
 )
 
 from .. import paths, studio_bridge
-from .widgets import TextPreviewDialog, card, tiny
+from .widgets import SelectComboBox, TextPreviewDialog, card, tiny
 
 
 class _Signals(QObject):
     line = Signal(str)
     done = Signal(object)
     failed = Signal(str)
+    versions = Signal(str, object)
 
 
 class StudioPage(QWidget):
@@ -43,12 +43,14 @@ class StudioPage(QWidget):
         self._signals.line.connect(self._append)
         self._signals.done.connect(self._on_done)
         self._signals.failed.connect(self._on_failed)
+        self._signals.versions.connect(self._on_versions)
         self._thread: threading.Thread | None = None
         self._busy = False
         self._last_root: Path | None = None
         self._task = ""
         self._build_page()
         self._set_busy(False)
+        QTimer.singleShot(300, self._reload_mc_versions)
 
     # ------------------------------------------------------------------
     def _build_page(self) -> None:
@@ -98,14 +100,16 @@ class StudioPage(QWidget):
         self.name.setPlaceholderText("例如：深渊回响（留空自动命名）")
         self.modid = QLineEdit()
         self.modid.setPlaceholderText("例如：abyss_echo（留空自动生成）")
-        self.loader = QComboBox()
+        self.loader = SelectComboBox()
         self.loader.addItems(list(studio_bridge.APP_LOADERS))
         self.loader.setCurrentText("Forge")
-        self.mc = QComboBox()
-        self.mc.setEditable(True)
+        self.loader.currentIndexChanged.connect(self._reload_mc_versions)
+        # 版本列表来自在线清单，按所选加载器过滤；下拉点选，滚轮不会误改。
+        self.mc = SelectComboBox()
+        self.mc.setMaxVisibleItems(24)
         self.mc.addItems(studio_bridge.MC_VERSIONS)
         self.mc.setCurrentText("1.20.1")
-        self.scope = QComboBox()
+        self.scope = SelectComboBox()
         for key, label in studio_bridge.SCOPES:
             self.scope.addItem(label, key)
         self.scope.setCurrentIndex(1)
@@ -131,6 +135,8 @@ class StudioPage(QWidget):
         grid.addRow("作者", self.author)
         grid.addRow("输出目录", dest_row)
         form.addLayout(grid)
+        self.mc_hint = tiny("正在同步可用版本…")
+        form.addWidget(self.mc_hint)
 
         options = QHBoxLayout()
         options.setSpacing(14)
@@ -245,6 +251,45 @@ class StudioPage(QWidget):
             "author": self.author.text().strip(),
             "dest_root": self.dest.text().strip(),
         }
+
+    # ------------------------------------------------------------------
+    def _reload_mc_versions(self, *_args) -> None:
+        loader = self.loader.currentText().strip()
+        if not loader:
+            return
+        self.mc_hint.setText(f"正在同步 {loader} 可用版本…")
+
+        def work() -> None:
+            try:
+                ids = studio_bridge.mc_versions(loader)
+            except Exception:  # noqa: BLE001 - 版本清单失败不能阻塞生成
+                ids = []
+            self._signals.versions.emit(loader, ids)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_versions(self, loader: str, ids: object) -> None:
+        if loader != self.loader.currentText().strip():
+            return
+        items = [str(item) for item in (ids or []) if str(item).strip()]
+        if not items:
+            items = list(studio_bridge.MC_VERSIONS)
+        current = self.mc.currentText().strip()
+        self.mc.blockSignals(True)
+        self.mc.clear()
+        self.mc.addItems(items)
+        index = self.mc.findText(current)
+        if index < 0:
+            for preferred in ("1.20.1", "1.21.1"):
+                index = self.mc.findText(preferred)
+                if index >= 0:
+                    break
+        if index < 0:
+            index = 0
+        if index >= 0:
+            self.mc.setCurrentIndex(index)
+        self.mc.blockSignals(False)
+        self.mc_hint.setText(f"{loader}：{len(items)} 个可用版本")
 
     # ------------------------------------------------------------------
     def _preview_plan(self) -> None:

@@ -203,6 +203,11 @@ class ChatPage(QWidget):
             "每轮写入后自动执行 Gradle build；失败时让模型按日志修一轮。"
         )
         self.auto_build_box.toggled.connect(self._on_auto_build)
+        self.auto_ref_box = QCheckBox("自动参考")
+        self.auto_ref_box.setToolTip(
+            "开始任务前自动联网搜索相关模组，下载并反编译后作为只读参考。"
+        )
+        self.auto_ref_box.toggled.connect(self._on_auto_reference)
         self.form_btn = QPushButton("插入需求单")
         self.form_btn.setObjectName("Ghost")
         self.form_btn.clicked.connect(self._insert_form)
@@ -222,6 +227,7 @@ class ChatPage(QWidget):
         self.send_btn.clicked.connect(self._send)
         row.addWidget(self.auto_apply_box)
         row.addWidget(self.auto_build_box)
+        row.addWidget(self.auto_ref_box)
         row.addWidget(self.form_btn)
         row.addWidget(self.clear_btn)
         row.addStretch(1)
@@ -256,6 +262,7 @@ class ChatPage(QWidget):
                 self.auto_build_box,
                 self.main.config.auto_build and self.main.config.auto_apply,
             ),
+            (self.auto_ref_box, self.main.config.auto_reference),
         ):
             box.blockSignals(True)
             box.setChecked(bool(value))
@@ -280,6 +287,15 @@ class ChatPage(QWidget):
             "自动编译已开启：每轮写入后自动执行 Gradle build。"
             if checked
             else "自动编译已关闭。"
+        )
+
+    def _on_auto_reference(self, checked: bool) -> None:
+        self.main.config.auto_reference = bool(checked)
+        self.main.save_config()
+        self.main.status(
+            "自动参考已开启：开始任务前会联网搜索并反编译相关模组。"
+            if checked
+            else "自动参考已关闭。"
         )
 
     def _continue(self) -> None:
@@ -487,7 +503,11 @@ class ChatPage(QWidget):
         self.main.project_changed.emit(project)
 
     def new_project(self) -> None:
-        dialog = NewProjectDialog(self, root=str(self.main.config.project_root))
+        dialog = NewProjectDialog(
+            self,
+            root=str(self.main.config.project_root),
+            catalog=getattr(self.main, "catalog", None),
+        )
         if dialog.exec() != dialog.DialogCode.Accepted:
             return
         self.main.config.project_root = str(dialog.root.text().strip())

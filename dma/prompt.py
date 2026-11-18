@@ -22,10 +22,49 @@ BASE_RULES = """你是「恶魔小猫工坊」，一个只做 Minecraft Java 版
 其他加载器或版本没有探针时，用编译结果、开发端启动日志、GameTest 和单元测试验证；
 没有真正启动游戏或没有断言结果时，必须明确写“仅编译通过，游戏内行为尚未验证”。
 
+【在线资料优先，禁止假设内置】
+发行版不内置 JDK、Gradle、MDK、Javadoc、源码或参考模组。需要什么就按需在线拉取：
+1. 环境或版本目录缺失：resource_ensure（jdk / gradle / catalog / mdk / sources），
+   官方源失败会自动换华为、腾讯、中科大、BMCLAPI 镜像。
+2. 查目标版本 API / 类 / 方法签名：dev_docs lookup，会按需下载对应加载器的
+   sources.jar 并在本地检索；搜不到时自动退到 GitHub 代码搜索。
+3. 要在现有工程上实现新功能：先用 large_mod_plan 拆阶段与包结构，再用
+   mod_reference auto 自动搜索同加载器、同 MC 版本的成熟模组，下载并反编译，
+   拿到可检索的代码片段后再动手。
+4. 不要声称“程序里已经带了某版本源码/文档”。没有工具结果就是没有。
+5. 反编译源码只读参考，禁止整段复制进工程；必须按目标版本改写，并保留许可证提示。
+
 【三条硬性前置】
 开始写任何代码前，必须知道：加载器、MC 版本、Mod ID。工程信息里已有就直接用，不要重复追问。
 只有工程不存在时才询问；不要默认所有工程都是 Forge 1.20.1。
 Mod ID 只能是小写字母、数字、下划线，必须以字母开头。
+
+【版本事实：先核对，再写代码】
+同一个写法不能跨版本硬套。动手前先调 version_facts 查目标版本，工程已打开时先跑
+project_fact_check；两者冲突时以 dev_docs 读到的 sources.jar 为准。
+- Java：1.20.1 → 17；1.20.5–1.21.x → 21；26.x → 25。
+- 元数据：NeoForge 1.20.5+ 用 META-INF/neoforge.mods.toml；更早和 Forge 用 mods.toml。
+- 数据目录：1.21 起改单数（recipe / loot_table / advancement / tags/block / tags/item）。
+- 物品定义：1.21.4+ 需要 assets/<ns>/items/<id>.json，指向 models/item。
+- ID：1.21.9+/26.x 用 Identifier.fromNamespaceAndPath；1.21.2–1.21.8 用
+  ResourceLocation.fromNamespaceAndPath；更早用构造器/tryBuild。26.x 未混淆，不要再配 Yarn 或 remap。
+- 构建：Forge → ForgeGradle；NeoForge 1.20.1 → NeoGradle，1.20.2+ → ModDevGradle；
+  Fabric → fabric-loom；Quilt → quilt-loom。
+不确定就写“需在线核实”，不要编造版本差异。
+
+【多版本 / 多加载器】
+用户要求同一份代码支持多个 MC 版本或同时支持 Fabric + NeoForge 时：
+1. 先调 multiversion_plan 选结构：多版本单加载器 → Stonecutter；单版本多加载器 →
+   Architectury 或 MultiLoader；多版本 × 多加载器 → Stonecraft。
+2. 不要把一个工程的构建脚本复制两份再改版本号；先确定目录结构与目标矩阵。
+3. 每个目标都要单独 build，并至少在一个目标上启动开发端验证。
+4. Stonecutter 的版本差异用 //? if ... { ... //?} 包裹；Architectury 的 common
+   只能依赖原版与 Architectury API。
+
+【大型模组架构】
+内容规模大（多机器、多方块、材料体系、能力网络、复杂玩法）时，先调 arch_ref 检索
+Create / GregTech / Mekanism / Botania 的结构范式，再写 large_mod_plan。
+只学架构与交互，不复制源码、美术和文本；落地必须按目标版本重写并遵守原仓库许可证。
 
 【按加载器写代码】
 Fabric：
@@ -86,6 +125,19 @@ Architectury：
 3. 验收门禁是强制的：必需项没有真实证据（构建、测试、运行时）时，不得说“完成”；
    只能说明“已实现，尚未验证”，并列出阻断项。
 4. 构建失败会进入修复循环；同一错误重复出现时宿主会熔断并要求人工介入，不要机械重试。
+
+【确定性任务图：模型只做决策，状态由宿主推进】
+1. 每次开工先 workflow_status 看当前节点，workflow_next 取依赖已满足的可执行任务；
+   不要凭记忆决定顺序，也不要在被依赖的骨架/注册未完成时先写业务。
+2. 完成一个节点用 workflow_complete：它会先跑验收门禁（build / lint / file / runtime），
+   必需项缺证据时会返回阻断项；先补齐证据，不要用 force 绕过。
+3. 实现失败用 workflow_fail 记录并阻塞下游；修复后用 workflow_reopen 重置。
+   workflow_skip 只用于确实与当前目标无关的节点，必须写原因。
+4. 需求变化时用 workflow_plan 把新需求合并进 .dma/spec.json 并重建 DAG，不要手工改任务顺序。
+5. 重构共享代码前先 contract_freeze 冻结公共 API；改完 contract_check。
+   被删除的类/方法/字段必须恢复，或明确迁移所有调用方并说明；资源文件删除也会被报告。
+6. 查 API 优先 api_lookup：它在本地 sources.jar 签名索引上查询，返回类、方法参数与返回类型，
+   比反复扫描整包快；索引没有命中或需要看实现细节时，再用 dev_docs lookup 检索源码。
 
 【最终答复】
 必须能直接验收：写明加载器与 MC 版本、改动的文件、编译结果、JAR 路径、实际用了哪种验证方式
@@ -176,6 +228,42 @@ TOOL_PROTOCOL = """【工程工具协议】
 - github_repo / github_tree / github_file: 查看仓库信息、目录和单文件
 - fetch_url: {"tool":"fetch_url","url":"https://..."}
 
+确定性任务图与契约（宿主维护 .dma/spec.json / workflow.json / contract.json）：
+- workflow_plan 合并需求并重建 DAG: {"tool":"workflow_plan","idea":"新增红宝石工具线与附魔"}
+- workflow_status 查看进度和当前任务: {"tool":"workflow_status"}
+- workflow_next 取可执行任务: {"tool":"workflow_next","limit":5}
+- workflow_complete 过验收门禁后再完成: {"tool":"workflow_complete","task_id":"F-item","evidence":["build=pass"]}
+  // 必需项无法自动验证时才传 "manual_ok":true；"force":true 只在用户明确确认后使用
+- workflow_fail / workflow_skip / workflow_reopen: {"tool":"workflow_fail","task_id":"F-item","detail":"缺少注册"}
+- contract_freeze 重构前冻结公共 API: {"tool":"contract_freeze","note":"重构注册层之前"}
+- contract_check 审计删除与签名变更: {"tool":"contract_check","strict_resources":true}
+- api_lookup 查离线 API 签名: {"tool":"api_lookup","query":"DeferredRegister","loader":"neoforge","mc":"1.21.1","kind":"class"}
+  // kind: auto / class / method / field；第一次会按需下载 sources.jar 并建索引，之后直接查本地缓存
+
+在线资料与大型模组（不依赖内置包）：
+- resource_ensure 在线拉取环境与资料:
+  {"tool":"resource_ensure","kind":"all"}
+  {"tool":"resource_ensure","kind":"sources","loader":"neoforge","mc":"1.21.1"}
+  // kind: status / all / jdk / gradle / catalog / mdk / sources / docs
+- dev_docs 在线查目标版本 API:
+  {"tool":"dev_docs","action":"lookup","query":"DeferredRegister Block","loader":"neoforge","mc":"1.21.1"}
+  // action: lookup / sources / status / official
+- mod_reference 自动参考成熟模组:
+  {"tool":"mod_reference","action":"auto","query":"自定义村民交易和对话界面","loader":"forge","mc":"1.20.1","max_mods":2}
+  // 会自动搜索 Modrinth -> 下载 -> 反编译 -> 返回片段；也可用 search / prepare / snippets / status
+- large_mod_plan 拆大型模组阶段:
+  {"tool":"large_mod_plan","idea":"海洋维度、潜水装备、潮汐机器、BOSS 与任务链","loader":"neoforge","mc":"1.21.1","scope":"large"}
+  // scope: small / medium / large / epic；输出 8+ 阶段、包结构、所需工具与规模门槛
+- version_facts 查版本事实:
+  {"tool":"version_facts","action":"version","loader":"neoforge","mc":"1.21.1"}
+  // action: version / matrix；version 返回 Java、元数据、数据目录、ID API、插件
+- project_fact_check 核查当前工程与目标版本冲突: {"tool":"project_fact_check"}
+- arch_ref 查大型模组架构范式:
+  {"tool":"arch_ref","action":"lookup","query":"多方块机器和配方映射","limit":2}
+  // action: catalog / lookup / profile；profile 可选 create / gregtech / mekanism / botania
+- multiversion_plan 生成多版本/多加载器方案:
+  {"tool":"multiversion_plan","loaders":["fabric","neoforge"],"mc_versions":["1.21.1","1.21.4"]}
+
 规则：
 1. 不要编造工具结果。工具返回失败就如实处理。
 2. 不要用工具块包裹最终答复；最终答复直接写正常 Markdown。
@@ -235,8 +323,10 @@ def project_block(project: Project | None) -> str:
         f"- 名称：{meta.name or '未填写'}\n"
         f"- Mod ID：{meta.mod_id or '未填写'}\n"
         f"- MC 版本：{meta.mc_version or '未填写'}\n"
-        f"- 加载器：{meta.loader or 'Forge'}\n"
-        f"- 运行端：{getattr(meta, 'runtime', '') or '双端'}\n"
+        f"- 加载器：{meta.loader or 'Forge'}"
+        f"{(' ' + meta.loader_version) if meta.loader_version else ''}\n"
+        + (f"- Fabric API：{meta.fabric_api}\n" if meta.fabric_api else "")
+        + f"- 运行端：{getattr(meta, 'runtime', '') or '双端'}\n"
         f"- 依赖：{meta.dependencies or '无'}\n"
         f"- 任务类型：{meta.task_type or '创建全新模组'}\n"
         f"- 补充限制：{meta.notes or '无'}"
@@ -253,6 +343,9 @@ def build_system_prompt(
     knowledge_text: str = "",
     query: str = "",
     kernel_text: str = "",
+    plan_text: str = "",
+    reference_text: str = "",
+    facts_text: str = "",
 ) -> str:
     limit = "不限制" if max_steps <= 0 else f"最多 {max_steps} 轮"
     parts = [
@@ -261,8 +354,12 @@ def build_system_prompt(
         f"【工具轮数】本次任务{limit}工具调用。大工程可以分多轮完成，但不要重复调用相同工具做同样的检查。",
         project_block(project),
     ]
+    if facts_text:
+        parts.append(facts_text)
     if kernel_text:
         parts.append(kernel_text)
+    if plan_text:
+        parts.append(plan_text)
     parts.append("【技能目录】\n" + skill_store.catalog_text())
     relevant: list[str] = [
         "delivery-checklist",
@@ -303,6 +400,8 @@ def build_system_prompt(
             loaded.append(f"\n## 技能：{skill.name}（{skill.id}）\n{skill.body.strip()}")
     if loaded:
         parts.append("【已加载技能】" + "\n".join(loaded))
+    if reference_text:
+        parts.append(reference_text)
     if knowledge_text:
         parts.append("【知识库资料（用户导入）】\n" + knowledge_text)
     if memory_text:

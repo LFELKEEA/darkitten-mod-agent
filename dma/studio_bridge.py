@@ -41,16 +41,24 @@ SCOPES = (
     ("epic", "史诗：64+ 个内容节点，接近完整模组"),
 )
 SCOPE_KEYS = tuple(item[0] for item in SCOPES)
-# 与 versions.SEED_RELEASES 保持一致：只展示种子版本表里真实可用的版本，
-# 上游删掉某个版本时这里自动收窄，避免 UI 提供无法解析的选项。
-MC_VERSIONS = [
-    v
-    for v in (
-        "1.20.1", "1.21.1", "1.21.4", "1.21.8", "26.3",
-        "1.20.4", "1.19.2", "1.18.2", "1.16.5",
-    )
-    if v in versions_mod.SEED_RELEASES
-]
+# 离线兜底：联网时由 mc_versions() 按加载器返回在线清单里的全部可用版本。
+MC_VERSIONS = list(versions_mod.SEED_RELEASES)
+
+
+def mc_versions(loader: str = "", refresh: bool = False) -> list[str]:
+    """返回该加载器可用的 Minecraft 正式版本（新到旧）。
+
+    在线元数据优先；网络不可用时退回内置版本表，界面至少不会只剩几个版本。
+    """
+    try:
+        engine = normalize_loader(loader) if loader else "fabric"
+    except StudioError:
+        engine = "fabric"
+    try:
+        ids = versions_mod.supported_mc_ids(engine, refresh=refresh)
+    except Exception:  # noqa: BLE001 - 元数据异常不能阻止界面列出兜底版本
+        ids = []
+    return ids or list(MC_VERSIONS)
 
 
 class StudioError(RuntimeError):

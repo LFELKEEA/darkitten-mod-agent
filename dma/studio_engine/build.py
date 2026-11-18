@@ -509,23 +509,38 @@ def parse_errors(output: str) -> list[dict[str, Any]]:
 def classify(message: str, output: str) -> str:
     m = message.lower()
     if "cannot find symbol" in m:
-        return "符号不存在：版本 API 不匹配或 import 错误。用 recon 的 API 卡核对类名/方法名。"
+        if "identifier" in m or "resourcelocation" in m:
+            return ("符号/类名随版本改名：1.21.9+/26.x 官方映射用 Identifier.fromNamespaceAndPath，"
+                    "1.21.2–1.21.8 用 ResourceLocation.fromNamespaceAndPath，更早用构造器。"
+                    "用 dev_docs 查目标版本真实签名，不要凭记忆改。")
+        return "符号不存在：版本 API 不匹配或 import 错误。用 dev_docs 的 sources 核对类名/方法名。"
     if "incompatible types" in m:
         return "类型不匹配：常见于 Item.Properties / BlockBehaviour.Properties / 泛型注册器。核对目标版本签名。"
     if "package net.minecraft" in m and "does not exist" in m:
         return "Minecraft 包不存在：映射或依赖配置错误，检查 build.gradle 与 mappings。"
-    if "unsupported class file major version" in m or "requires java" in m:
-        return "JDK 版本不匹配：按 profile 的 java_major 设置 JAVA_HOME。"
+    if "unsupported class file major version" in m or "requires java" in m or "invalid target release" in m:
+        major = re.search(r"class file major version\s+(\d+)", m)
+        table = {61: 17, 65: 21, 69: 25}
+        need = table.get(int(major.group(1)), None) if major else None
+        suffix = f"（日志里的 class 版本对应 Java {need}）" if need else ""
+        return ("JDK 版本不匹配" + suffix + "：1.20.1=Java 17，1.20.5–1.21.x=Java 21，"
+                "26.x=Java 25；对齐 toolchain、JAVA_HOME 与 Gradle JVM。")
     if "could not resolve" in m:
         return "依赖解析失败：检查仓库 URL、版本号与网络/镜像。"
     if "no matching toolchains" in m:
         return "Gradle toolchain 找不到指定 JDK：安装对应 JDK 或在 gradle.properties 指定 org.gradle.java.home。"
     if "failed to apply plugin" in m or "plugin [id:" in m:
         return "Gradle 插件版本与当前 Gradle/JDK 不兼容：优先使用对应版本的官方 MDK。"
+    if "could not find method" in m or "no signature of method" in m:
+        return "Gradle DSL 与插件版本不匹配：对照该插件对应版本的官方示例改写配置块。"
     if "duplicate" in m and "class" in m:
         return "重复类：MDK 示例类未清理，或包名冲突。"
     if "mixin" in m:
-        return "Mixin 目标不匹配：核对目标类/方法在 sources jar 中是否存在。"
+        return "Mixin 目标不匹配：核对目标类/方法在 sources jar 中是否存在，并确认 refmap 已生成。"
+    if "accesswidener" in m or "accesstransformer" in m:
+        return "访问拓宽配置有误：确认文件已声明、命名空间正确、目标成员在 sources 中存在。"
+    if "neoforge.mods.toml" in m or "mods.toml" in m:
+        return "模组元数据与版本不匹配：NeoForge 1.20.5+ 用 neoforge.mods.toml，旧版用 mods.toml。"
     return "查看完整日志与 API 卡；不要盲目重试。"
 
 

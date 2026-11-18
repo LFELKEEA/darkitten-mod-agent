@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import threading
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtGui import QTextDocument
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -25,11 +26,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .. import paths
+from .. import catalog as catalog_mod
+from .. import launcher_bridge, paths
 from ..project import ProjectError, create_project
 from . import theme
 
-LOADERS = ["Forge", "Fabric", "NeoForge", "Architectury"]
+LOADERS = ["Fabric", "Forge", "NeoForge", "Quilt", "Architectury"]
 RUNTIMES = ["双端", "客户端", "服务端"]
 TASKS = [
     "创建全新模组",
@@ -39,17 +41,41 @@ TASKS = [
     "重构/优化已有代码",
 ]
 MC_VERSIONS = [
-    "1.20.1",
-    "1.20.4",
-    "1.20.6",
-    "1.21.1",
+    "26.3",
+    "26.2",
+    "26.1.2",
+    "26.1.1",
+    "26.1",
+    "1.21.11",
+    "1.21.10",
+    "1.21.9",
+    "1.21.8",
+    "1.21.7",
+    "1.21.6",
+    "1.21.5",
     "1.21.4",
+    "1.21.3",
+    "1.21.1",
+    "1.21",
+    "1.20.6",
+    "1.20.4",
+    "1.20.2",
+    "1.20.1",
     "1.19.4",
     "1.19.2",
     "1.18.2",
-    "1.17.1",
     "1.16.5",
+    "1.12.2",
+    "1.8.9",
+    "1.7.10",
 ]
+
+
+class SelectComboBox(QComboBox):
+    """只按选择切换：滚轮经过时不改当前值，避免误改版本和 API。"""
+
+    def wheelEvent(self, event):  # noqa: N802
+        event.ignore()
 
 
 def card() -> QFrame:
@@ -149,9 +175,37 @@ class ChatView(QScrollArea):
         self.bubbles.clear()
 
 
-class NewProjectDialog(QDialog):
-    def __init__(self, parent: QWidget | None = None, root: str = "") -> None:
+class _Worker(QObject):
+    """在后台线程执行阻塞调用，结果排队回主线程。"""
+
+    done = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, fn, parent: QObject | None = None) -> None:
         super().__init__(parent)
+        self.fn = fn
+
+    def start(self) -> None:
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def _run(self) -> None:
+        try:
+            self.done.emit(self.fn())
+        except Exception as exc:  # noqa: BLE001 - 统一在界面显示
+            self.failed.emit(str(exc))
+
+
+class NewProjectDialog(QDialog):
+    def __init__(
+        self,
+        parent: QWidget | None = None,
+        root: str = "",
+        catalog: catalog_mod.Catalog | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.catalog = catalog
+        self._workers: list[_Worker] = []
+        self._launcher_versions: list[str] = []
         self.setWindowTitle("新建模组工程")
         self.setMinimumWidth(560)
         layout = QVBoxLayout(self)
@@ -163,9 +217,10 @@ class NewProjectDialog(QDialog):
         layout.addWidget(title)
         layout.addWidget(
             tiny(
-                "支持 Fabric / Forge / NeoForge / Architectury。"
-                "1.20.1 会直接生成对应的可编译骨架；其他版本由 AI 核对官方模板后生成构建脚本。"
-                "运行验证：Forge 1.20.1 可走游戏内探针断言，其他加载器以编译结果、运行日志和 GameTest 为准。"
+                "支持 Fabric / Forge / NeoForge / Quilt / Architectury。"
+                "版本和依赖都从下拉列表点选，列表来自在线 Mojang 与加载器清单，"
+                "并合并启动器里已安装的实例。Fabric 工程还可以指定 Fabric API 版本。"
+                "1.20.1 / 1.21.1 会直接生成可编译骨架，其他版本由 AI 核对官方模板后生成构建脚本。"
             )
         )
 
@@ -175,17 +230,42 @@ class NewProjectDialog(QDialog):
         self.name.setPlaceholderText("例如：星尘工具")
         self.mod_id = QLineEdit()
         self.mod_id.setPlaceholderText("例如：stardust_tools（小写字母/数字/下划线）")
-        self.mc_version = QComboBox()
-        self.mc_version.addItems(MC_VERSIONS)
-        self.mc_version.setCurrentText("1.20.1")
-        self.loader = QComboBox()
+        self.version_status = tiny("")
+        self.mc_version = SelectComboBox()
+        self.mc_version.setEditable(False)
+        self.mc_version.setMaxVisibleItems(24)
+        self._fill_mc_versions()
+        self.mc_version.currentIndexChanged.connect(self._refresh_loader_choices)
+
+        mc_row = QWidget()
+        mc_layout = QHBoxLayout(mc_row)
+        mc_layout.setContentsMargins(0, 0, 0, 0)
+        mc_layout.setSpacing(6)
+        mc_layout.addWidget(self.mc_version, 1)
+        self.refresh_versions = QPushButton("联网刷新")
+        self.refresh_versions.setToolTip(
+            "从 Mojang / Fabric / Forge / NeoForge / Quilt 的在线清单重新同步版本。"
+        )
+        self.refresh_versions.setEnabled(self.catalog is not None)
+        self.refresh_versions.clicked.connect(self._sync_versions_online)
+        mc_layout.addWidget(self.refresh_versions)
+
+        self.loader = SelectComboBox()
         self.loader.addItems(LOADERS)
-        self.runtime = QComboBox()
+        self.loader.currentIndexChanged.connect(self._refresh_loader_choices)
+        self.loader_version = SelectComboBox()
+        self.loader_version.setEditable(False)
+        self.loader_version.setMaxVisibleItems(20)
+        self.fabric_api = SelectComboBox()
+        self.fabric_api.setEditable(False)
+        self.fabric_api.setMaxVisibleItems(20)
+        self.runtime = SelectComboBox()
         self.runtime.addItems(RUNTIMES)
-        self.task = QComboBox()
+        self.task = SelectComboBox()
         self.task.addItems(TASKS)
         self.deps = QLineEdit()
         self.deps.setPlaceholderText("例如：MCA Reborn 7.7.x；没有就留空")
+        self._refresh_loader_choices()
 
         root_row = QWidget()
         root_layout = QHBoxLayout(root_row)
@@ -199,8 +279,11 @@ class NewProjectDialog(QDialog):
 
         form.addRow("模组名称", self.name)
         form.addRow("Mod ID", self.mod_id)
-        form.addRow("MC 版本", self.mc_version)
+        form.addRow("MC 版本", mc_row)
+        form.addRow("", self.version_status)
         form.addRow("加载器", self.loader)
+        form.addRow("加载器版本", self.loader_version)
+        form.addRow("Fabric API", self.fabric_api)
         form.addRow("运行端", self.runtime)
         form.addRow("任务类型", self.task)
         form.addRow("依赖", self.deps)
@@ -227,6 +310,197 @@ class NewProjectDialog(QDialog):
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
+        line = self.mc_version.lineEdit()
+        if line is not None:
+            line.editingFinished.connect(self._refresh_loader_choices)
+        self._load_launcher_versions()
+
+    @staticmethod
+    def _combo_value(combo: QComboBox) -> str:
+        data = combo.currentData()
+        value = data if data not in (None, "") else combo.currentText()
+        return str(value or "").strip()
+
+    def _catalog_ids(self) -> list[str]:
+        if self.catalog is None:
+            return []
+        ids: list[str] = []
+        for kind in ("release", "snapshot"):
+            try:
+                items = self.catalog.minecraft_versions(kind)
+            except Exception:  # noqa: BLE001 - 目录损坏时退回内置列表
+                items = []
+            for item in items:
+                vid = str(item.get("id") or "").strip()
+                if vid and vid not in ids:
+                    ids.append(vid)
+        return ids
+
+    def _fill_mc_versions(self) -> None:
+        current = self._combo_value(self.mc_version) if hasattr(self, "mc_version") else ""
+        ids = self._catalog_ids()
+        for vid in self._launcher_versions:
+            text = str(vid or "").strip()
+            if text and text not in ids:
+                ids.append(text)
+        if not ids:
+            ids = list(MC_VERSIONS)
+        self.mc_version.blockSignals(True)
+        self.mc_version.clear()
+        for vid in ids:
+            self.mc_version.addItem(vid, vid)
+        self.mc_version.blockSignals(False)
+        target = current or ("1.21.1" if "1.21.1" in ids else "1.20.1")
+        index = self.mc_version.findData(target)
+        if index < 0:
+            index = self.mc_version.findText(target)
+        if index < 0 and ids:
+            index = 0
+        if index >= 0:
+            self.mc_version.setCurrentIndex(index)
+        source = "在线目录" if self._catalog_ids() else "内置兜底"
+        extra = "，已合并启动器实例" if self._launcher_versions else ""
+        self.version_status.setText(f"{len(ids)} 个版本（{source}{extra}）")
+
+    def _refresh_loader_choices(self, *_args) -> None:
+        mc = self._combo_value(self.mc_version)
+        loader = self.loader.currentText()
+        self._fill_loader_versions(loader, mc)
+        self._fill_fabric_api(mc if loader == "Fabric" else "")
+
+    def _fill_loader_versions(self, loader: str, mc: str) -> None:
+        self.loader_version.blockSignals(True)
+        self.loader_version.clear()
+        if loader == "Architectury":
+            self.loader_version.addItem("跟随 Architectury 模板")
+            self.loader_version.setEnabled(False)
+            self.loader_version.blockSignals(False)
+            return
+        self.loader_version.setEnabled(True)
+        key = loader.lower()
+        versions: list[str] = []
+        default = ""
+        if self.catalog is not None:
+            try:
+                raw = list(self.catalog.loader_versions(key))
+                if key == "forge":
+                    versions = [
+                        item.split("-", 1)[1]
+                        for item in raw
+                        if mc and item.startswith(mc + "-")
+                    ]
+                elif key == "neoforge":
+                    prefix = catalog_mod._neoforge_prefix(mc)
+                    versions = [
+                        item for item in raw if item.startswith(prefix + ".")
+                    ]
+                else:
+                    versions = list(raw)
+                versions = sorted(
+                    {item for item in versions if item},
+                    key=catalog_mod._version_key,
+                    reverse=True,
+                )[:120]
+                default = self.catalog.loader_for_mc(key, mc)
+            except Exception:  # noqa: BLE001 - 目录缺失时允许手填
+                versions = []
+                default = ""
+        if default and default not in versions:
+            versions.insert(0, default)
+        for item in versions:
+            self.loader_version.addItem(item, item)
+        if default:
+            index = self.loader_version.findData(default)
+            if index >= 0:
+                self.loader_version.setCurrentIndex(index)
+        self.loader_version.blockSignals(False)
+
+    def _fill_fabric_api(self, mc: str) -> None:
+        self.fabric_api.blockSignals(True)
+        self.fabric_api.clear()
+        enabled = bool(mc) and self.loader.currentText() == "Fabric" and self.catalog is not None
+        self.fabric_api.setEnabled(enabled)
+        if not enabled:
+            self.fabric_api.addItem("仅 Fabric 工程需要")
+            self.fabric_api.blockSignals(False)
+            return
+        versions: list[str] = []
+        default = ""
+        try:
+            raw = list(self.catalog.section("fabric").get("fabric_api") or [])
+            versions = sorted(
+                {str(item) for item in raw if str(item).endswith("+" + mc)},
+                key=catalog_mod._version_key,
+                reverse=True,
+            )
+            default = self.catalog.fabric_api_version(mc)
+        except Exception:  # noqa: BLE001
+            versions = []
+            default = ""
+        if default and default not in versions:
+            versions.insert(0, default)
+        for item in versions:
+            self.fabric_api.addItem(item, item)
+        if default:
+            index = self.fabric_api.findData(default)
+            if index >= 0:
+                self.fabric_api.setCurrentIndex(index)
+        self.fabric_api.blockSignals(False)
+
+    def _load_launcher_versions(self) -> None:
+        def work():
+            bridge = launcher_bridge.LauncherBridge()
+            found: list[str] = []
+            for item in bridge.versions():
+                base = str(item.base_id or item.id or "").strip()
+                if base and base not in found:
+                    found.append(base)
+            return found
+
+        worker = _Worker(work, self)
+
+        def done(values):
+            if isinstance(values, list):
+                self._launcher_versions = [str(v) for v in values if str(v).strip()]
+                self._fill_mc_versions()
+
+        worker.done.connect(done)
+        worker.failed.connect(lambda _message: None)
+        self._workers.append(worker)
+        worker.start()
+
+    def _sync_versions_online(self) -> None:
+        if self.catalog is None:
+            return
+        self.refresh_versions.setEnabled(False)
+        self.version_status.setText("正在同步在线版本清单…")
+
+        def work():
+            self.catalog.sync_mojang(force=True)
+            for name in ("sync_fabric", "sync_quilt", "sync_forge", "sync_neoforge"):
+                try:
+                    getattr(self.catalog, name)(force=False)
+                except Exception:  # noqa: BLE001 - 单个加载器失败不影响其它
+                    pass
+            return True
+
+        worker = _Worker(work, self)
+
+        def done(_value):
+            self.refresh_versions.setEnabled(True)
+            self._fill_mc_versions()
+            self._refresh_loader_choices()
+            self.version_status.setText(self.version_status.text() + " · 已联网刷新")
+
+        def failed(message):
+            self.refresh_versions.setEnabled(True)
+            self.version_status.setText("同步失败：" + message)
+
+        worker.done.connect(done)
+        worker.failed.connect(failed)
+        self._workers.append(worker)
+        worker.start()
+
     def _pick_root(self) -> None:
         folder = QFileDialog.getExistingDirectory(self, "选择工程根目录", self.root.text())
         if folder:
@@ -236,15 +510,23 @@ class NewProjectDialog(QDialog):
         if not self.mod_id.text().strip():
             QMessageBox.warning(self, "缺少信息", "请填写 Mod ID。")
             return
+        loader = self.loader.currentText()
+        fabric_api = (
+            self._combo_value(self.fabric_api) if loader == "Fabric" else ""
+        )
         try:
             project = create_project(
                 Path(self.root.text().strip() or str(paths.default_project_root())),
                 name=self.name.text().strip(),
                 mod_id=self.mod_id.text().strip(),
-                mc_version=self.mc_version.currentText().strip(),
-                loader=self.loader.currentText(),
+                mc_version=self._combo_value(self.mc_version),
+                loader=loader,
                 runtime=self.runtime.currentText(),
                 dependencies=self.deps.text().strip(),
+                loader_version=self._combo_value(self.loader_version)
+                if loader != "Architectury"
+                else "",
+                fabric_api=fabric_api,
                 task_type=self.task.currentText(),
                 notes=self.notes.toPlainText().strip(),
             )

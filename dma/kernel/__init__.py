@@ -24,7 +24,9 @@ from .spec import (
     spec_markdown,
 )
 from .symbols import SymbolIndex, build_index, load_index, query
-from . import tools
+from . import contract, tools
+from .contract import check as contract_check
+from .contract import freeze as contract_freeze
 from .workflow import (
     AcceptanceBlocked,
     Task,
@@ -64,6 +66,9 @@ __all__ = [
     "GateReport",
     "feature_for",
     "verify",
+    "contract",
+    "contract_check",
+    "contract_freeze",
     "MappingInfo",
     "MappingSet",
     "Translator",

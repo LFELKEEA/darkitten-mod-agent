@@ -18,11 +18,15 @@ from . import (
     arttools,
     compile_feedback,
     connectors,
+    devdocs,
     mcdev,
     netclient,
     paths,
+    planner,
     project as project_mod,
+    reference,
     research,
+    resources,
     studio_bridge,
 )
 from .config import Config
@@ -117,6 +121,10 @@ PROGRESS_TIMEOUT = 45 * 60
 READ_ONLY_TOOLS = {
     "read_file", "list_files", "search_text", "search_knowledge",
     "read_knowledge", "read_skill", "search_code", "fetch_url",
+    "catalog_query", "launcher_versions", "launcher_downloads",
+    "launcher_status", "mod_search", "dev_docs", "large_mod_plan",
+    "version_facts", "project_fact_check", "arch_ref", "multiversion_plan",
+    "workflow_status", "workflow_next", "contract_check", "api_lookup",
 }
 # 连续只读（无任何写入）多少次后，强制打断探索循环、要求模型立即写代码。
 # 只读工具刷新 _progress_at 会让 PROGRESS_TIMEOUT 永远不触发，导致「只读死循环」卡死；
@@ -133,7 +141,19 @@ KERNEL_TOOLS = {
     "log_parse", "snapshot", "snapshot_list", "rollback", "asset_lint",
     "texture_gen", "vision_review", "blockbench", "testgen", "migration_plan",
     "screenshot_collect", "offline_cache", "asset_library", "config_gen",
-    "matrix_plan", "debug_scaffold",
+    "matrix_plan", "debug_scaffold", "project_fact_check",
+    "workflow_plan", "workflow_status", "workflow_next", "workflow_complete",
+    "workflow_fail", "workflow_skip", "workflow_reopen",
+    "contract_freeze", "contract_check",
+}
+# 版本中心 / 启动器联动 / 模组学习：不依赖当前工程。
+CENTER_TOOLS = {
+    "catalog_sync", "catalog_query", "catalog_download",
+    "mod_search", "mod_download", "mod_decompile", "mod_reference",
+    "dev_docs", "api_lookup", "resource_ensure", "large_mod_plan",
+    "version_facts", "arch_ref", "multiversion_plan",
+    "launcher_versions", "launcher_downloads", "launcher_vanilla",
+    "launcher_launch", "launcher_status",
 }
 
 
@@ -817,6 +837,80 @@ class AgentWorker(QObject):
         reply = ai.request_chat(self.config.ai, messages, cancel=self._cancel)
         return reply, parse_tool_calls(reply), None
 
+    def _reference_preflight(self) -> str:
+        """实现类需求先在线找参考：搜索、反编译、抽取片段，再交给模型。
+
+        只在识别到明确功能类型时触发，避免“继续”“修一下”这类指令也去下载。
+        失败不会阻塞主流程，模型仍可自己调用 mod_reference。
+        """
+        if not bool(getattr(self.config, "auto_reference", True)):
+            return ""
+        project = self.project
+        if project is None:
+            return ""
+        features = reference.detect_features(self.user_text)
+        if not features:
+            return ""
+        meta = project.meta
+        loader = str(getattr(meta, "loader", "") or "")
+        mc = str(getattr(meta, "mc_version", "") or "")
+        self.status.emit(
+            "正在在线搜索参考模组（"
+            + "、".join(item.label for item in features[:4])
+            + "）…"
+        )
+        try:
+            result = reference.auto_reference(
+                self.user_text,
+                loader=loader,
+                mc=mc,
+                max_mods=2,
+                max_snippets=8,
+                progress=lambda percent, message: self.status.emit(
+                    f"{message}（{int(percent)}%）"
+                ),
+                cancel=self._cancel,
+            )
+        except Exception as exc:  # noqa: BLE001 - 预检失败降级为工具提示
+            return (
+                "【在线参考（自动）】\n"
+                f"自动准备参考失败：{exc}\n"
+                "可以改用 mod_reference auto 或 dev_docs lookup 重试；"
+                "不要凭记忆编造 API。"
+            )
+        text = reference.render_auto(result, snippet_limit=4)
+        return "【在线参考（自动反编译，只读）】\n" + text
+
+    def _large_plan_preflight(self) -> str:
+        """需求跨多个机制时先生成阶段计划，避免大型模组写成散装文件。"""
+        project = self.project
+        if project is None:
+            return ""
+        features = reference.detect_features(self.user_text)
+        if len(features) < 3:
+            return ""
+        meta = project.meta
+        scope = "epic" if len(features) >= 6 else "large"
+        try:
+            plan = planner.build_plan(
+                self.user_text,
+                loader=str(getattr(meta, "loader", "") or ""),
+                mc=str(getattr(meta, "mc_version", "") or ""),
+                scope=scope,
+                modid=str(getattr(meta, "mod_id", "") or ""),
+                package="",
+            )
+        except Exception as exc:  # noqa: BLE001 - 规划失败不阻塞任务
+            return f"【大型模组计划】生成失败：{exc}；仍可用 large_mod_plan 重试。"
+        self.status.emit(
+            f"需求覆盖 {len(features)} 类机制，已生成 {scope} 规模计划。"
+        )
+        return (
+            "【大型模组计划（自动）】\n"
+            "按下面的阶段推进，注册与契约先于业务逻辑；不要跳过后面的编译与验证。\n\n"
+            + planner.render(plan)
+        )
+
     def _loop(self) -> AgentRun:
         project = self.project
         project_key = str(project.root) if project is not None else ""
@@ -842,6 +936,20 @@ class AgentWorker(QObject):
             package="",
             side="both",
         )
+        plan_text = self._large_plan_preflight()
+        reference_text = self._reference_preflight()
+        facts_text = ""
+        if project is not None:
+            try:
+                from . import modfacts
+
+                meta = getattr(project, "meta", None)
+                facts_text = modfacts.brief(
+                    str(getattr(meta, "loader", "") or ""),
+                    str(getattr(meta, "mc_version", "") or ""),
+                )
+            except Exception:  # noqa: BLE001 - 事实层失败不应阻断对话
+                facts_text = ""
         system = build_system_prompt(
             project,
             self.skill_store,
@@ -851,6 +959,9 @@ class AgentWorker(QObject):
             knowledge_text=knowledge_context(knowledge_hits),
             query=self.user_text,
             kernel_text=self.kernel.prompt_block(),
+            plan_text=plan_text,
+            reference_text=reference_text,
+            facts_text=facts_text,
         )
         messages: list[dict[str, Any]] = [{"role": "system", "content": system}]
         messages.extend(_history_window(self.history, self.config.context_turns))
@@ -1389,6 +1500,7 @@ class AgentWorker(QObject):
             "mcdev_run_dump",
             "mcdev_use",
             "mcdev_scenario",
+            *CENTER_TOOLS,
         }
         if self.project is None and name not in allowed_without_project:
             return "当前没有打开工程，无法执行文件操作。请先在界面创建或打开工程。"
@@ -2008,6 +2120,8 @@ class AgentWorker(QObject):
                     self.project.root, progress=self._build_log
                 )
                 return studio_bridge.package_mod.summarize(report)
+            if name in CENTER_TOOLS:
+                return self._execute_center(name, args)
             if name in KERNEL_TOOLS:
                 return self._execute_kernel(name, args)
             if name.startswith("mcdev_"):
@@ -2046,8 +2160,533 @@ class AgentWorker(QObject):
                     self._progress_at = time.monotonic()
 
     # ------------------------------------------------------------------
+    def _center_progress(self, percent: int, message: str) -> None:
+        self._build_log(f"{message}（{int(percent)}%）")
+
+    def _execute_center(self, name: str, args: dict[str, Any]) -> str:
+        from . import apiindex, catalog as catalog_mod
+        from . import launcher_bridge, modlibrary
+
+        if name == "api_lookup":
+            query = str(args.get("query") or "").strip()
+            if not query:
+                return "api_lookup 缺少 query。"
+            meta = getattr(self.project, "meta", None)
+            loader = str(args.get("loader") or getattr(meta, "loader", "") or "neoforge")
+            mc = str(args.get("mc") or getattr(meta, "mc_version", "") or "")
+            version = str(args.get("version") or "")
+            kind = str(args.get("kind") or "auto").strip().lower()
+            limit = max(1, min(_arg_int(args, "limit", 20), 100))
+            index, jar, notes = apiindex.ensure(
+                loader,
+                mc,
+                version,
+                allow_download=bool(args.get("allow_download", True)),
+                force=bool(args.get("refresh")),
+                progress=self._center_progress,
+            )
+            if index is None:
+                return "\n".join(dict.fromkeys(notes)) or "没有可用的 API 索引。"
+            hits = apiindex.query(index, query, kind=kind, limit=limit)
+            info = apiindex.stats(index)
+            lines = [
+                f"API 索引：{info.get('loader') or loader} / {Path(str(info.get('source') or jar)).name}",
+                f"规模：类 {info['counts'].get('classes', 0)} / 方法 {info['counts'].get('methods', 0)} "
+                f"/ 字段 {info['counts'].get('fields', 0)}",
+                f"查询：{query}（{kind}，命中 {len(hits)} 条）",
+                "",
+                apiindex.render(hits, limit=limit),
+            ]
+            if notes:
+                lines += ["", "注意："] + [f"- {note}" for note in dict.fromkeys(notes)]
+            return "\n".join(lines)[:MAX_TOOL_RESULT]
+
+        if name == "catalog_sync":
+            catalog = catalog_mod.Catalog()
+            sections = [str(item) for item in args.get("sections") or [] if str(item)]
+            force = bool(args.get("force"))
+            if not sections:
+                report = catalog.refresh(self._center_progress, force=force)
+                return (report.text() + "\n\n" + json.dumps(
+                    catalog.summary(), ensure_ascii=False, indent=2
+                ))[:MAX_TOOL_RESULT]
+            mapping = {
+                "mojang": catalog.sync_mojang,
+                "fabric": catalog.sync_fabric,
+                "quilt": catalog.sync_quilt,
+                "forge": catalog.sync_forge,
+                "neoforge": catalog.sync_neoforge,
+                "toolchain": catalog.sync_toolchain,
+                "changelogs": catalog.sync_changelogs,
+            }
+            lines = []
+            for section in sections:
+                step = mapping.get(section)
+                if step is None:
+                    lines.append(f"- {section}：未知分区")
+                    continue
+                entry = step(self._center_progress, force=force)
+                lines.append(f"- {section}：{'成功' if entry.ok else '失败'} · {entry.message or entry.count}")
+            return "\n".join(lines)[:MAX_TOOL_RESULT]
+        if name == "catalog_query":
+            catalog = catalog_mod.Catalog()
+            action = str(args.get("action") or "summary").strip().lower()
+            loader = str(args.get("loader") or "").strip().lower()
+            mc = str(args.get("mc") or "").strip()
+            version = str(args.get("version") or "").strip()
+            limit = max(1, min(_arg_int(args, "limit", 40), 200))
+            if action == "summary":
+                return json.dumps(catalog.summary(), ensure_ascii=False, indent=2)
+            if action == "minecraft":
+                kind = str(args.get("kind") or "release")
+                ids = catalog.minecraft_ids("all" if kind == "all" else kind)
+                latest = (catalog.section("mojang").get("latest") or {}).get("release", "")
+                return (
+                    f"共 {len(ids)} 个版本，最新 {latest}：\n" + ", ".join(ids[:limit])
+                )[:MAX_TOOL_RESULT]
+            if action == "loaders":
+                if not loader:
+                    return "loaders 需要 loader=fabric/forge/neoforge/quilt。"
+                items = catalog.loader_versions(loader)
+                return (
+                    f"{loader} 共 {len(items)} 个版本：\n" + ", ".join(items[:limit])
+                )[:MAX_TOOL_RESULT]
+            if action == "recommendations":
+                if not mc:
+                    return "recommendations 需要 mc 版本，例如 1.21.1。"
+                return json.dumps(
+                    catalog.recommendations(mc, loader), ensure_ascii=False, indent=2
+                )[:MAX_TOOL_RESULT]
+            if action in {"mdk", "javadoc"}:
+                item = catalog.mdk(loader, mc, version) if action == "mdk" else catalog.javadoc(loader, mc, version)
+                if not item:
+                    return f"没有找到 {action}：loader={loader or '?'} mc={mc or '?'}。先 catalog_sync。"
+                return json.dumps(item, ensure_ascii=False, indent=2)
+            if action == "changelog":
+                if not loader:
+                    return "changelog 需要 loader。"
+                entries = catalog.changelog(loader)[:5]
+                if not entries:
+                    return f"{loader} 还没有缓存的更新日志，先 catalog_sync sections=[\"changelogs\"]。"
+                lines = []
+                for item in entries:
+                    lines.append(
+                        f"## {item.get('name') or item.get('tag')} ({item.get('published') or ''})\n"
+                        f"{str(item.get('body') or '')[:1800]}"
+                    )
+                return "\n\n".join(lines)[:MAX_TOOL_RESULT]
+            if action == "version":
+                if not mc:
+                    return "version 需要 mc，例如 1.21.1。"
+                data = catalog.version_info(mc)
+                return json.dumps(data, ensure_ascii=False, indent=2)[:MAX_TOOL_RESULT]
+            return "未知 action：" + action
+        if name == "catalog_download":
+            catalog = catalog_mod.Catalog()
+            kind = str(args.get("kind") or "").lower()
+            loader = str(args.get("loader") or "").lower()
+            mc = str(args.get("mc") or "").strip()
+            version = str(args.get("version") or "").strip()
+            if kind == "mdk":
+                item = catalog.mdk(loader, mc, version)
+            elif kind == "javadoc":
+                item = catalog.javadoc(loader, mc, version)
+            else:
+                return "kind 只能是 mdk 或 javadoc。"
+            if not item:
+                return "没有找到下载地址，请先 catalog_sync 或检查 loader/mc。"
+            dest = catalog_mod.artifacts_dir() / ("mdk" if kind == "mdk" else "javadoc")
+            path = catalog.download(item, dest_dir=dest, progress=self._center_progress)
+            return f"已下载 {kind}：{path}"
+        if name == "mod_search":
+            query = str(args.get("query") or "").strip()
+            if not query:
+                return "mod_search 缺少 query。"
+            items = modlibrary.search(
+                query,
+                loader=str(args.get("loader") or ""),
+                mc=str(args.get("mc") or ""),
+                limit=max(1, min(_arg_int(args, "limit", 10), 30)),
+                offset=max(0, _arg_int(args, "offset", 0)),
+            )
+            if not items:
+                return "没有找到匹配的模组。"
+            lines = []
+            for item in items:
+                lines.append(
+                    f"- {item.get('title')}（slug={item.get('slug') or item.get('id')}，"
+                    f"下载 {item.get('downloads', 0):,}）\n  {item.get('description') or ''}"
+                )
+            return "\n".join(lines)[:MAX_TOOL_RESULT]
+        if name in {"mod_download", "mod_decompile"}:
+            project = str(args.get("project") or "").strip()
+            if not project:
+                return f"{name} 缺少 project（Modrinth slug 或项目 ID）。"
+            loader = str(args.get("loader") or "")
+            mc = str(args.get("mc") or "")
+            version = str(args.get("version") or "")
+            if name == "mod_download":
+                chosen = modlibrary.pick_version(project, loader=loader, mc=mc)
+                if not chosen:
+                    return "没有找到匹配的版本。"
+                path = modlibrary.download(chosen, progress=self._center_progress)
+                return (
+                    f"已下载：{path}\n"
+                    "仅用于本地学习与排错，请遵守原模组许可证，不要重新分发。"
+                )
+            result = modlibrary.learn(
+                project,
+                loader=loader,
+                mc=mc,
+                version_id=version,
+                progress=lambda percent, message: self._center_progress(percent, message),
+            )
+            return (
+                f"反编译完成：{result.get('files')} 个文件\n"
+                f"源码目录：{result.get('sources')}\n"
+                f"索引：{result.get('index')}\n"
+                "只读参考，不要把这些源码复制进当前工程。"
+            )[:MAX_TOOL_RESULT]
+        if name == "large_mod_plan":
+            meta = getattr(self.project, "meta", None)
+            idea = str(args.get("idea") or self.user_text or "").strip()
+            loader = str(args.get("loader") or getattr(meta, "loader", "") or "NeoForge")
+            mc = str(args.get("mc") or getattr(meta, "mc_version", "") or "")
+            plan = planner.build_plan(
+                idea,
+                loader=loader,
+                mc=mc,
+                scope=str(args.get("scope") or "large"),
+                modid=str(args.get("modid") or getattr(meta, "mod_id", "") or ""),
+                package=str(args.get("package") or ""),
+            )
+            return planner.render(plan)[:MAX_TOOL_RESULT]
+        if name == "version_facts":
+            from . import modfacts
+
+            meta = getattr(self.project, "meta", None)
+            action = str(args.get("action") or "version").strip().lower()
+            loader = str(args.get("loader") or getattr(meta, "loader", "") or "")
+            mc = str(args.get("mc") or getattr(meta, "mc_version", "") or "")
+            if action == "matrix":
+                return modfacts.dump(loader, mc)[:MAX_TOOL_RESULT]
+            return modfacts.brief(loader, mc)[:MAX_TOOL_RESULT]
+        if name == "arch_ref":
+            from . import archref
+
+            action = str(args.get("action") or "lookup").strip().lower()
+            if action == "catalog":
+                return archref.catalog()[:MAX_TOOL_RESULT]
+            if action == "profile":
+                return archref.explain(str(args.get("profile") or ""))[:MAX_TOOL_RESULT]
+            query = str(args.get("query") or self.user_text or "").strip()
+            limit = max(1, min(_arg_int(args, "limit", 2), 4))
+            return archref.search(query, limit=limit)[:MAX_TOOL_RESULT]
+        if name == "multiversion_plan":
+            from . import multiversion
+
+            meta = getattr(self.project, "meta", None)
+            loaders = args.get("loaders")
+            versions = args.get("mc_versions")
+            loader_rows = [str(item) for item in loaders] if isinstance(loaders, list) else []
+            version_rows = [str(item) for item in versions] if isinstance(versions, list) else []
+            if not loader_rows:
+                loader_rows = [str(getattr(meta, "loader", "") or "fabric")]
+            if not version_rows:
+                version_rows = [str(getattr(meta, "mc_version", "") or "1.21.1")]
+            modid = str(args.get("modid") or getattr(meta, "mod_id", "") or "yourmod")
+            return multiversion.plan(loader_rows, version_rows, modid=modid)[:MAX_TOOL_RESULT]
+        if name == "dev_docs":
+            meta = getattr(self.project, "meta", None)
+            action = str(args.get("action") or "lookup").strip().lower()
+            loader = str(args.get("loader") or getattr(meta, "loader", "") or "")
+            mc = str(args.get("mc") or getattr(meta, "mc_version", "") or "")
+            version = str(args.get("version") or "")
+            if action == "status":
+                return json.dumps(devdocs.status(), ensure_ascii=False, indent=2)[:MAX_TOOL_RESULT]
+            if action == "official":
+                pages = devdocs.official_pages(loader)
+                return "\n".join(f"- [{title}]({url})" for title, url in pages)
+            if action == "sources":
+                path = devdocs.ensure_sources(
+                    loader,
+                    mc,
+                    version,
+                    progress=self._center_progress,
+                    cancel=self._cancel,
+                )
+                if path is None:
+                    return "没有找到可用 sources.jar；先 catalog_sync，或检查 loader/mc。"
+                return f"源码构件已就绪：{path}"
+            query = str(args.get("query") or "").strip()
+            if not query:
+                return "dev_docs lookup 需要 query。"
+            result = devdocs.lookup(
+                query,
+                loader=loader,
+                mc=mc,
+                version=version,
+                limit=max(1, min(_arg_int(args, "limit", 8), 20)),
+                cancel=self._cancel,
+            )
+            return devdocs.render(result)
+        if name == "resource_ensure":
+            kind = str(args.get("kind") or "status").strip().lower()
+            project_root = self.project.root if self.project is not None else None
+            meta = getattr(self.project, "meta", None)
+            result = resources.ensure(
+                kind,
+                project_root=project_root,
+                loader=str(
+                    args.get("loader") or getattr(meta, "loader", "") or ""
+                ),
+                mc=str(args.get("mc") or getattr(meta, "mc_version", "") or ""),
+                version=str(args.get("version") or ""),
+                progress=self._center_progress,
+                cancel=self._cancel,
+            )
+            return resources.render(result)[:MAX_TOOL_RESULT]
+        if name == "mod_reference":
+            meta = getattr(self.project, "meta", None)
+            action = str(args.get("action") or "auto").strip().lower()
+            loader = str(args.get("loader") or getattr(meta, "loader", "") or "")
+            mc = str(args.get("mc") or getattr(meta, "mc_version", "") or "")
+            version = str(args.get("version") or "")
+            query = str(args.get("query") or self.user_text or "").strip()
+            limit = max(1, min(_arg_int(args, "limit", 8), 20))
+            if action == "status":
+                return json.dumps(reference.status(), ensure_ascii=False, indent=2)[:MAX_TOOL_RESULT]
+            if action == "search":
+                result = reference.search_references(
+                    query, loader=loader, mc=mc, limit=limit
+                )
+                return reference.render_auto(
+                    {**result, "prepared": [], "snippets": [], "license_notice": reference.LICENSE_NOTICE}
+                )[:MAX_TOOL_RESULT]
+            if action == "prepare":
+                project_id = str(args.get("project") or "").strip()
+                if not project_id:
+                    return "mod_reference prepare 需要 project（Modrinth slug 或 ID）。"
+                item = reference.prepare_reference(
+                    project_id,
+                    loader=loader,
+                    mc=mc,
+                    version_id=version,
+                    force=bool(args.get("force")),
+                    progress=self._center_progress,
+                    cancel=self._cancel,
+                )
+                return (
+                    f"参考源码：{item.get('sources')}\n"
+                    f"文件：{item.get('files')} / 类：{item.get('classes') or '未知'}\n"
+                    f"许可证：{item.get('license') or '未知'}\n"
+                    f"{item.get('notice') or reference.LICENSE_NOTICE}"
+                )[:MAX_TOOL_RESULT]
+            if action == "snippets":
+                hits = reference.search_snippets(query, limit=limit)
+                if not hits:
+                    return "没有找到匹配片段；先用 mod_reference prepare 准备参考源码。"
+                return reference.render_auto(
+                    {
+                        "features": reference.detect_features(query),
+                        "prepared": [],
+                        "snippets": hits,
+                        "notes": [],
+                        "license_notice": reference.LICENSE_NOTICE,
+                    }
+                )[:MAX_TOOL_RESULT]
+            result = reference.auto_reference(
+                query,
+                loader=loader,
+                mc=mc,
+                max_mods=max(1, min(_arg_int(args, "max_mods", 2), 4)),
+                max_snippets=limit,
+                force=bool(args.get("force")),
+                progress=self._center_progress,
+                cancel=self._cancel,
+            )
+            return reference.render_auto(result)[:MAX_TOOL_RESULT]
+        if name == "launcher_status":
+            bridge = launcher_bridge.LauncherBridge()
+            return json.dumps(bridge.about(), ensure_ascii=False, indent=2)[:MAX_TOOL_RESULT]
+        if name == "launcher_versions":
+            bridge = launcher_bridge.LauncherBridge()
+            info = bridge.about()
+            rows = []
+            for item in bridge.recommended_instances():
+                bits = [item.id]
+                if item.loader:
+                    bits.append(item.loader)
+                if item.loader_version:
+                    bits.append(item.loader_version)
+                rows.append(" / ".join(bits))
+            return (
+                json.dumps(info, ensure_ascii=False, indent=2)
+                + "\n\n实例：\n"
+                + ("\n".join(f"- {row}" for row in rows) or "（没有实例）")
+            )[:MAX_TOOL_RESULT]
+        if name == "launcher_downloads":
+            bridge = launcher_bridge.LauncherBridge()
+            data = bridge.downloads()
+            latest = data.get("latest") or {}
+            for key, value in list(latest.items()):
+                if isinstance(value, dict) and "notes" in value:
+                    value["notes"] = list(value.get("notes") or [])[:5]
+            return json.dumps(data, ensure_ascii=False, indent=2)[:MAX_TOOL_RESULT]
+        if name == "launcher_vanilla":
+            version = str(args.get("version") or "").strip()
+            if not version:
+                return "launcher_vanilla 缺少 version。"
+            kind = str(args.get("kind") or "client").lower()
+            bridge = launcher_bridge.LauncherBridge()
+            if bool(args.get("download")):
+                path = bridge.download_vanilla(
+                    version, kind, paths.data_dir() / "vanilla", progress=self._center_progress
+                )
+                return f"已下载：{path}"
+            data = bridge.vanilla(version)
+            data["libraries"] = list(data.get("libraries") or [])[:20]
+            return json.dumps(data, ensure_ascii=False, indent=2)[:MAX_TOOL_RESULT]
+        if name == "launcher_launch":
+            version = str(args.get("version") or "").strip()
+            if not version:
+                return "launcher_launch 缺少 version。"
+            bridge = launcher_bridge.LauncherBridge()
+            result = bridge.launch(version)
+            return json.dumps(result, ensure_ascii=False)
+        return "未知工具：" + name
+
+    # ------------------------------------------------------------------
     def _execute_kernel(self, name: str, args: dict[str, Any]) -> str:
         root = self.project.root
+        if name.startswith("workflow_"):
+            if self.kernel is None:
+                return "当前没有任务图；请先打开或创建工程。"
+            if name == "workflow_plan":
+                idea = str(args.get("idea") or self.user_text or "").strip()
+                result = self.kernel.replan(
+                    idea,
+                    include_runtime=bool(args.get("include_runtime", True)),
+                )
+                if not result.get("ok"):
+                    return str(result.get("reason") or "规划失败。")
+                markdown = self.kernel.workflow.markdown() if self.kernel.workflow else ""
+                return (
+                    f"已重建任务图；新增功能：{'、'.join(result.get('added') or []) or '无'}\n"
+                    f"任务数：{result['progress']['total']}，当前：{result['progress'].get('current') or '无'}\n\n"
+                    + markdown
+                )[:MAX_TOOL_RESULT]
+            if name == "workflow_status":
+                status = self.kernel.status()
+                if not status.get("ok"):
+                    return str(status.get("reason") or "没有任务图。")
+                markdown = self.kernel.workflow.markdown() if self.kernel.workflow else ""
+                return (
+                    json.dumps(status, ensure_ascii=False, indent=2)
+                    + "\n\n"
+                    + markdown
+                )[:MAX_TOOL_RESULT]
+            if name == "workflow_next":
+                status = self.kernel.status()
+                if not status.get("ok"):
+                    return str(status.get("reason") or "没有任务图。")
+                limit = max(1, min(_arg_int(args, "limit", 8), 30))
+                rows = status.get("next") or []
+                rows = rows[:limit]
+                current = status.get("current")
+                lines = [
+                    f"进度：{status['progress']['percent']}%（{status['progress']['done']}/{status['progress']['total']}）",
+                    f"当前任务：{current['id']} {current['title']}" if current else "当前没有可执行任务。",
+                ]
+                for item in rows:
+                    acceptance = "、".join(item.get("acceptance") or []) or "—"
+                    lines.append(
+                        f"- {item['id']} {item['title']}（依赖：{'、'.join(item.get('depends_on') or []) or '无'}；"
+                        f"验收：{acceptance}）"
+                    )
+                return "\n".join(lines)[:MAX_TOOL_RESULT]
+            if name == "workflow_complete":
+                task_id = str(args.get("task_id") or "").strip()
+                if not task_id:
+                    return "workflow_complete 缺少 task_id。"
+                evidence = args.get("evidence")
+                if isinstance(evidence, str):
+                    evidence = [evidence]
+                manual = args.get("manual_ok")
+                result = self.kernel.complete_task(
+                    task_id,
+                    evidence=[str(item) for item in (evidence or []) if str(item)],
+                    manual_ok=bool(manual) if manual is not None else None,
+                    force=bool(args.get("force")),
+                )
+                if not result.get("ok"):
+                    return (
+                        f"任务 {task_id} 未完成：{result.get('reason') or '验收未通过'}\n\n"
+                        + str(result.get("markdown") or "")
+                    )[:MAX_TOOL_RESULT]
+                progress = result.get("progress") or {}
+                head = f"任务 {task_id} 已完成。"
+                if progress:
+                    head += f" 总进度 {progress.get('percent')}%（{progress.get('done')}/{progress.get('total')}）。"
+                return (head + "\n\n" + str(result.get("markdown") or ""))[:MAX_TOOL_RESULT]
+            if name in {"workflow_fail", "workflow_skip", "workflow_reopen"}:
+                from .kernel.spec import save_spec
+                from .kernel.workflow import save_workflow
+
+                task_id = str(args.get("task_id") or "").strip()
+                if not task_id:
+                    return f"{name} 缺少 task_id。"
+                workflow = self.kernel.workflow
+                if workflow is None:
+                    return "当前没有任务图。"
+                try:
+                    if name == "workflow_fail":
+                        blocked = workflow.fail(task_id, str(args.get("detail") or ""))
+                        message = f"任务 {task_id} 已标记失败；阻塞下游：{'、'.join(blocked) or '无'}。"
+                    elif name == "workflow_skip":
+                        workflow.skip(task_id, str(args.get("reason") or ""))
+                        message = f"任务 {task_id} 已跳过。"
+                    else:
+                        workflow.reopen(task_id)
+                        message = f"任务 {task_id} 及下游已重置为待办。"
+                except KeyError as exc:
+                    return str(exc)
+                save_workflow(workflow, root)
+                if self.kernel.spec is not None:
+                    save_spec(self.kernel.spec, root)
+                return message
+            return f"未知工作流工具：{name}"
+        if name in {"contract_freeze", "contract_check"}:
+            from .kernel import contract as kernel_contract
+
+            if name == "contract_freeze":
+                result = kernel_contract.freeze(root, note=str(args.get("note") or ""))
+                counts = result.get("counts") or {}
+                return (
+                    f"已冻结公共契约：{result['path']}\n"
+                    f"类 {counts.get('classes', 0)} / 方法 {counts.get('methods', 0)} "
+                    f"/ 字段 {counts.get('fields', 0)} / 资源 {counts.get('resources', 0)}"
+                )
+            result = kernel_contract.check(
+                root, strict_resources=bool(args.get("strict_resources"))
+            )
+            return (
+                json.dumps(
+                    {key: result[key] for key in
+                     ("ok", "frozen", "removed", "changed", "warnings") if key in result},
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                + "\n\n"
+                + kernel_contract.report_markdown(result)
+            )[:MAX_TOOL_RESULT]
+        if name == "project_fact_check":
+            from . import modfacts
+
+            meta = getattr(self.project, "meta", None)
+            loader = str(args.get("loader") or getattr(meta, "loader", "") or "")
+            mc = str(args.get("mc") or getattr(meta, "mc_version", "") or "")
+            return modfacts.report(root, loader, mc)[:MAX_TOOL_RESULT]
         if name == "lint_project":
             levels = {str(args.get("level"))} if args.get("level") else None
             from .kernel.checks import run_checks
