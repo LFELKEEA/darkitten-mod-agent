@@ -2,7 +2,12 @@
 
 只写 Minecraft Java 模组的桌面 Agent。界面用 PySide6，内置对话工作台、技能、连接器、知识库与反编译能力。模组开发闭环来自 [yan-mc/minecraft-mod-dev](https://github.com/yan-mc/minecraft-mod-dev)：真实开发端启动、回环 HTTP 探针、场景卡片断言和 GameTest。
 
-当前版本：`3.4.2`
+当前版本：`3.4.3`
+
+## 3.4.3 源码自动同步与 Fabric 源码兜底
+
+- **源码同步**：打包成功后自动把源码推送到 [LFELKEEA/darkitten-mod-agent](https://github.com/LFELKEEA/darkitten-mod-agent)；`tools/sync_github.py` 支持预演、只提交不推送、密钥扫描与 DNS 投毒兜底。
+- **Fabric 源码兜底**：本地目录为空时直接向 Fabric meta 取当前稳定加载器版本，`api_lookup` / `dev_docs` 第一次就能下载 sources.jar 并建立索引。
 
 ## 3.4.2 确定性任务图、契约冻结与离线 API 索引
 

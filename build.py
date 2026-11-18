@@ -22,6 +22,8 @@ BUILD = ROOT / "build"
 APP_DIST = DIST / "DarkittenModAgent"
 ZIP_NAME = f"DarkittenModAgent-{APP_VERSION}.zip"
 NOTES = [
+    "Fabric sources 兜底：本地版本目录为空时直接向 Fabric meta 取当前稳定加载器版本，dev_docs / api_lookup 首次即可下载 sources.jar 并建索引（已用 0.87 MB 真实源码验证：233 类 / 966 方法）。",
+    "源码自动同步：build.py 打包成功后调用 tools/sync_github.py 推送源码、README 与 CHANGELOG；同步前拒绝本地配置与运行数据并扫描密钥，支持 --dry-run / --no-push / DMA_NO_SYNC=1。",
     "新增确定性任务图工具：workflow_plan / status / next / complete / fail / skip / reopen。任务状态由 .dma/workflow.json 推进，workflow_complete 先跑验收门禁，缺证据会返回阻断项。",
     "新增公共契约冻结与漂移审计（dma/kernel/contract.py + contract_freeze / contract_check）：重构前冻结 public/protected 类、方法、字段与资源，重构后报告删除、签名变更和资源缺失。",
     "新增离线 API 签名索引（dma/apiindex.py + api_lookup）：从 sources.jar 建索引并缓存，直接查类、方法参数、返回类型与字段类型，不再每次扫描整包。",

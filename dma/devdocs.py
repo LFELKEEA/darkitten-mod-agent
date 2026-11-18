@@ -107,6 +107,16 @@ def sources_item(loader: str, mc: str = "", version: str = "") -> dict[str, Any]
             return item
         return item
     resolved = str(version or "").strip() or _loader_version(key, mc)
+    if not resolved and key == "fabric":
+        # Fabric loader sources do not depend on the Minecraft version.  The
+        # local catalog may be empty on a fresh install, so ask Fabric meta
+        # for the current stable loader instead of failing the lookup.
+        try:
+            from .studio_engine import versions as versions_mod
+
+            resolved = versions_mod._fabric_loader()
+        except Exception:  # noqa: BLE001 - 在线清单失败时仍然返回 None
+            resolved = ""
     if not resolved:
         return None
     if key == "fabric":

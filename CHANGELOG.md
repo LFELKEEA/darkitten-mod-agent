@@ -1,5 +1,13 @@
 # Changelog
 
+## 3.4.3 — 2026-11-18
+
+修掉新装环境下 Fabric 源码索引第一次不可用的问题，并让源码同步自动化。
+
+- **Fabric sources 解析兜底**：本地版本目录还没同步时，`dev_docs` / `api_lookup` 会直接向 Fabric meta 查询当前稳定加载器版本，不再因为目录为空返回“没有 sources.jar”。已用真实 `fabric-loader-0.20.1-sources.jar` 验证：下载 0.87 MB，索引 233 个类 / 966 个方法。
+- **源码自动同步**：`build.py` 打包成功后自动调用 `tools/sync_github.py`，把源码、README、CHANGELOG 推到 `LFELKEEA/darkitten-mod-agent`；设置 `DMA_NO_SYNC=1` 可跳过。同步前会拒绝本地配置与运行数据，并扫描常见密钥格式。
+- **同步脚本**：支持 `--dry-run` / `--no-push` / 自定义提交说明；遇到校园网 DNS 投毒或 Schannel 吊销检查失败时自动使用可达 IP 与进程级 TLS 兼容参数，不修改全局 Git 配置。
+
 ## 3.4.2 — 2026-11-18
 
 参考开源 MC 模组 Agent 的确定性调度、契约冻结与离线签名索引，把已有内核真正接到 Agent 循环里。

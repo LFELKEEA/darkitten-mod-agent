@@ -18,6 +18,15 @@ class SourcesItemTest(TempDataCase):
         self.assertTrue(item["url"].endswith("fabric-loader-0.16.9-sources.jar"))
         self.assertIn("bmclapi2.bangbang93.com", item["mirror"])
 
+    def test_fabric_sources_fall_back_to_loader_meta(self) -> None:
+        from dma.studio_engine import versions
+
+        with mock.patch.object(devdocs, "_loader_version", return_value=""), \
+                mock.patch.object(versions, "_fabric_loader", return_value="0.20.1"):
+            item = devdocs.sources_item("fabric", "1.21.1")
+        self.assertIsNotNone(item)
+        self.assertTrue(item["url"].endswith("fabric-loader-0.20.1-sources.jar"))
+
     def test_quilt_sources_use_maven(self) -> None:
         item = devdocs.sources_item("quilt", "1.21.1", "0.27.0")
         self.assertTrue(item["url"].endswith("quilt-loader-0.27.0-sources.jar"))
