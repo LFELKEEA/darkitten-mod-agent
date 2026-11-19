@@ -2,7 +2,17 @@
 
 只写 Minecraft Java 模组的桌面 Agent。界面用 PySide6，内置对话工作台、技能、连接器、知识库与反编译能力。模组开发闭环来自 [yan-mc/minecraft-mod-dev](https://github.com/yan-mc/minecraft-mod-dev)：真实开发端启动、回环 HTTP 探针、场景卡片断言和 GameTest。
 
-当前版本：`3.4.3`
+当前版本：`3.4.4`
+
+## 3.4.4 AI 接管游戏：换中文、建存档、操作与截图复盘
+
+让 Agent 不只“编译完就结束”，而是真的进开发客户端，按测试要求操作并看结果：
+
+- **游戏控制层**（`dma/mcdev/game.py`）：`game_setup` 切中文并新建存档，`game_control` 控制视角/移动/传送/按键/攻击/使用/挖掘/聊天/命令/按文字点击，`game_observe` 收集状态、玩家、附近实体、UI 与日志，`game_test` 执行带断言的交互式测试计划。
+- **Forge 1.20.1 探针扩展**：新增 `/language`、`/world/create`、`/player/state`、`/player/look|move|key|attack`、`/chat/send`、`/ui/click_text|set_text|wait` 等端点；可直接调用原版 `WorldOpenFlows.createFreshLevel` 创建普通/超平坦/放大/大型生物群系/单一生物群系存档。
+- **截图复盘**：每次操作后可截图并交给 `vision.review` 做确定性体检（黑屏、空场景、对比度、尺寸），不通过就按返回的问题继续修。
+- **跨加载器兜底**：启动客户端前自动把 `options.txt` 的 `lang` 写成 `zh_cn`；没有探针的加载器可用窗口截图看画面，但控制与断言仍只在 Forge 1.20.1 可用。
+- **工具总数**：101。
 
 ## 3.4.3 源码自动同步与 Fabric 源码兜底
 

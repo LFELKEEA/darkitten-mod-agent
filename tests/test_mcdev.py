@@ -8,7 +8,7 @@ from pathlib import Path
 from unittest import mock
 
 from dma import mcdev
-from dma.mcdev import cards, gradle as mcdev_gradle, process as mcdev_process
+from dma.mcdev import cards, game, gradle as mcdev_gradle, process as mcdev_process
 from dma.mcdev import scenario, server_files
 
 from .base import TempDataCase
@@ -218,6 +218,184 @@ class ProbeClientTests(unittest.TestCase):
     def test_probe_reports_connection_error(self) -> None:
         with self.assertRaises(mcdev.ProbeError):
             mcdev.probe.probe_json("client", "/status", port=1, timeout=0.5)
+
+
+class GameControlTests(unittest.TestCase):
+    """用本地假探针验证语言/存档/观察/测试编排，不启动真实游戏。"""
+
+    def setUp(self) -> None:
+        state = {"language": "en_us", "in_world": False, "posts": []}
+
+        class Handler(BaseHTTPRequestHandler):
+            def _send(self, data):
+                body = json.dumps({"ok": True, "data": data}, ensure_ascii=False).encode(
+                    "utf-8"
+                )
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_GET(self):  # noqa: N802
+                path = self.path.split("?")[0]
+                if path == "/status":
+                    self._send(
+                        {
+                            "side": "client",
+                            "inWorld": state["in_world"],
+                            "screen": "net.minecraft.client.gui.screens.TitleScreen",
+                            "title": "标题",
+                            "language": state["language"],
+                            "languageSelected": state["language"],
+                            "player": "Dev" if state["in_world"] else None,
+                        }
+                    )
+                elif path == "/language":
+                    self._send(
+                        {
+                            "code": state["language"],
+                            "selected": state["language"],
+                            "javaLocale": "zh_CN",
+                            "available": [],
+                        }
+                    )
+                elif path == "/player/state":
+                    self._send(
+                        {
+                            "inWorld": state["in_world"],
+                            "name": "Dev",
+                            "x": 0.5,
+                            "y": 64.0,
+                            "z": 0.5,
+                            "health": 20.0,
+                        }
+                    )
+                elif path == "/ui/snapshot":
+                    self._send(
+                        {
+                            "screen": None,
+                            "title": None,
+                            "widgets": [
+                                {"text": "单人游戏", "x": 100, "y": 60},
+                                {"text": "选项...", "x": 100, "y": 90},
+                            ],
+                        }
+                    )
+                elif path == "/log/tail":
+                    self._send({"lines": ["[Render thread] test", "Done"]})
+                elif path == "/screenshot":
+                    self._send(
+                        {
+                            "path": str(Path(__file__).with_name("missing-shot.png")),
+                            "exists": False,
+                            "label": "shot",
+                            "language": state["language"],
+                        }
+                    )
+                else:
+                    self._send({"path": self.path})
+
+            def do_POST(self):  # noqa: N802
+                length = int(self.headers.get("Content-Length") or 0)
+                payload = json.loads(self.rfile.read(length) or b"{}")
+                path = self.path.split("?")[0]
+                state["posts"].append((path, payload))
+                if path == "/language":
+                    state["language"] = payload.get("code") or "zh_cn"
+                    self._send(
+                        {
+                            "code": state["language"],
+                            "selected": state["language"],
+                            "reloading": True,
+                        }
+                    )
+                elif path == "/world/create":
+                    state["in_world"] = True
+                    self._send(
+                        {
+                            "created": True,
+                            "name": payload.get("name"),
+                            "seed": 1,
+                            "gamemode": payload.get("gamemode"),
+                        }
+                    )
+                elif path == "/player/key":
+                    self._send({"pressed": True, "key": payload.get("key")})
+                else:
+                    self._send({"echo": payload})
+
+            def log_message(self, *args):
+                return
+
+        self.state = state
+        self.server = HTTPServer(("127.0.0.1", 0), Handler)
+        self.port = self.server.server_address[1]
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+
+    def tearDown(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=2)
+
+    def test_set_language_normalizes_and_verifies(self) -> None:
+        result = game.set_language("中文", port=self.port, wait=2)
+        self.assertTrue(result["verified"])
+        self.assertEqual(self.state["language"], "zh_cn")
+
+    def test_create_world_waits_until_in_world(self) -> None:
+        result = game.create_world(
+            "AI 测试", gamemode="creative", world_type="flat", port=self.port, wait=5
+        )
+        self.assertTrue(result["created"])
+        self.assertTrue(result["inWorld"])
+        self.assertTrue(self.state["in_world"])
+
+    def test_observe_collects_state_ui_and_log(self) -> None:
+        self.state["in_world"] = True
+        result = game.observe(
+            port=self.port, screenshot=True, label="check", log_lines=2
+        )
+        self.assertTrue(result["inWorld"])
+        self.assertEqual(result["player"]["name"], "Dev")
+        self.assertEqual(len(result["ui"]["widgets"]), 2)
+        self.assertEqual(result["log"][-1], "Done")
+        self.assertFalse(result["screenshot"]["review"]["ok"])
+
+    def test_run_test_passes_assertions(self) -> None:
+        result = game.run_test(
+            [
+                {"type": "language", "code": "zh_cn"},
+                {"type": "world", "name": "测试", "worldType": "flat"},
+                {"type": "control", "action": "state"},
+                {"type": "assert", "path": "last.name", "op": "eq", "value": "Dev"},
+                {"type": "control", "action": "click_text", "text": "单人游戏"},
+                {"type": "assert", "path": "last.clicked", "op": "ne", "value": True},
+            ],
+            port=self.port,
+        )
+        # click_text 的假探针返回 echo，没有 clicked 字段；ne True 仍然成立。
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["executed"], 6)
+
+    def test_run_test_stops_on_failed_assertion(self) -> None:
+        result = game.run_test(
+            [
+                {"type": "control", "action": "state"},
+                {"type": "assert", "path": "last.name", "op": "eq", "value": "Other"},
+                {"type": "control", "action": "key", "key": "inventory"},
+            ],
+            port=self.port,
+        )
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["executed"], 2)
+        self.assertFalse(result["steps"][-1]["ok"])
+        self.assertIn("断言失败", result["steps"][-1]["error"])
+
+    def test_ensure_ready_reports_missing_probe(self) -> None:
+        with self.assertRaises(game.GameError):
+            game.ensure_ready(port=1)
 
 
 class TemplateTests(TempDataCase):
@@ -502,6 +680,28 @@ class NoProbeLaunchTests(TempDataCase):
         )
         self.assertEqual(mcdev_process._parse_netstat_pid(text, 25565), 4252)
         self.assertIsNone(mcdev_process._parse_netstat_pid(text, 25566))
+
+    def test_ensure_client_language_replaces_lang_only(self) -> None:
+        root = self.tmp / "mod"
+        (root / "run").mkdir(parents=True)
+        options = root / "run" / "options.txt"
+        options.write_text("fov:0.5\nlang:en_us\nrenderDistance:12\n", encoding="utf-8")
+        changed = server_files.ensure_client_language(root, "zh_cn")
+        self.assertTrue(changed)
+        text = options.read_text(encoding="utf-8")
+        self.assertIn("fov:0.5", text)
+        self.assertIn("renderDistance:12", text)
+        self.assertIn("lang:zh_cn", text)
+        self.assertNotIn("lang:en_us", text)
+        # 幂等：第二次调用不再改动
+        self.assertEqual(server_files.ensure_client_language(root, "zh_cn"), [])
+
+    def test_ensure_client_language_creates_missing_file(self) -> None:
+        root = self.tmp / "mod"
+        root.mkdir()
+        server_files.ensure_client_language(root, "zh_cn")
+        text = (root / "run" / "options.txt").read_text(encoding="utf-8")
+        self.assertIn("lang:zh_cn", text)
 
     def test_launch_does_not_duplicate_when_port_in_use(self) -> None:
         root = self.tmp / "mod"

@@ -113,6 +113,25 @@ class BuildToolTests(TempDataCase):
         self.assertIn("build_project", text)
         self.assertNotIn("fix_build_setup", text)
 
+    def test_game_control_requires_action(self) -> None:
+        text = self.worker._execute(
+            ToolCall(name="game_control", args={}), AgentRun()
+        )
+        self.assertIn("缺少 action", text)
+
+    def test_game_control_reports_unknown_action(self) -> None:
+        text = self.worker._execute(
+            ToolCall(name="game_control", args={"action": "fly"}), AgentRun()
+        )
+        self.assertIn("未知游戏动作", text)
+
+    def test_game_observe_without_probe_is_readable(self) -> None:
+        text = self.worker._execute(
+            ToolCall(name="game_observe", args={"port": 1}), AgentRun()
+        )
+        self.assertIn("游戏控制失败", text)
+        self.assertIn("mcdev_prepare", text)
+
     def test_status_text(self) -> None:
         status = _tool_status(ToolCall(name="build_project", args={"task": "runClient"}))
         self.assertIn("runClient", status)

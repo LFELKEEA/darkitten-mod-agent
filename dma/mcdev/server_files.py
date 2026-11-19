@@ -152,3 +152,34 @@ def ensure_server_files(project_root: str | Path, port: int = 25566) -> list[str
     changed = ensure_eula(project_root, "server")
     changed.extend(ensure_server_properties(project_root, port))
     return changed
+
+
+def ensure_client_language(project_root: str | Path, code: str = "zh_cn") -> list[str]:
+    """客户端启动前把 ``options.txt`` 的 ``lang`` 固定成目标语言。
+
+    探针只在 Forge 1.20.1 可用；Fabric / NeoForge 等加载器没有运行时接口，
+    至少让 AI 第一次进游戏就是中文，后续截图和人工核对都按中文界面进行。
+    已有 options.txt 时只替换 lang 行，其余设置原样保留。
+    """
+    run_dir = run_dir_for(project_root, "client")
+    run_dir.mkdir(parents=True, exist_ok=True)
+    path = run_dir / "options.txt"
+    wanted = str(code or "zh_cn").strip() or "zh_cn"
+    lines: list[str] = []
+    if path.is_file():
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            if line.startswith("lang:"):
+                lines.append(f"lang:{wanted}")
+            else:
+                lines.append(line)
+    if not any(item.startswith("lang:") for item in lines):
+        lines.append(f"lang:{wanted}")
+    if path.is_file() and path.read_text(encoding="utf-8", errors="replace") == (
+        "\n".join(lines) + "\n"
+    ):
+        return []
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    try:
+        return [str(path.relative_to(Path(str(project_root)).expanduser()))]
+    except ValueError:
+        return [str(path)]

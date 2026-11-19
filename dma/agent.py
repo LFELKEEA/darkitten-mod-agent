@@ -1500,6 +1500,12 @@ class AgentWorker(QObject):
             "mcdev_run_dump",
             "mcdev_use",
             "mcdev_scenario",
+            "game_observe",
+            "game_setup",
+            "game_new_world",
+            "game_language",
+            "game_control",
+            "game_test",
             *CENTER_TOOLS,
         }
         if self.project is None and name not in allowed_without_project:
@@ -2126,6 +2132,8 @@ class AgentWorker(QObject):
                 return self._execute_kernel(name, args)
             if name.startswith("mcdev_"):
                 return self._execute_mcdev(name, args)
+            if name.startswith("game_"):
+                return self._execute_game(name, args)
             return (
                 f"未知工具：{name}。可用工具：list_files、read_file、search_text、write_file、"
                 "edit_file、pixel_art、scaffold_project、build_project、"
@@ -2137,6 +2145,8 @@ class AgentWorker(QObject):
                 "mcdev_command、mcdev_ui、mcdev_click、mcdev_screenshot、mcdev_run_dump、"
                 "mcdev_use、mcdev_install_probe、mcdev_scenario、mcdev_build、"
                 "mcdev_gametest、mcdev_build_probe、"
+                "game_observe、game_setup、game_new_world、game_language、"
+                "game_control、game_test、"
                 "lint_project、symbol_query、mapping_translate、impact_analysis、"
                 "log_parse、snapshot、snapshot_list、rollback、asset_lint、"
                 "texture_gen、vision_review、blockbench、testgen、migration_plan、"
@@ -3222,6 +3232,147 @@ class AgentWorker(QObject):
                 indent=2,
             )[:MAX_TOOL_RESULT]
         return f"未知的 mcdev 工具：{name}"
+
+    # ------------------------------------------------------------------
+    def _execute_game(self, name: str, args: dict[str, Any]) -> str:
+        """AI 游戏控制：换语言、建存档、操作玩家、截图复盘、执行测试计划。"""
+        from .mcdev import game as game_mod
+
+        port = args.get("port")
+        try:
+            port = int(port) if port else None
+        except (TypeError, ValueError):
+            port = None
+
+        def number(key: str, default: float) -> float:
+            raw = args.get(key)
+            if raw is None or raw == "":
+                return default
+            try:
+                return float(raw)
+            except (TypeError, ValueError):
+                return default
+
+        try:
+            if name == "game_observe":
+                entry = self.mcdev.launches.get("client")
+                window_pid = (
+                    entry.pid
+                    if entry is not None and getattr(entry, "running", False)
+                    else None
+                )
+                result = game_mod.observe(
+                    radius=int(number("radius", 8)),
+                    screenshot=bool(args.get("screenshot", True)),
+                    label=str(args.get("label") or "observe"),
+                    log_lines=int(number("log_lines", 40)),
+                    port=port,
+                    window_pid=window_pid,
+                    project_root=self.project.root if self.project else None,
+                )
+            elif name == "game_language":
+                result = game_mod.set_language(
+                    str(args.get("code") or args.get("language") or "zh_cn"),
+                    reload=bool(args.get("reload", True)),
+                    port=port,
+                    wait=number("wait", 20),
+                )
+            elif name == "game_new_world":
+                result = game_mod.create_world(
+                    str(args.get("name") or "AI 测试"),
+                    gamemode=str(args.get("gamemode") or "creative"),
+                    difficulty=str(args.get("difficulty") or "peaceful"),
+                    world_type=str(
+                        args.get("world_type") or args.get("worldType") or "normal"
+                    ),
+                    seed=str(args.get("seed") or ""),
+                    cheats=bool(args.get("cheats", True)),
+                    structures=bool(args.get("structures", True)),
+                    bonus_chest=bool(args.get("bonusChest", False)),
+                    port=port,
+                    wait=number("wait", 120),
+                )
+            elif name == "game_setup":
+                game_mod.ensure_ready(port)
+                code = str(args.get("code") or args.get("language") or "zh_cn")
+                result: dict[str, Any] = {
+                    "language": game_mod.set_language(
+                        code, port=port, wait=number("lang_wait", 20)
+                    )
+                }
+                world_arg = args.get("world", True)
+                if world_arg is not False:
+                    world = world_arg if isinstance(world_arg, dict) else {}
+                    result["world"] = game_mod.create_world(
+                        str(world.get("name") or args.get("name") or "AI 测试"),
+                        gamemode=str(
+                            world.get("gamemode") or args.get("gamemode") or "creative"
+                        ),
+                        difficulty=str(
+                            world.get("difficulty") or args.get("difficulty") or "peaceful"
+                        ),
+                        world_type=str(
+                            world.get("worldType")
+                            or world.get("world_type")
+                            or args.get("world_type")
+                            or "normal"
+                        ),
+                        seed=str(world.get("seed") or args.get("seed") or ""),
+                        cheats=bool(world.get("cheats", args.get("cheats", True))),
+                        structures=bool(
+                            world.get("structures", args.get("structures", True))
+                        ),
+                        bonus_chest=bool(world.get("bonusChest", False)),
+                        port=port,
+                        wait=number("world_wait", number("wait", 120)),
+                    )
+                result["status"] = game_mod.ensure_ready(port)
+            elif name == "game_control":
+                action = str(args.get("action") or "").strip()
+                if not action:
+                    return (
+                        "game_control 缺少 action。可用：" + "、".join(
+                            sorted(game_mod.CONTROL_ACTIONS)
+                        )
+                    )
+                params = {
+                    key: value
+                    for key, value in args.items()
+                    if key not in {"action", "port"} and value is not None
+                }
+                result = game_mod.control(action, params, port=port)
+            elif name == "game_test":
+                raw_steps = args.get("steps")
+                if isinstance(raw_steps, str):
+                    try:
+                        raw_steps = json.loads(raw_steps)
+                    except ValueError:
+                        return "game_test 的 steps 不是合法 JSON。"
+                if not isinstance(raw_steps, list):
+                    return "game_test 需要 steps 数组。"
+                result = game_mod.run_test(
+                    raw_steps,
+                    port=port,
+                    continue_on_error=bool(args.get("continue_on_error")),
+                )
+            else:
+                return f"未知的游戏控制工具：{name}"
+        except game_mod.GameError as exc:
+            return f"游戏控制失败：{exc}"
+        except (AssertionError, ValueError) as exc:
+            return f"游戏控制失败：{exc}"
+
+        self._progress_at = time.monotonic()
+        if self.kernel is not None and name == "game_test":
+            steps = result.get("steps") if isinstance(result, dict) else None
+            has_assert = any(
+                str(item.get("type")) == "assert"
+                for item in steps or []
+                if isinstance(item, dict)
+            )
+            if has_assert:
+                self.kernel.record_runtime(bool(result.get("ok")))
+        return json.dumps(result, ensure_ascii=False, indent=2)[:MAX_TOOL_RESULT]
 
 
 @dataclass

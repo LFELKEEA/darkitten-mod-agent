@@ -1,5 +1,21 @@
 # Changelog
 
+## 3.4.4 — 2026-11-19
+
+让 Agent 直接进开发客户端操作，并用截图复盘，不再停在“编译通过”。
+
+- **游戏控制层** `dma/mcdev/game.py`：
+  - `game_setup`：切换语言（默认 `zh_cn`）并新建存档，等待真正进入世界；已在存档内时不重建。
+  - `game_new_world` / `game_language`：单独建存档或换语言，支持 normal / flat / amplified / large_biomes / single_biome 与种子、模式、难度、作弊。
+  - `game_control`：视角、看向坐标/实体、传送/相对移动/按键行走、按/放/长按按键、攻击、使用物品/方块、破坏与挖掘、聊天、执行命令、按文字点击、输入文本、等待界面、关闭界面、背包、截图、读取状态。
+  - `game_observe`：一次拿到状态、玩家与附近实体、UI 控件、日志尾部，并截图做确定性画面体检。
+  - `game_test`：按步骤执行 setup / language / world / control / screenshot / observe / wait / assert，断言失败即停并返回失败步骤与上下文。
+- **Forge 1.20.1 探针扩展**：新增 `/language`、`/world/create`、`/player/state`、`/player/look`、`/player/move`、`/player/key`、`/player/attack`、`/chat/send`、`/ui/click_text`、`/ui/set_text`、`/ui/wait`；`/status` 与 `/ui/snapshot` 增加语言、坐标、世界与可编辑控件信息。存档使用原版 `WorldOpenFlows.createFreshLevel`，不走脆弱的菜单自动化。
+- **截图复盘**：截图后调用 `vision.review(style="screenshot")`，检查尺寸、颜色数、边缘密度与对比度，能识别黑屏、空场景和不可读 UI。
+- **跨加载器兜底**：客户端启动前自动把 `options.txt` 的 `lang` 固定为 `zh_cn`（保留其他设置）；没有探针的加载器可按窗口 PID 截图并做同一套体检，但玩家控制与断言仍只在 Forge 1.20.1 可用。
+- **工具协议**：新增 6 个 `game_*` 工具，提示词补充交互式验证流程；工具总数 95 → 101。
+- **回归测试**：新增本地假探针覆盖语言归一化与生效等待、建存档等待、组合观察、断言通过/失败停止、探针缺失报错，以及 `options.txt` 语言预置的替换与幂等。
+
 ## 3.4.3 — 2026-11-18
 
 修掉新装环境下 Fabric 源码索引第一次不可用的问题，并让源码同步自动化。

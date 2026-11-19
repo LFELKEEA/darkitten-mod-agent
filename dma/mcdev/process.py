@@ -304,6 +304,14 @@ class LaunchManager:
                         "serverFiles": server_files_changed,
                         "note": f"端口 {candidate} 已有服务端在监听，没有重复启动。",
                     }
+        if kind == "client":
+            # 没有探针的加载器只能靠运行前写配置；Forge 1.20.1 之后还能用
+            # game_language 热切换，但先把 options.txt 固定住更稳。
+            client_changed = server_files.ensure_client_language(root)
+            if client_changed:
+                self._emit(
+                    f"[mcdev] 已把客户端语言预置为中文：{'、'.join(client_changed)}"
+                )
         gradlew = root / ("gradlew.bat" if os.name == "nt" else "gradlew")
         if not gradlew.is_file():
             raise LaunchError(

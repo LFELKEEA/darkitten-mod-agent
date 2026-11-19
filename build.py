@@ -22,6 +22,9 @@ BUILD = ROOT / "build"
 APP_DIST = DIST / "DarkittenModAgent"
 ZIP_NAME = f"DarkittenModAgent-{APP_VERSION}.zip"
 NOTES = [
+    "AI 接管游戏：新增 game_setup / game_control / game_observe / game_test 等 6 个工具，可换中文、新建存档、控制视角/移动/按键/攻击/使用/挖掘/聊天/命令、按文字点击，并在每次操作后截图做画面体检。",
+    "Forge 1.20.1 探针新增语言、存档、玩家状态/移动/按键/攻击、聊天、界面文字点击与输入等端点；存档用原版 WorldOpenFlows.createFreshLevel，支持普通/超平坦/放大/大型生物群系/单一生物群系。",
+    "跨加载器兜底：客户端启动前自动把 options.txt 的 lang 设为 zh_cn；没有探针的加载器可按窗口截图看画面，但控制与断言仍只在 Forge 1.20.1 可用。工具总数 101。",
     "Fabric sources 兜底：本地版本目录为空时直接向 Fabric meta 取当前稳定加载器版本，dev_docs / api_lookup 首次即可下载 sources.jar 并建索引（已用 0.87 MB 真实源码验证：233 类 / 966 方法）。",
     "源码自动同步：build.py 打包成功后调用 tools/sync_github.py 推送源码、README 与 CHANGELOG；同步前拒绝本地配置与运行数据并扫描密钥，支持 --dry-run / --no-push / DMA_NO_SYNC=1。",
     "新增确定性任务图工具：workflow_plan / status / next / complete / fail / skip / reopen。任务状态由 .dma/workflow.json 推进，workflow_complete 先跑验收门禁，缺证据会返回阻断项。",

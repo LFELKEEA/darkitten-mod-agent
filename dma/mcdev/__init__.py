@@ -4,7 +4,8 @@
 - 回环 HTTP 探针：状态、命令、UI 快照/点击、截图、运行日志；
 - 通过 gradlew 启动真实开发服务端/客户端并管理进程；
 - 卡片 YAML → 场景步骤 → 断言的执行器；
-- Gradle build / GameTest 与探针安装。
+- Gradle build / GameTest 与探针安装；
+- AI 游戏控制：换语言、新建存档、操作玩家与界面、截图复盘。
 """
 
 from __future__ import annotations
