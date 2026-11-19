@@ -22,6 +22,10 @@ BUILD = ROOT / "build"
 APP_DIST = DIST / "DarkittenModAgent"
 ZIP_NAME = f"DarkittenModAgent-{APP_VERSION}.zip"
 NOTES = [
+    "修复停止功能：取消信号已贯通开发端启动、探针安装、进服握手、游戏测试步骤与存档等待；取消后自动清理本次任务新启动的开发端和 Gradle daemon。",
+    "对话运行期间不再整体禁用运行面板：只锁启动按钮，停止全部与刷新状态始终可用；放弃等待时后台清理本次启动的进程。",
+    "新增 design_studio 多方案设计：生物/物品图标/方块一次生成 2-8 套候选，可预览、补描述重新生成、保留模型只改图案，或上传自己的 PNG / JSON / bbmodel。",
+    "选定方案后自动写入贴图、物品/方块模型与方块状态；实体输出 GeckoLib geo.json 起始模型并返回写入路径。生成全程离线，无第三方绘图依赖。工具总数 102。",
     "修正测试环境难度：game_setup / game_new_world / game_test 的默认难度由 peaceful 改为 normal，避免新建存档后根本不生成敌对生物；显式传 peaceful 仍会返回提示。",
     "新增 game_control 动作 difficulty / gamemode / time / weather / spawn；spawn 在 peaceful 下自动把难度提到 normal，并在玩家周围生成实体后回读附近实体确认。",
     "game_test 新增 difficulty / gamemode / time / weather / spawn 步骤，可直接编写“夜晚 + 生存 + 生成僵尸 + 攻击 + 截图”的敌对生物测试。",

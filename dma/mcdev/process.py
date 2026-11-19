@@ -135,6 +135,12 @@ class LaunchManager:
     def set_log(self, log) -> None:
         self._log = log or (lambda _text: None)
 
+    def set_cancel(self, cancel: threading.Event | None) -> threading.Event:
+        """切换取消信号；返回切换前的信号，便于调用方用完恢复。"""
+        previous = self._cancel
+        self._cancel = cancel or threading.Event()
+        return previous
+
     # ------------------------------------------------------------------
     def _emit(self, text: str) -> None:
         try:
@@ -170,34 +176,80 @@ class LaunchManager:
         if kind not in {"server", "client", "both"}:
             raise LaunchError(f"不支持的启动类型：{kind}")
         timeout = _clamp_timeout(timeout_ms)
+        started_at = time.time()
         results: list[dict] = []
-        if kind in {"server", "both"}:
-            results.append(
-                self.launch(
-                    "server", root, timeout, join_port=join_port, wait_probe=wait_probe
+        if self._cancelled():
+            return {"ok": False, "cancelled": True, "results": results}
+        try:
+            if kind in {"server", "both"}:
+                results.append(
+                    self.launch(
+                        "server",
+                        root,
+                        timeout,
+                        join_port=join_port,
+                        wait_probe=wait_probe,
+                    )
                 )
-            )
-        ok = True
-        if kind in {"client", "both"}:
-            if kind == "both":
-                # 服务端启动后还有一段世界加载，先让客户端等两秒再握手。
-                self._sleep(2.0)
-            client = self.launch("client", root, timeout, wait_probe=wait_probe)
-            if not wait_join:
-                # 没有握手就无法确认已经进世界，不能谎报就绪。
-                client["joined"] = False
-                client["joinVerified"] = False
-                client["note"] = "wait_join=false：未验证客户端是否进入世界"
-                results.append(client)
-                ok = False
-            else:
-                joined = self._join_client(
-                    root, client, timeout, join_port, wait_probe=wait_probe
+                if self._cancelled():
+                    return {"ok": False, "cancelled": True, "results": results}
+            ok = True
+            if kind in {"client", "both"}:
+                if kind == "both":
+                    # 服务端启动后还有一段世界加载，先让客户端等两秒再握手。
+                    self._sleep(2.0)
+                    if self._cancelled():
+                        return {"ok": False, "cancelled": True, "results": results}
+                client = self.launch("client", root, timeout, wait_probe=wait_probe)
+                if not wait_join:
+                    # 没有握手就无法确认已经进世界，不能谎报就绪。
+                    client["joined"] = False
+                    client["joinVerified"] = False
+                    client["note"] = "wait_join=false：未验证客户端是否进入世界"
+                    results.append(client)
+                    ok = False
+                else:
+                    joined = self._join_client(
+                        root, client, timeout, join_port, wait_probe=wait_probe
+                    )
+                    joined["joinVerified"] = True
+                    results.append(joined)
+                    ok = bool(
+                        joined.get("joined") or joined.get("alreadyRunning")
+                    )
+            cancelled = self._cancelled()
+            return {
+                "ok": ok and not cancelled,
+                "cancelled": cancelled,
+                "results": results,
+            }
+        finally:
+            if self._cancelled():
+                # 取消后必须把自己刚拉起来的开发端一起收掉，否则界面上的
+                # “停止”会看起来只是停掉了对话，游戏进程还在后台跑。
+                self.stop_started_since(started_at)
+
+    def stop_started_since(self, since: float) -> dict:
+        """停止 ``since`` 之后由本管理器启动的开发端。
+
+        用于取消一次启动流程：只清理这一次新起的进程，不动用户之前已经
+        通过运行面板启动的开发端。
+        """
+        with self._lock:
+            kinds = [
+                entry.kind
+                for entry in self._entries.values()
+                if entry.started_at >= since - 0.5
+            ]
+        stopped: list[dict] = []
+        for kind in kinds:
+            try:
+                stopped.append(self.stop(kind))
+            except Exception as exc:  # noqa: BLE001 - 清理失败不能掩盖取消
+                stopped.append(
+                    {"kind": kind, "stopped": False, "reason": str(exc)}
                 )
-                joined["joinVerified"] = True
-                results.append(joined)
-                ok = bool(joined.get("joined") or joined.get("alreadyRunning"))
-        return {"ok": ok, "results": results}
+        return {"ok": True, "results": stopped}
 
     def _join_client(
         self,

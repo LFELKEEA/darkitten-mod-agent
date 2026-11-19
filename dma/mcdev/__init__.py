@@ -74,6 +74,26 @@ class McdevService:
         self._log = log or (lambda _text: None)
         self.launches.set_log(self._log)
 
+    def set_cancel(self, cancel: threading.Event | None) -> threading.Event:
+        """把当前任务的取消信号接到启动器/场景执行器上。
+
+        共享服务默认使用一个永远不触发的事件，必须由每次 Agent 运行显式绑定，
+        否则聊天里的“停止”只能停住模型请求，停不住正在等待就绪的开发端。
+        返回切换前的事件，便于运行结束后恢复。
+        """
+        previous = self._cancel
+        self._cancel = cancel or threading.Event()
+        self.launches.set_cancel(self._cancel)
+        return previous
+
+    def restore_cancel(
+        self, previous: threading.Event, current: threading.Event
+    ) -> None:
+        """运行结束时恢复取消信号；已被新一轮任务接管时不覆盖。"""
+        if self._cancel is not current:
+            return
+        self.set_cancel(previous)
+
     # ------------------------------------------------------------------
     def prepare(
         self,
@@ -110,6 +130,10 @@ class McdevService:
     def stop(self, side: str) -> dict:
         kinds = ["client", "server"] if side == "all" else [side]
         return {"ok": True, "results": [self.launches.stop(kind) for kind in kinds]}
+
+    def stop_started_since(self, since: float) -> dict:
+        """只停止某个时间点之后启动的开发端（用于取消一次任务）。"""
+        return self.launches.stop_started_since(since)
 
     def launch_status(self) -> dict:
         return self.launches.status()

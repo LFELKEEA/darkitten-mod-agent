@@ -707,6 +707,7 @@ class AgentWorker(QObject):
     assistant = Signal(str)
     pending_changed = Signal(object)
     artifact_changed = Signal(object)
+    design_request = Signal(object)
     project_created = Signal(str)
     done = Signal(str)
     failed = Signal(str)
@@ -747,6 +748,9 @@ class AgentWorker(QObject):
         self._read_offsets: dict[str, int] = {}
         self._native_disabled = False
         self._symbol_index = None
+        # 桌面端创建 worker 后会置为 True，用于弹出方案选择窗口；
+        # 无界面的调用（测试、脚本）默认自动采用第一个方案。
+        self.ui_available = False
 
     @property
     def cancelled(self) -> bool:
@@ -775,6 +779,9 @@ class AgentWorker(QObject):
 
     def _run(self) -> None:
         previous_cancel = netclient.bind_cancel(self._cancel)
+        # 共享的 mcdev 服务默认没有取消信号；不绑定的话，聊天里的“停止”
+        # 只能在工具返回后生效，启动开发端那段会一直等到超时。
+        previous_mcdev_cancel = self.mcdev.set_cancel(self._cancel)
         try:
             run = self._loop()
         except Exception as exc:
@@ -784,6 +791,7 @@ class AgentWorker(QObject):
             if not self.cancelled:
                 self.done.emit(run.text)
         finally:
+            self.mcdev.restore_cancel(previous_mcdev_cancel, self._cancel)
             netclient.restore_cancel(previous_cancel)
             self.finished.emit()
 
@@ -2126,6 +2134,8 @@ class AgentWorker(QObject):
                     self.project.root, progress=self._build_log
                 )
                 return studio_bridge.package_mod.summarize(report)
+            if name == "design_studio":
+                return self._execute_design(args)
             if name in CENTER_TOOLS:
                 return self._execute_center(name, args)
             if name in KERNEL_TOOLS:
@@ -2136,7 +2146,7 @@ class AgentWorker(QObject):
                 return self._execute_game(name, args)
             return (
                 f"未知工具：{name}。可用工具：list_files、read_file、search_text、write_file、"
-                "edit_file、pixel_art、scaffold_project、build_project、"
+                "edit_file、pixel_art、design_studio、scaffold_project、build_project、"
                 "studio_plan、studio_generate、studio_audit、studio_build、"
                 "studio_verify、studio_package、"
                 "read_skill、remember、recall、search_knowledge、read_knowledge、"
@@ -3234,6 +3244,146 @@ class AgentWorker(QObject):
         return f"未知的 mcdev 工具：{name}"
 
     # ------------------------------------------------------------------
+    def _execute_design(self, args: dict[str, Any]) -> str:
+        from . import designs
+
+        if self.project is None:
+            return "design_studio 需要先打开工程。"
+        root = self.project.root
+        action = str(args.get("action") or "generate").strip().lower()
+        try:
+            if action in {"generate", "create"}:
+                kind = str(args.get("kind") or "entity").strip().lower()
+                name = str(
+                    args.get("name")
+                    or args.get("target")
+                    or args.get("id")
+                    or "design"
+                ).strip()
+                description = str(
+                    args.get("description") or args.get("prompt") or ""
+                ).strip()
+                session = designs.create_session(
+                    root,
+                    kind=kind,
+                    name=name,
+                    description=description,
+                    namespace=str(
+                        args.get("namespace")
+                        or getattr(self.project.meta, "mod_id", "")
+                        or "modid"
+                    ),
+                    shape=str(args.get("shape") or ""),
+                    count=_arg_int(args, "count", 3),
+                    seed=_arg_int(args, "seed", 0),
+                )
+                self._progress_at = time.monotonic()
+                summary = session.summary()
+                if self.ui_available:
+                    self.status.emit(
+                        f"已生成 {len(session.variants)} 个方案，等待你选择…"
+                    )
+                    request = designs.DesignRequest(session, cancel=self._cancel)
+                    self.design_request.emit(request)
+                    choice = request.wait(timeout=1800)
+                    if choice.get("action") != "adopt":
+                        return json.dumps(
+                            {
+                                "ok": False,
+                                "cancelled": choice.get("action") == "cancel",
+                                "session": session.id,
+                                "variants": summary["variants"],
+                                "hint": (
+                                    "用户没有选定方案。不要自行假装已选定；"
+                                    "如需继续，请让用户再选一次或说明要改的描述。"
+                                ),
+                            },
+                            ensure_ascii=False,
+                            indent=2,
+                        )[:MAX_TOOL_RESULT]
+                    variant = str(choice.get("variant") or "")
+                else:
+                    variant = session.variants[0]["id"]
+                applied = designs.apply_variant(root, session, variant)
+                self.applied.extend(
+                    item for item in applied["written"] if item not in self.applied
+                )
+                self.status.emit(f"方案 {applied['variant']} 已写入工程资源")
+                return json.dumps(
+                    {
+                        "ok": True,
+                        "selected": applied["variant"],
+                        "label": applied["label"],
+                        "uploaded": applied["uploaded"],
+                        "applied": applied,
+                        "session": session.id,
+                        "variants": summary["variants"],
+                        "next": (
+                            "用户已经选定外观，贴图/模型/方块状态已写入工程。"
+                            "请继续完成注册代码、模型引用与语言文件；"
+                            "实体模型为 GeckoLib geo.json 时按项目现有依赖接线。"
+                        ),
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )[:MAX_TOOL_RESULT]
+            if action == "list":
+                session_id = str(args.get("session") or "").strip()
+                session = (
+                    designs.load_session(root, session_id)
+                    if session_id
+                    else designs.latest_session(root)
+                )
+                if session is None:
+                    return "还没有设计方案会话；先调用 design_studio generate。"
+                return json.dumps(session.summary(), ensure_ascii=False, indent=2)[
+                    :MAX_TOOL_RESULT
+                ]
+            if action == "apply":
+                session_id = str(args.get("session") or "").strip()
+                session = (
+                    designs.load_session(root, session_id)
+                    if session_id
+                    else designs.latest_session(root)
+                )
+                if session is None:
+                    return "找不到设计方案会话；先调用 design_studio generate。"
+                applied = designs.apply_variant(
+                    root, session, str(args.get("variant") or "A")
+                )
+                return json.dumps(applied, ensure_ascii=False, indent=2)[
+                    :MAX_TOOL_RESULT
+                ]
+            if action == "retexture":
+                session_id = str(args.get("session") or "").strip()
+                session = (
+                    designs.load_session(root, session_id)
+                    if session_id
+                    else designs.latest_session(root)
+                )
+                if session is None:
+                    return "找不到设计方案会话；先调用 design_studio generate。"
+                variant = session.retexture(
+                    str(args.get("variant") or "A"),
+                    extra=str(args.get("description") or ""),
+                )
+                applied = designs.apply_variant(root, session, variant["id"])
+                return json.dumps(
+                    {
+                        "ok": True,
+                        "retextured": variant["id"],
+                        "preview": str((session.dir / variant["preview"]).as_posix()),
+                        "applied": applied,
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )[:MAX_TOOL_RESULT]
+            return "design_studio action 只能是 generate / list / apply / retexture。"
+        except Exception as exc:  # noqa: BLE001 - 设计失败要带原因回模型
+            if self.cancelled:
+                raise AgentError("已取消") from exc
+            return f"design_studio 失败：{exc}"
+
     def _execute_game(self, name: str, args: dict[str, Any]) -> str:
         """AI 游戏控制：换语言、建存档、操作玩家、截图复盘、执行测试计划。"""
         from .mcdev import game as game_mod
@@ -3276,6 +3426,7 @@ class AgentWorker(QObject):
                     reload=bool(args.get("reload", True)),
                     port=port,
                     wait=number("wait", 20),
+                    cancel=self._cancel,
                 )
             elif name == "game_new_world":
                 result = game_mod.create_world(
@@ -3291,13 +3442,17 @@ class AgentWorker(QObject):
                     bonus_chest=bool(args.get("bonusChest", False)),
                     port=port,
                     wait=number("wait", 120),
+                    cancel=self._cancel,
                 )
             elif name == "game_setup":
                 game_mod.ensure_ready(port)
                 code = str(args.get("code") or args.get("language") or "zh_cn")
                 result: dict[str, Any] = {
                     "language": game_mod.set_language(
-                        code, port=port, wait=number("lang_wait", 20)
+                        code,
+                        port=port,
+                        wait=number("lang_wait", 20),
+                        cancel=self._cancel,
                     )
                 }
                 world_arg = args.get("world", True)
@@ -3325,6 +3480,7 @@ class AgentWorker(QObject):
                         bonus_chest=bool(world.get("bonusChest", False)),
                         port=port,
                         wait=number("world_wait", number("wait", 120)),
+                        cancel=self._cancel,
                     )
                 result["status"] = game_mod.ensure_ready(port)
             elif name == "game_control":
@@ -3354,6 +3510,7 @@ class AgentWorker(QObject):
                     raw_steps,
                     port=port,
                     continue_on_error=bool(args.get("continue_on_error")),
+                    cancel=self._cancel,
                 )
             else:
                 return f"未知的游戏控制工具：{name}"

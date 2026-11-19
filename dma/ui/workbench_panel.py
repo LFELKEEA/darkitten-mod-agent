@@ -37,6 +37,8 @@ class RunPanel(QWidget):
         layout.addLayout(head)
 
         self._probe_support = True
+        self._agent_busy = False
+        self._busy = False
         self.hint = tiny(
             "启动的是真实开发端。Forge 1.20.1 首次运行会先编译并安装开发探针，可能要几分钟。"
         )
@@ -94,9 +96,16 @@ class RunPanel(QWidget):
                 "请用任务日志、mcdev_run_dump 的启动日志和 GameTest 判断结果。"
             )
 
-    def set_busy(self, busy: bool, text: str = "") -> None:
+    def set_agent_busy(self, busy: bool) -> None:
+        """对话任务运行期间只锁启动按钮；停止/刷新仍要可用。"""
+        self._agent_busy = bool(busy)
         for button in (self.server_btn, self.only_server_btn, self.client_btn):
-            button.setEnabled(not busy)
+            button.setEnabled(not busy and not self._busy)
+
+    def set_busy(self, busy: bool, text: str = "") -> None:
+        self._busy = bool(busy)
+        for button in (self.server_btn, self.only_server_btn, self.client_btn):
+            button.setEnabled(not busy and not self._agent_busy)
         self.state_label.setText(text or ("启动中…" if busy else "未启动"))
         if busy:
             self.hint.setText(

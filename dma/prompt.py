@@ -170,6 +170,10 @@ TOOL_PROTOCOL = """【工程工具协议】
 - texture_template 取内置 16x16 像素模板: {"tool":"texture_template","name":"sword"}
   // 可用模板：sword / pickaxe / axe / shovel / hoe / ingot / gem / dust / stick / block / torch / bowl
   // 返回 rows（字符点阵）、palette（调色板）与 note；换色后交给 pixel_art 生成 PNG
+- design_studio 给生物/物品图标/方块出多个方案并让用户挑: {"tool":"design_studio","action":"generate","kind":"entity","name":"ember_cat","description":"火焰猫，红色毛发，绿色眼睛，长尾巴","namespace":"<modid>","count":3}
+  // 用户在窗口里可以选方案、补描述重新生成、只改图案或上传自己的 PNG/模型
+  // 选定后会直接把 texture/model/blockstate 写进工程，返回 applied.written；按返回的路径继续写注册代码
+  // 已取消或没选时不要假装选定；需要再选可再用 list / apply / retexture 指定 session 与 variant
 - model_json 生成物品/方块模型 JSON: {"tool":"model_json","kind":"item","parent":"item/generated","textures":{"layer0":"<modid>:item/gem"}}
   // kind: block / item；block 可传 elements / display 生成 3D 模型
 - blockstate_json 生成 blockstates JSON: {"tool":"blockstate_json","variants":{"":{"model":"<modid>:block/gem_block"}}}
@@ -330,8 +334,11 @@ AI 游戏控制（Forge 1.20.1 开发客户端；先 mcdev_prepare kind=both 或
     也不要把 Forge 1.20.1 的写法直接套到 Fabric / NeoForge。
 11. 依赖 jar 不需要让用户手动搬：放进工程的 libs/，build.gradle 里用 `compileOnly files('libs/xxx.jar')`；
     缺少 Gradle Wrapper 时用 scaffold_project 重新生成对应加载器骨架，不要改系统环境变量。
-12. 纹理、图标、GUI 优先用 pixel_art 生成 PNG；3D 模型写 Minecraft 模型 JSON（elements / faces / display），
-    不要声称能直接生成 .obj / .fbx。
+12. 新建生物实体、物品图标、方块外观时，先调用 design_studio generate 让用户挑方案：
+    用户可以选一套、补描述重新生成、保留模型只改图案，或上传自己的 PNG / 模型。
+    选定后按返回的 applied.written 继续接线；不要在用户没选之前用 pixel_art 私自定稿。
+    其余纹理、GUI 和程序化贴图用 pixel_art；3D 模型写 Minecraft 模型 JSON（elements / faces / display），
+    不要声称能直接生成 .obj / .fbx。design_studio 的实体模型是 GeckoLib geo.json 起始模型。
 13. 写代码前先读目标文件；优先官方事件/API，必须用 Mixin 时按 mixin-safety 标注风险。
 14. 需要验证运行时行为时，不要只说“让用户自己进游戏试”：先 build_project，再 mcdev_prepare，
     然后按工程能力选择验证方式：

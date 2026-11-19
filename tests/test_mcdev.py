@@ -220,6 +220,64 @@ class ProbeClientTests(unittest.TestCase):
             mcdev.probe.probe_json("client", "/status", port=1, timeout=0.5)
 
 
+class LaunchCancelTests(unittest.TestCase):
+    """验证“停止”能把取消信号送到启动器，并且只清理本次启动的进程。"""
+
+    def test_set_cancel_switches_event(self) -> None:
+        manager = mcdev_process.LaunchManager()
+        mine = threading.Event()
+        previous = manager.set_cancel(mine)
+        self.assertFalse(previous.is_set())
+        self.assertFalse(manager._cancelled())
+        mine.set()
+        self.assertTrue(manager._cancelled())
+
+    def test_stop_started_since_skips_older_entries(self) -> None:
+        manager = mcdev_process.LaunchManager()
+        old = mcdev_process.LaunchEntry(
+            kind="server",
+            project_dir=".",
+            pid=1,
+            port=39001,
+            log_path="",
+            started_at=100.0,
+        )
+        new = mcdev_process.LaunchEntry(
+            kind="client",
+            project_dir=".",
+            pid=2,
+            port=39002,
+            log_path="",
+            started_at=200.0,
+        )
+        manager._entries = {"server": old, "client": new}
+        stopped: list[str] = []
+        manager.stop = lambda kind: stopped.append(kind) or {  # type: ignore[method-assign]
+            "kind": kind,
+            "stopped": True,
+        }
+        manager.stop_started_since(150.0)
+        self.assertEqual(stopped, ["client"])
+
+    def test_service_bind_and_restore_cancel(self) -> None:
+        service = mcdev.McdevService()
+        mine = threading.Event()
+        previous = service.set_cancel(mine)
+        self.assertIs(service._cancel, mine)
+        self.assertIs(service.launches._cancel, mine)
+        service.restore_cancel(previous, mine)
+        self.assertIsNot(service._cancel, mine)
+
+    def test_restore_does_not_steal_new_binding(self) -> None:
+        service = mcdev.McdevService()
+        first = threading.Event()
+        previous = service.set_cancel(first)
+        second = threading.Event()
+        service.set_cancel(second)
+        service.restore_cancel(previous, first)
+        self.assertIs(service._cancel, second)
+
+
 class GameControlTests(unittest.TestCase):
     """用本地假探针验证语言/存档/观察/测试编排，不启动真实游戏。"""
 
@@ -444,6 +502,18 @@ class GameControlTests(unittest.TestCase):
         self.assertEqual(result["difficulty"], "normal")
         self.assertEqual(result["difficultyChanged"], "normal")
         self.assertEqual(len(self.state["nearby"]), 2)
+
+    def test_run_test_stops_when_cancelled(self) -> None:
+        event = threading.Event()
+        event.set()
+        result = game.run_test(
+            [{"type": "control", "action": "state"}],
+            port=self.port,
+            cancel=event,
+        )
+        self.assertFalse(result["ok"])
+        self.assertEqual(len(result["steps"]), 1)
+        self.assertIn("已取消", result["steps"][0]["error"])
 
     def test_run_test_supports_difficulty_time_and_spawn(self) -> None:
         self.state["in_world"] = True

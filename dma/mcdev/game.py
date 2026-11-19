@@ -14,6 +14,7 @@ import math
 import os
 import re
 import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Any, Iterable
@@ -23,6 +24,10 @@ from . import probe
 
 class GameError(RuntimeError):
     """游戏控制失败：探针未启动、端点报错或等待超时。"""
+
+
+def _cancelled(cancel: threading.Event | None) -> bool:
+    return cancel is not None and cancel.is_set()
 
 
 # ----------------------------------------------------------------------
@@ -97,6 +102,7 @@ def set_language(
     reload: bool = True,
     port: int | None = None,
     wait: float = 20.0,
+    cancel: threading.Event | None = None,
 ) -> dict:
     wanted = normalize_language(code)
     data = _data(
@@ -109,6 +115,9 @@ def set_language(
     # 资源重载是异步的；等 selected 真正落到目标语言再返回，避免下一步截图还是英文。
     deadline = time.time() + max(0.0, wait)
     while time.time() < deadline:
+        if _cancelled(cancel):
+            data["cancelled"] = True
+            return data
         try:
             current = _data("/language", port=port, timeout=5.0)
         except GameError:
@@ -140,6 +149,7 @@ def create_world(
     bonus_chest: bool = False,
     port: int | None = None,
     wait: float = 120.0,
+    cancel: threading.Event | None = None,
 ) -> dict:
     payload = {
         "name": str(name or "AI 测试").strip() or "AI 测试",
@@ -159,6 +169,10 @@ def create_world(
         return data
     deadline = time.time() + max(10.0, wait)
     while time.time() < deadline:
+        if _cancelled(cancel):
+            data["cancelled"] = True
+            data["inWorld"] = False
+            return data
         try:
             status = _data("/status", port=port, timeout=5.0)
         except GameError:
@@ -175,10 +189,19 @@ def create_world(
     return data
 
 
-def wait_world(*, port: int | None = None, timeout: float = 120.0) -> dict:
+def wait_world(
+    *,
+    port: int | None = None,
+    timeout: float = 120.0,
+    cancel: threading.Event | None = None,
+) -> dict:
     deadline = time.time() + max(5.0, timeout)
     last: dict = {}
     while time.time() < deadline:
+        if _cancelled(cancel):
+            last["cancelled"] = True
+            last["ready"] = False
+            return last
         try:
             last = _data("/status", port=port, timeout=5.0)
         except GameError:
@@ -984,6 +1007,7 @@ def run_test(
     *,
     port: int | None = None,
     continue_on_error: bool = False,
+    cancel: threading.Event | None = None,
 ) -> dict:
     plan = [item for item in (steps or []) if isinstance(item, dict)]
     if not plan:
@@ -992,6 +1016,17 @@ def run_test(
     context: dict[str, Any] = {"steps": results}
     ok = True
     for index, step in enumerate(plan):
+        if _cancelled(cancel):
+            results.append(
+                {
+                    "index": index,
+                    "type": str(step.get("type") or ""),
+                    "ok": False,
+                    "error": "已取消",
+                }
+            )
+            ok = False
+            break
         kind = str(step.get("type") or "control").strip().lower()
         record: dict[str, Any] = {"index": index, "type": kind}
         context["last"] = results[-1]["data"] if results else None

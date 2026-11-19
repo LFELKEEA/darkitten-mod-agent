@@ -33,6 +33,7 @@ from ..agent import (
     strip_tool_blocks,
 )
 from ..prompt import initial_project_request, requirement_form_text
+from .design_dialog import DesignPickerDialog
 from .widgets import ChatView, NewProjectDialog, TextPreviewDialog, card, tiny
 from .workbench_panel import ArtifactPanel, RunPanel
 
@@ -51,6 +52,7 @@ class ChatPage(QWidget):
         self._stopping = False
         self._abandoned: list[AgentWorker] = []
         self._pending: list[PendingFile] = []
+        self._run_started_at = 0.0
         self.artifact_jars: list[dict] = []
         self.artifact_summary = ""
         self._launch_thread: threading.Thread | None = None
@@ -414,6 +416,20 @@ class ChatPage(QWidget):
         if self.artifact_jars:
             self.side_tabs.setCurrentIndex(2)
 
+    def _on_design_request(self, request) -> None:
+        """Agent 生成候选方案后，在界面线程里让用户挑选。"""
+        if self._worker is None or self._worker.cancelled:
+            request.submit({"action": "cancel", "reason": "任务已停止"})
+            return
+        self.main.status("等待你选择设计方案…")
+        dialog = DesignPickerDialog(request, self)
+        dialog.exec()
+        choice = request.result or {}
+        if choice.get("action") == "adopt":
+            self.main.status(f"已选定方案 {choice.get('variant')}")
+        else:
+            self.main.status("已取消方案选择")
+
     def _open_artifact_folder(self) -> None:
         if self.project is None:
             return
@@ -709,14 +725,17 @@ class ChatPage(QWidget):
             self._on_failed(f"启动失败：{exc}")
             return
         self._worker = worker
+        worker.ui_available = True
         worker.status.connect(self.main.status)
         worker.assistant.connect(self._on_assistant)
         worker.pending_changed.connect(self._set_pending)
         worker.artifact_changed.connect(self._on_artifact_changed)
+        worker.design_request.connect(self._on_design_request)
         worker.project_created.connect(self.open_project_path)
         worker.done.connect(lambda text, w=worker: self._on_worker_done(w, text))
         worker.failed.connect(lambda text, w=worker: self._on_worker_failed(w, text))
         worker.finished.connect(lambda w=worker: self._on_worker_finished(w))
+        self._run_started_at = time.time()
         self._set_running(True)
         try:
             worker.start()
@@ -735,7 +754,8 @@ class ChatPage(QWidget):
         self.continue_btn.setEnabled(not running)
         self.auto_apply_box.setEnabled(not running)
         self.auto_build_box.setEnabled(not running and bool(self.main.config.auto_apply))
-        self.run_panel.setEnabled(not running)
+        # 运行面板不能整体禁用：任务卡住时用户仍要能用“停止全部”收掉游戏进程。
+        self.run_panel.set_agent_busy(running)
         if running:
             self._busy_started = time.time()
             self._busy_timer.start()
@@ -815,16 +835,39 @@ class ChatPage(QWidget):
 
     def _stop(self) -> None:
         if self._worker is None:
+            if any(worker.alive for worker in self._abandoned):
+                # 已经放弃等待但后台线程还没退干净时，至少把这次任务启动的
+                # 开发端收掉，避免“点了停止，游戏还在跑”。
+                self._stop_run_processes()
+                self.main.status("已再次请求停止本次任务启动的开发端。")
             return
         if self._stopping:
             self._abandon_worker()
             return
         self._stopping = True
         self._worker.cancel()
-        self.main.status("正在停止…（如果卡在系统调用里，再点一次“停止”可放弃等待）")
+        self.main.status(
+            "正在停止…（正在等待模型、编译或开发端启动的调用会尽快退出；"
+            "再点一次“停止”可放弃等待）"
+        )
         self.stop_btn.setEnabled(True)
         self.stop_btn.setText("再点一次放弃等待")
         self._tick_busy()
+
+    def _stop_run_processes(self) -> None:
+        """后台清理本次任务启动的开发端，不阻塞界面。"""
+        started = self._run_started_at
+        if not started:
+            return
+        service = mcdev.shared()
+
+        def work() -> None:
+            try:
+                service.stop_started_since(started)
+            except Exception:  # noqa: BLE001 - 清理失败不能影响界面
+                return
+
+        threading.Thread(target=work, daemon=True, name="chat-stop-processes").start()
 
     def _abandon_worker(self) -> None:
         """停止请求迟迟不返回时，放弃等待后台线程，先把界面释放出来。
@@ -844,9 +887,10 @@ class ChatPage(QWidget):
         self._abandoned.append(worker)
         self._abandoned = self._abandoned[-4:]
         self._set_running(False)
+        self._stop_run_processes()
         self.main.status(
-            "已放弃等待后台任务。它可能仍会短暂占用网络/编译资源，"
-            "完成后不会写入当前对话。"
+            "已放弃等待后台任务，并清理本次任务启动的开发端。"
+            "后台线程会自行退出，完成后不会写入当前对话。"
         )
 
     # ------------------------------------------------------------------

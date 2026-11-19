@@ -39,6 +39,16 @@ QFrame#CardSoft {{
     border: 1px solid {c['line']};
     border-radius: 10px;
 }}
+QFrame#PickCard {{
+    background: {c['card_soft']};
+    border: 1px solid {c['line']};
+    border-radius: 10px;
+}}
+QFrame#PickCard:hover {{ border-color: {c['accent']}; }}
+QFrame#PickCard[selected="true"] {{
+    border: 2px solid {c['accent']};
+    background: #2a2745;
+}}
 QLabel#H1 {{ font-size: {font_size + 10}px; font-weight: 700; }}
 QLabel#H2 {{ font-size: {font_size + 3}px; font-weight: 600; }}
 QLabel#Tiny {{ color: {c['muted']}; font-size: {max(11, font_size - 2)}px; }}
