@@ -2,7 +2,16 @@
 
 只写 Minecraft Java 模组的桌面 Agent。界面用 PySide6，内置对话工作台、技能、连接器、知识库与反编译能力。模组开发闭环来自 [yan-mc/minecraft-mod-dev](https://github.com/yan-mc/minecraft-mod-dev)：真实开发端启动、回环 HTTP 探针、场景卡片断言和 GameTest。
 
-当前版本：`3.4.4`
+当前版本：`3.4.5`
+
+## 3.4.5 修正测试难度：敌对生物能刷出来了
+
+3.4.4 的默认存档难度是 `peaceful`，结果新建存档后根本不生成敌对生物，测怪物、夜间行为和伤害都无从谈起。3.4.5 修正并补齐这条链路：
+
+- **默认难度改为 `normal`**：`game_setup`、`game_new_world`、`game_test` 的存档步骤都改了；显式传 `peaceful` 时会在结果里返回提示。
+- **新增世界动作**：`game_control` 支持 `difficulty` / `gamemode` / `time` / `weather` / `spawn`，切换后会回读玩家状态确认生效，失败直接报错而不是静默继续。
+- **生成实体**：`spawn` 按实体 ID 在玩家周围生成（1-32 个，可调距离和散布），生成后回读附近实体核对；如果当前是 `peaceful` 会自动先把难度提到 `normal`，避免怪物刚出现就消失。
+- **测试步骤**：`game_test` 新增 `difficulty` / `gamemode` / `time` / `weather` / `spawn`，可以直接编排“夜晚 + 生存 + 生成僵尸 + 攻击 + 截图”的敌对生物测试。
 
 ## 3.4.4 AI 接管游戏：换中文、建存档、操作与截图复盘
 

@@ -22,6 +22,9 @@ BUILD = ROOT / "build"
 APP_DIST = DIST / "DarkittenModAgent"
 ZIP_NAME = f"DarkittenModAgent-{APP_VERSION}.zip"
 NOTES = [
+    "修正测试环境难度：game_setup / game_new_world / game_test 的默认难度由 peaceful 改为 normal，避免新建存档后根本不生成敌对生物；显式传 peaceful 仍会返回提示。",
+    "新增 game_control 动作 difficulty / gamemode / time / weather / spawn；spawn 在 peaceful 下自动把难度提到 normal，并在玩家周围生成实体后回读附近实体确认。",
+    "game_test 新增 difficulty / gamemode / time / weather / spawn 步骤，可直接编写“夜晚 + 生存 + 生成僵尸 + 攻击 + 截图”的敌对生物测试。",
     "AI 接管游戏：新增 game_setup / game_control / game_observe / game_test 等 6 个工具，可换中文、新建存档、控制视角/移动/按键/攻击/使用/挖掘/聊天/命令、按文字点击，并在每次操作后截图做画面体检。",
     "Forge 1.20.1 探针新增语言、存档、玩家状态/移动/按键/攻击、聊天、界面文字点击与输入等端点；存档用原版 WorldOpenFlows.createFreshLevel，支持普通/超平坦/放大/大型生物群系/单一生物群系。",
     "跨加载器兜底：客户端启动前自动把 options.txt 的 lang 设为 zh_cn；没有探针的加载器可按窗口截图看画面，但控制与断言仍只在 Forge 1.20.1 可用。工具总数 101。",

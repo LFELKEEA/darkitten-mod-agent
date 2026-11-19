@@ -224,7 +224,15 @@ class GameControlTests(unittest.TestCase):
     """用本地假探针验证语言/存档/观察/测试编排，不启动真实游戏。"""
 
     def setUp(self) -> None:
-        state = {"language": "en_us", "in_world": False, "posts": []}
+        state = {
+            "language": "en_us",
+            "in_world": False,
+            "posts": [],
+            "difficulty": "peaceful",
+            "dayTime": 1000,
+            "gameMode": "creative",
+            "nearby": [],
+        }
 
         class Handler(BaseHTTPRequestHandler):
             def _send(self, data):
@@ -269,6 +277,10 @@ class GameControlTests(unittest.TestCase):
                             "y": 64.0,
                             "z": 0.5,
                             "health": 20.0,
+                            "difficulty": state["difficulty"],
+                            "dayTime": state["dayTime"],
+                            "gameMode": state["gameMode"],
+                            "nearby": state["nearby"],
                         }
                     )
                 elif path == "/ui/snapshot":
@@ -322,6 +334,20 @@ class GameControlTests(unittest.TestCase):
                     )
                 elif path == "/player/key":
                     self._send({"pressed": True, "key": payload.get("key")})
+                elif path == "/command":
+                    cmd = str(payload.get("cmd") or "").lstrip("/")
+                    if cmd.startswith("difficulty "):
+                        state["difficulty"] = cmd.split(" ", 1)[1].strip()
+                    elif cmd.startswith("time set "):
+                        state["dayTime"] = int(cmd.split(" ", 2)[2])
+                    elif cmd.startswith("gamemode "):
+                        state["gameMode"] = cmd.split(" ", 1)[1].strip()
+                    elif cmd.startswith("summon "):
+                        entity = cmd.split(" ", 2)[1]
+                        state["nearby"].append(
+                            {"id": len(state["nearby"]) + 1, "type": entity, "name": entity}
+                        )
+                    self._send({"sent": True, "cmd": cmd})
                 else:
                     self._send({"echo": payload})
 
@@ -392,6 +418,47 @@ class GameControlTests(unittest.TestCase):
         self.assertEqual(result["executed"], 2)
         self.assertFalse(result["steps"][-1]["ok"])
         self.assertIn("断言失败", result["steps"][-1]["error"])
+
+    def test_set_difficulty_verifies_change(self) -> None:
+        self.state["in_world"] = True
+        result = game.set_difficulty("normal", port=self.port, wait=2)
+        self.assertTrue(result["verified"])
+        self.assertEqual(self.state["difficulty"], "normal")
+
+    def test_set_time_and_gamemode(self) -> None:
+        self.state["in_world"] = True
+        time_result = game.set_time("night", port=self.port, wait=2)
+        self.assertTrue(time_result["verified"])
+        self.assertEqual(self.state["dayTime"], 13000)
+        mode_result = game.set_gamemode("survival", port=self.port, wait=2)
+        self.assertTrue(mode_result["verified"])
+        self.assertEqual(self.state["gameMode"], "survival")
+
+    def test_spawn_raises_peaceful_to_normal(self) -> None:
+        self.state["in_world"] = True
+        result = game.spawn(
+            "minecraft:zombie", count=2, distance=4, port=self.port
+        )
+        self.assertEqual(result["spawned"], 2)
+        self.assertTrue(result["verified"])
+        self.assertEqual(result["difficulty"], "normal")
+        self.assertEqual(result["difficultyChanged"], "normal")
+        self.assertEqual(len(self.state["nearby"]), 2)
+
+    def test_run_test_supports_difficulty_time_and_spawn(self) -> None:
+        self.state["in_world"] = True
+        result = game.run_test(
+            [
+                {"type": "difficulty", "difficulty": "normal"},
+                {"type": "time", "time": "night"},
+                {"type": "gamemode", "gamemode": "survival"},
+                {"type": "spawn", "mob": "minecraft:zombie", "count": 1},
+                {"type": "assert", "path": "last.verified", "op": "eq", "value": True},
+            ],
+            port=self.port,
+        )
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["executed"], 5)
 
     def test_ensure_ready_reports_missing_probe(self) -> None:
         with self.assertRaises(game.GameError):

@@ -3281,7 +3281,7 @@ class AgentWorker(QObject):
                 result = game_mod.create_world(
                     str(args.get("name") or "AI 测试"),
                     gamemode=str(args.get("gamemode") or "creative"),
-                    difficulty=str(args.get("difficulty") or "peaceful"),
+                    difficulty=str(args.get("difficulty") or "normal"),
                     world_type=str(
                         args.get("world_type") or args.get("worldType") or "normal"
                     ),
@@ -3309,7 +3309,7 @@ class AgentWorker(QObject):
                             world.get("gamemode") or args.get("gamemode") or "creative"
                         ),
                         difficulty=str(
-                            world.get("difficulty") or args.get("difficulty") or "peaceful"
+                            world.get("difficulty") or args.get("difficulty") or "normal"
                         ),
                         world_type=str(
                             world.get("worldType")

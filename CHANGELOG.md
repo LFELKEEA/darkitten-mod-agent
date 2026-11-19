@@ -1,5 +1,20 @@
 # Changelog
 
+## 3.4.5 — 2026-11-19
+
+修正 3.4.4 的测试环境缺陷：默认 `peaceful` 难度不会生成敌对生物，导致无法测试怪物、夜间行为与伤害。
+
+- **默认难度**：`create_world`、`game_setup`、`game_new_world`、`game_test` 的 `world` 步骤默认难度从 `peaceful` 改为 `normal`；显式传 `peaceful` 时结果里附带提示。
+- **世界动作** `game_control` 新增：
+  - `difficulty`：`/difficulty` 后回读 `state.difficulty`，未生效直接报错（通常是没有开作弊）。
+  - `gamemode`：切换到 survival / creative / adventure / spectator，回读 `gameMode` 确认；测怪物伤害需要 survival。
+  - `time`：支持 `day` / `noon` / `night` / `midnight` / `sunrise` 或 0-23999 刻，回读 `dayTime` 确认。
+  - `weather`：clear / rain / thunder，可选持续秒数；探针不暴露天气，返回 `verified=false` 并说明。
+  - `spawn`：按实体 ID 在玩家周围生成 1-32 个实体，可调距离与散布；生成后扫描附近实体并按类型核对。处于 `peaceful` 时会先把难度提升到 `normal`，避免怪物立即消失。
+- **测试步骤**：`game_test` 新增 `difficulty` / `gamemode` / `time` / `weather` / `spawn`，可直接编排敌对生物测试。
+- **提示词与工具描述**：补充“测敌对生物不要用 peaceful”的规则和完整示例，`game_control` 增加 `mob` / `count` / `distance` / `spread` / `time` / `weather` / `duration` 参数。
+- **回归测试**：扩展本地假探针，覆盖难度切换、时间/模式切换、peaceful 自动抬难度生成、测试步骤编排。
+
 ## 3.4.4 — 2026-11-19
 
 让 Agent 直接进开发客户端操作，并用截图复盘，不再停在“编译通过”。

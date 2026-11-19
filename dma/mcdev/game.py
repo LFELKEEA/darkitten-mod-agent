@@ -1,8 +1,8 @@
 """AI 游戏控制层。
 
 在已启动的 Forge 1.20.1 开发客户端（探针 39002）上执行：
-换语言、新建存档、读取画面/玩家/UI 状态、移动视角与角色、按键、攻击/使用/挖掘、
-聊天与命令、按文字点击界面、截图并做确定性画面体检。
+换语言、新建存档、切换难度/时间/天气/模式、生成实体、读取画面/玩家/UI 状态、
+移动视角与角色、按键、攻击/使用/挖掘、聊天与命令、按文字点击界面、截图并做确定性画面体检。
 
 这一层只负责把探针端点串成可编排的动作，具体判定仍交给 Agent 的测试步骤。
 """
@@ -10,7 +10,9 @@
 from __future__ import annotations
 
 import json
+import math
 import os
+import re
 import tempfile
 import time
 from pathlib import Path
@@ -130,7 +132,7 @@ def create_world(
     name: str = "AI 测试",
     *,
     gamemode: str = "creative",
-    difficulty: str = "peaceful",
+    difficulty: str = "normal",
     world_type: str = "normal",
     seed: str = "",
     cheats: bool = True,
@@ -142,7 +144,7 @@ def create_world(
     payload = {
         "name": str(name or "AI 测试").strip() or "AI 测试",
         "gamemode": str(gamemode or "creative").strip().lower(),
-        "difficulty": str(difficulty or "peaceful").strip().lower(),
+        "difficulty": str(difficulty or "normal").strip().lower(),
         "worldType": str(world_type or "normal").strip().lower(),
         "seed": str(seed or ""),
         "cheats": bool(cheats),
@@ -150,6 +152,8 @@ def create_world(
         "bonusChest": bool(bonus_chest),
     }
     data = _data("/world/create", method="POST", payload=payload, port=port, timeout=120.0)
+    if payload["difficulty"] == "peaceful":
+        data["warning"] = "peaceful 难度不会生成敌对生物；要测怪物请用 normal / easy / hard。"
     # 已经是存档里就不重复建，交给调用方决定是否先退出。
     if not data.get("created"):
         return data
@@ -462,6 +466,222 @@ def command(cmd: str, *, port: int | None = None) -> dict:
     return _data("/command", method="POST", payload={"cmd": text}, port=port)
 
 
+# ----------------------------------------------------------------------
+# 世界参数与实体
+# ----------------------------------------------------------------------
+_DIFFICULTIES = ("peaceful", "easy", "normal", "hard")
+_GAMEMODES = ("survival", "creative", "adventure", "spectator")
+_TIME_ALIASES = {
+    "day": 1000,
+    "noon": 6000,
+    "night": 13000,
+    "midnight": 18000,
+    "sunrise": 23000,
+}
+_WEATHERS = ("clear", "rain", "thunder")
+_ENTITY_RE = re.compile(r"^[a-z0-9_.-]+(?::[a-z0-9_./-]+)?$")
+
+
+def _wait_state(predicate, *, port: int | None, wait: float) -> dict:
+    """轮询玩家状态，直到 predicate 成立或超时。"""
+    deadline = time.time() + max(0.5, float(wait))
+    last: dict = {}
+    while True:
+        try:
+            last = state(radius=1, port=port)
+        except GameError:
+            last = {}
+        if predicate(last):
+            return last
+        if time.time() >= deadline:
+            return last
+        time.sleep(0.25)
+
+
+def set_difficulty(
+    mode: str = "normal", *, port: int | None = None, wait: float = 5.0
+) -> dict:
+    name = str(mode or "normal").strip().lower()
+    if name not in _DIFFICULTIES:
+        raise GameError(f"未知难度：{mode}。可用：{', '.join(_DIFFICULTIES)}")
+    command(f"difficulty {name}", port=port)
+    current = _wait_state(
+        lambda item: str(item.get("difficulty") or "") == name, port=port, wait=wait
+    )
+    actual = str(current.get("difficulty") or "")
+    if actual != name:
+        raise GameError(
+            f"切换难度到 {name} 未生效（当前 {actual or '未知'}）。"
+            "确认存档开启作弊（cheats=true），否则 /difficulty 命令会被拒绝。"
+        )
+    return {"difficulty": name, "verified": True}
+
+
+def set_gamemode(
+    mode: str = "creative", *, port: int | None = None, wait: float = 5.0
+) -> dict:
+    name = str(mode or "creative").strip().lower()
+    if name not in _GAMEMODES:
+        raise GameError(f"未知游戏模式：{mode}。可用：{', '.join(_GAMEMODES)}")
+    command(f"gamemode {name}", port=port)
+    current = _wait_state(
+        lambda item: str(item.get("gameMode") or "").lower() == name,
+        port=port,
+        wait=wait,
+    )
+    actual = str(current.get("gameMode") or "")
+    if actual.lower() != name:
+        raise GameError(
+            f"切换模式到 {name} 未生效（当前 {actual or '未知'}）。"
+            "确认存档开启作弊。"
+        )
+    return {"gameMode": name, "verified": True}
+
+
+def _parse_time(value: object) -> int:
+    if isinstance(value, bool):
+        raise GameError("时间值不能是布尔值。")
+    if isinstance(value, (int, float)):
+        ticks = int(value)
+    else:
+        text = str(value or "").strip().lower()
+        if text in _TIME_ALIASES:
+            ticks = _TIME_ALIASES[text]
+        else:
+            try:
+                ticks = int(text)
+            except ValueError as exc:
+                aliases = "、".join(_TIME_ALIASES)
+                raise GameError(
+                    f"未知时间：{value}。可用 {aliases}，或 0-23999 的刻数。"
+                ) from exc
+    return ticks % 24000
+
+
+def set_time(
+    value: object = "night", *, port: int | None = None, wait: float = 5.0
+) -> dict:
+    ticks = _parse_time(value)
+
+    def reached(item: dict) -> bool:
+        try:
+            current = int(item.get("dayTime") or 0) % 24000
+        except (TypeError, ValueError):
+            return False
+        diff = abs(current - ticks)
+        return min(diff, 24000 - diff) <= 800
+
+    command(f"time set {ticks}", port=port)
+    current = _wait_state(reached, port=port, wait=wait)
+    if not reached(current):
+        raise GameError(
+            f"设置时间到 {ticks} 未生效。确认存档开启作弊，且客户端已进入世界。"
+        )
+    return {"time": ticks, "dayTime": current.get("dayTime"), "verified": True}
+
+
+def set_weather(
+    kind: str = "clear", *, duration: int | None = None, port: int | None = None
+) -> dict:
+    name = str(kind or "clear").strip().lower()
+    if name not in _WEATHERS:
+        raise GameError(f"未知天气：{kind}。可用：{', '.join(_WEATHERS)}")
+    cmd = f"weather {name}"
+    seconds: int | None = None
+    if duration is not None and str(duration).strip() != "":
+        try:
+            seconds = int(duration)
+        except (TypeError, ValueError) as exc:
+            raise GameError(f"天气持续秒数不合法：{duration}") from exc
+        if seconds <= 0:
+            raise GameError("天气持续秒数必须大于 0。")
+        cmd += f" {seconds}"
+    command(cmd, port=port)
+    return {
+        "weather": name,
+        "duration": seconds,
+        "sent": True,
+        "verified": False,
+        "note": "探针没有暴露天气字段，用画面或日志确认。",
+    }
+
+
+def _entity_id(entity: object) -> str:
+    text = str(entity or "minecraft:zombie").strip().lower()
+    if not text or not _ENTITY_RE.match(text):
+        raise GameError(f"实体 ID 不合法：{entity}")
+    return text if ":" in text else f"minecraft:{text}"
+
+
+def spawn(
+    entity: object = "minecraft:zombie",
+    *,
+    count: int = 1,
+    distance: float = 3.0,
+    spread: float = 1.0,
+    difficulty: str | None = None,
+    port: int | None = None,
+) -> dict:
+    """在玩家周围生成实体；peaceful 下自动把难度提到 normal。"""
+    eid = _entity_id(entity)
+    try:
+        amount = max(1, min(int(count), 32))
+    except (TypeError, ValueError) as exc:
+        raise GameError(f"生成数量不合法：{count}") from exc
+    try:
+        radius = max(1.0, min(float(distance), 16.0))
+        jitter = max(0.0, min(float(spread), 8.0))
+    except (TypeError, ValueError) as exc:
+        raise GameError(f"生成距离不合法：{distance}") from exc
+
+    before = state(radius=1, port=port)
+    current_diff = str(before.get("difficulty") or "").lower()
+    wanted = str(difficulty or "").strip().lower()
+    if wanted and wanted not in _DIFFICULTIES:
+        raise GameError(f"未知难度：{difficulty}。可用：{', '.join(_DIFFICULTIES)}")
+    if not wanted and current_diff == "peaceful":
+        # 和平难度会让敌对生物立刻消失，测怪物时先抬到 normal。
+        wanted = "normal"
+    changed = ""
+    if wanted and wanted != current_diff:
+        set_difficulty(wanted, port=port)
+        changed = wanted
+
+    for index in range(amount):
+        if amount == 1:
+            dx, dz = 0.0, radius
+        else:
+            angle = 2.0 * math.pi * index / amount
+            dx = math.cos(angle) * radius
+            dz = math.sin(angle) * radius
+        command(f"summon {eid} ~{dx:.2f} ~ ~{dz:.2f}", port=port)
+    time.sleep(max(0.3, jitter * 0.1))
+
+    scan_radius = max(6, int(radius + jitter + 3))
+    scan = state(radius=scan_radius, port=port)
+    matched = [
+        item
+        for item in scan.get("nearby") or []
+        if str(item.get("type") or "") == eid
+    ]
+    result: dict[str, Any] = {
+        "entity": eid,
+        "requested": amount,
+        "spawned": len(matched),
+        "verified": len(matched) >= amount,
+        "difficulty": str(scan.get("difficulty") or ""),
+        "nearby": matched[:10],
+    }
+    if changed:
+        result["difficultyChanged"] = changed
+    if not matched:
+        raise GameError(
+            f"生成 {eid} 后附近没有发现该实体。确认实体 ID 正确、区块已加载，"
+            "并且没有处于 peaceful 难度。"
+        )
+    return result
+
+
 def click_text(
     text: str = "",
     *,
@@ -553,6 +773,11 @@ CONTROL_ACTIONS = {
     "mine",
     "chat",
     "command",
+    "difficulty",
+    "gamemode",
+    "time",
+    "weather",
+    "spawn",
     "click_text",
     "type_text",
     "wait_screen",
@@ -630,6 +855,38 @@ def control(action: str, params: dict[str, Any] | None = None, *, port: int | No
         return chat(str(p.get("text") or ""), port=port)
     if name == "command":
         return command(str(p.get("cmd") or p.get("command") or ""), port=port)
+    if name == "difficulty":
+        return set_difficulty(
+            str(p.get("difficulty") or p.get("mode") or p.get("value") or "normal"),
+            port=port,
+        )
+    if name == "gamemode":
+        return set_gamemode(
+            str(p.get("gamemode") or p.get("mode") or p.get("value") or "creative"),
+            port=port,
+        )
+    if name == "time":
+        return set_time(
+            p.get("time") or p.get("value") or p.get("ticks") or "night", port=port
+        )
+    if name == "weather":
+        return set_weather(
+            str(p.get("weather") or p.get("value") or "clear"),
+            duration=p.get("duration"),
+            port=port,
+        )
+    if name == "spawn":
+        raw_entity = p.get("mob")
+        if raw_entity is None and isinstance(p.get("entity"), str):
+            raw_entity = p.get("entity")
+        return spawn(
+            raw_entity or "minecraft:zombie",
+            count=p.get("count") or 1,
+            distance=p.get("distance") or 3.0,
+            spread=p.get("spread") or 1.0,
+            difficulty=p.get("difficulty"),
+            port=port,
+        )
     if name == "click_text":
         return click_text(
             str(p.get("text") or ""),
@@ -762,7 +1019,7 @@ def _run_step(kind: str, step: dict, context: dict, *, port: int | None) -> Any:
             out["world"] = create_world(
                 name,
                 gamemode=str(world.get("gamemode") or "creative"),
-                difficulty=str(world.get("difficulty") or "peaceful"),
+                difficulty=str(world.get("difficulty") or "normal"),
                 world_type=str(world.get("worldType") or world.get("world_type") or "normal"),
                 seed=str(world.get("seed") or ""),
                 cheats=bool(world.get("cheats", True)),
@@ -778,7 +1035,7 @@ def _run_step(kind: str, step: dict, context: dict, *, port: int | None) -> Any:
         return create_world(
             str(step.get("name") or "AI 测试"),
             gamemode=str(step.get("gamemode") or "creative"),
-            difficulty=str(step.get("difficulty") or "peaceful"),
+            difficulty=str(step.get("difficulty") or "normal"),
             world_type=str(step.get("worldType") or step.get("world_type") or "normal"),
             seed=str(step.get("seed") or ""),
             cheats=bool(step.get("cheats", True)),
@@ -795,6 +1052,35 @@ def _run_step(kind: str, step: dict, context: dict, *, port: int | None) -> Any:
         return control(str(step.get("action") or ""), step, port=port)
     if kind == "command":
         return command(str(step.get("cmd") or step.get("command") or ""), port=port)
+    if kind in {"difficulty", "difficulty_set"}:
+        return set_difficulty(
+            str(step.get("difficulty") or step.get("value") or "normal"), port=port
+        )
+    if kind in {"gamemode", "mode"}:
+        return set_gamemode(
+            str(step.get("gamemode") or step.get("mode") or step.get("value") or "creative"),
+            port=port,
+        )
+    if kind in {"time", "set_time"}:
+        return set_time(
+            step.get("time") or step.get("value") or step.get("ticks") or "night",
+            port=port,
+        )
+    if kind == "weather":
+        return set_weather(
+            str(step.get("weather") or step.get("value") or "clear"),
+            duration=step.get("duration"),
+            port=port,
+        )
+    if kind in {"spawn", "summon"}:
+        return spawn(
+            step.get("mob") or step.get("entity") or "minecraft:zombie",
+            count=step.get("count") or 1,
+            distance=step.get("distance") or 3.0,
+            spread=step.get("spread") or 1.0,
+            difficulty=step.get("setDifficulty") or step.get("difficulty"),
+            port=port,
+        )
     if kind in {"screenshot", "shot"}:
         return screenshot(str(step.get("label") or "shot"), port=port, review=True)
     if kind in {"observe", "state"}:
