@@ -91,6 +91,26 @@ class WrapperTests(TempDataCase):
         self.assertFalse(changed)
         self.assertEqual(wrapper.current_distribution(project.root), "8.14")
 
+    def test_forge_wrapper_switches_off_gradle_9(self) -> None:
+        project = create_project(
+            self.tmp / "projects",
+            name="Forge Mod",
+            mod_id="forge_test",
+            mc_version="1.20.1",
+            loader="Forge",
+        )
+        (project.root / "build.gradle").write_text(
+            "plugins { id 'net.minecraftforge.gradle' version '[6.0,6.2)' }\n",
+            encoding="utf-8",
+        )
+        wrapper.ensure_wrapper(project.root, "9.8.2")
+        target, reason = wrapper.compatible_version(project.root)
+        self.assertEqual(target, wrapper.FORGE_DISTRIBUTION)
+        self.assertIn("ForgeGradle", reason)
+        changed, _before, after, _ = wrapper.ensure_compatible(project.root)
+        self.assertTrue(changed)
+        self.assertEqual(after, wrapper.FORGE_DISTRIBUTION)
+
     def test_corrupted_properties_is_repaired(self) -> None:
         project = create_project(
             self.tmp / "projects",

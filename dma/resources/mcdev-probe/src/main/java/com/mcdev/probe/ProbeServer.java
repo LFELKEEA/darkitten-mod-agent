@@ -25,7 +25,9 @@ import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.world.phys.AABB;
+import net.minecraftforge.common.util.FakePlayer;
 import net.minecraftforge.registries.ForgeRegistries;
 
 import java.io.IOException;
@@ -37,6 +39,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -72,6 +75,18 @@ public final class ProbeServer {
             server.createContext("/loot", ProbeServer::handleLoot);
             server.createContext("/item", ProbeServer::handleItem);
             server.createContext("/run/dump", ProbeServer::handleRunDump);
+            server.createContext("/bot/spawn", ProbeServer::handleBotSpawn);
+            server.createContext("/bot/list", ProbeServer::handleBotList);
+            server.createContext("/bot/remove", ProbeServer::handleBotRemove);
+            server.createContext("/bot/state", ProbeServer::handleBotState);
+            server.createContext("/bot/look", ProbeServer::handleBotLook);
+            server.createContext("/bot/move", ProbeServer::handleBotMove);
+            server.createContext("/bot/mine", ProbeServer::handleBotMine);
+            server.createContext("/bot/place", ProbeServer::handleBotPlace);
+            server.createContext("/bot/use", ProbeServer::handleBotUse);
+            server.createContext("/bot/give", ProbeServer::handleBotGive);
+            server.createContext("/bot/attack", ProbeServer::handleBotAttack);
+            server.createContext("/bot/gamemode", ProbeServer::handleBotGameMode);
             server.createContext("/screenshot", ProbeServer::handleNotClient);
             server.createContext("/ui/snapshot", ProbeServer::handleNotClient);
             server.createContext("/ui/click", ProbeServer::handleNotClient);
@@ -110,6 +125,7 @@ public final class ProbeServer {
         data.put("version", SharedConstants.getCurrentVersion().getName());
         data.put("frozen", TickControl.isFrozen());
         data.put("stepBudget", TickControl.getStepBudget());
+        data.put("bots", FakePlayers.names());
         ok(ex, data);
     }
 
@@ -570,6 +586,365 @@ public final class ProbeServer {
         ok(ex, RunRecorder.dump(n));
     }
 
+    // ------------------------------------------------------------------
+    // 纯后台假玩家：不启动客户端，也能在服务端操作一个真实玩家实体。
+    // ------------------------------------------------------------------
+    private static void handleBotSpawn(HttpExchange ex) throws IOException {
+        if (!authorized(ex)) {
+            return;
+        }
+        if (!"POST".equalsIgnoreCase(ex.getRequestMethod())) {
+            error(ex, 405, "POST required");
+            return;
+        }
+        JsonObject body;
+        try {
+            body = jsonBody(ex);
+        } catch (Exception e) {
+            error(ex, 400, "invalid json: " + e.getMessage());
+            return;
+        }
+        final String name = optString(body, "name", "Dev");
+        final String gameMode = optString(body, "gamemode", "creative");
+        try {
+            Map<String, Object> data = onServer(() -> {
+                ServerLevel level = mc.overworld();
+                double x;
+                double y;
+                double z;
+                if (body.has("x") && body.has("y") && body.has("z")) {
+                    x = optDouble(body, "x", 0.0D);
+                    y = optDouble(body, "y", 64.0D);
+                    z = optDouble(body, "z", 0.0D);
+                } else {
+                    BlockPos spawn = level.getSharedSpawnPos();
+                    BlockPos top = level.getHeightmapPos(
+                            Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, spawn);
+                    x = top.getX() + 0.5D;
+                    y = top.getY();
+                    z = top.getZ() + 0.5D;
+                }
+                BlockPos pos = BlockPos.containing(x, y, z);
+                level.getChunk(pos);
+                String message = FakePlayers.spawn(level, name, pos, gameMode);
+                FakePlayer player = FakePlayers.get(name);
+                Map<String, Object> d = new LinkedHashMap<>();
+                d.put("message", message);
+                d.put("name", name);
+                d.put("state", player == null ? null : FakePlayers.state(player, 8.0D));
+                return d;
+            });
+            ok(ex, data);
+        } catch (Exception e) {
+            error(ex, 500, "bot spawn failed: " + e.getMessage());
+        }
+    }
+
+    private static void handleBotList(HttpExchange ex) throws IOException {
+        if (!authorized(ex)) {
+            return;
+        }
+        ok(ex, Map.of("bots", FakePlayers.names()));
+    }
+
+    private static void handleBotRemove(HttpExchange ex) throws IOException {
+        if (!authorized(ex)) {
+            return;
+        }
+        JsonObject body;
+        try {
+            body = jsonBody(ex);
+        } catch (Exception e) {
+            error(ex, 400, "invalid json: " + e.getMessage());
+            return;
+        }
+        String name = optString(body, "name", "");
+        ok(ex, Map.of("name", name, "removed", FakePlayers.remove(name)));
+    }
+
+    private static void handleBotState(HttpExchange ex) throws IOException {
+        if (!authorized(ex)) {
+            return;
+        }
+        String name = strQuery(ex, "name", "Dev");
+        double radius = doubleQuery(ex, "radius", 8.0D);
+        try {
+            Map<String, Object> data = onServer(() -> {
+                FakePlayer player = FakePlayers.get(name);
+                return player == null ? null : FakePlayers.state(player, radius);
+            });
+            if (data == null) {
+                error(ex, 404, "no fake player " + name);
+                return;
+            }
+            ok(ex, data);
+        } catch (Exception e) {
+            error(ex, 500, "bot state failed: " + e.getMessage());
+        }
+    }
+
+    private static void handleBotLook(HttpExchange ex) throws IOException {
+        if (!authorized(ex)) {
+            return;
+        }
+        JsonObject body;
+        try {
+            body = jsonBody(ex);
+        } catch (Exception e) {
+            error(ex, 400, "invalid json: " + e.getMessage());
+            return;
+        }
+        String name = optString(body, "name", "Dev");
+        float yaw = (float) optDouble(body, "yaw", 0.0D);
+        float pitch = (float) optDouble(body, "pitch", 0.0D);
+        try {
+            Map<String, Object> data = onServer(() -> {
+                FakePlayer player = FakePlayers.get(name);
+                if (player == null) {
+                    return null;
+                }
+                FakePlayers.look(player, yaw, pitch);
+                return FakePlayers.state(player, 1.0D);
+            });
+            if (data == null) {
+                error(ex, 404, "no fake player " + name);
+                return;
+            }
+            ok(ex, data);
+        } catch (Exception e) {
+            error(ex, 500, "bot look failed: " + e.getMessage());
+        }
+    }
+
+    private static void handleBotMove(HttpExchange ex) throws IOException {
+        if (!authorized(ex)) {
+            return;
+        }
+        JsonObject body;
+        try {
+            body = jsonBody(ex);
+        } catch (Exception e) {
+            error(ex, 400, "invalid json: " + e.getMessage());
+            return;
+        }
+        String name = optString(body, "name", "Dev");
+        String mode = optString(body, "mode", "teleport").toLowerCase();
+        try {
+            Map<String, Object> data = onServer(() -> {
+                FakePlayer player = FakePlayers.get(name);
+                if (player == null) {
+                    return null;
+                }
+                if ("walk".equals(mode) || "relative".equals(mode)) {
+                    FakePlayers.walk(player,
+                            optDouble(body, "dx", 0.0D),
+                            optDouble(body, "dy", 0.0D),
+                            optDouble(body, "dz", 0.0D),
+                            optInt(body, "steps", 20));
+                } else {
+                    double x = body.has("x") ? optDouble(body, "x", player.getX()) : player.getX();
+                    double y = body.has("y") ? optDouble(body, "y", player.getY()) : player.getY();
+                    double z = body.has("z") ? optDouble(body, "z", player.getZ()) : player.getZ();
+                    FakePlayers.teleport(player, x, y, z);
+                }
+                return FakePlayers.state(player, 8.0D);
+            });
+            if (data == null) {
+                error(ex, 404, "no fake player " + name);
+                return;
+            }
+            ok(ex, data);
+        } catch (Exception e) {
+            error(ex, 500, "bot move failed: " + e.getMessage());
+        }
+    }
+
+    private static void handleBotMine(HttpExchange ex) throws IOException {
+        if (!authorized(ex)) {
+            return;
+        }
+        JsonObject body;
+        try {
+            body = jsonBody(ex);
+        } catch (Exception e) {
+            error(ex, 400, "invalid json: " + e.getMessage());
+            return;
+        }
+        String name = optString(body, "name", "Dev");
+        int x = optInt(body, "x", 0);
+        int y = optInt(body, "y", 64);
+        int z = optInt(body, "z", 0);
+        int timeout = optInt(body, "timeoutMs", 6000);
+        try {
+            Map<String, Object> data = onServer(() -> {
+                FakePlayer player = FakePlayers.get(name);
+                return player == null ? null
+                        : FakePlayers.mine(player, new BlockPos(x, y, z), timeout);
+            });
+            if (data == null) {
+                error(ex, 404, "no fake player " + name);
+                return;
+            }
+            ok(ex, data);
+        } catch (Exception e) {
+            error(ex, 500, "bot mine failed: " + e.getMessage());
+        }
+    }
+
+    private static void handleBotPlace(HttpExchange ex) throws IOException {
+        if (!authorized(ex)) {
+            return;
+        }
+        JsonObject body;
+        try {
+            body = jsonBody(ex);
+        } catch (Exception e) {
+            error(ex, 400, "invalid json: " + e.getMessage());
+            return;
+        }
+        String name = optString(body, "name", "Dev");
+        BlockPos pos = new BlockPos(
+                optInt(body, "x", 0), optInt(body, "y", 64), optInt(body, "z", 0));
+        String face = optString(body, "face", "up");
+        String item = optString(body, "item", "minecraft:stone");
+        int count = optInt(body, "count", 1);
+        try {
+            Map<String, Object> data = onServer(() -> {
+                FakePlayer player = FakePlayers.get(name);
+                return player == null ? null
+                        : FakePlayers.place(player, pos, face, item, count);
+            });
+            if (data == null) {
+                error(ex, 404, "no fake player " + name);
+                return;
+            }
+            ok(ex, data);
+        } catch (Exception e) {
+            error(ex, 500, "bot place failed: " + e.getMessage());
+        }
+    }
+
+    private static void handleBotUse(HttpExchange ex) throws IOException {
+        if (!authorized(ex)) {
+            return;
+        }
+        JsonObject body;
+        try {
+            body = jsonBody(ex);
+        } catch (Exception e) {
+            error(ex, 400, "invalid json: " + e.getMessage());
+            return;
+        }
+        String name = optString(body, "name", "Dev");
+        try {
+            Map<String, Object> data = onServer(() -> {
+                FakePlayer player = FakePlayers.get(name);
+                return player == null ? null : FakePlayers.useItem(player);
+            });
+            if (data == null) {
+                error(ex, 404, "no fake player " + name);
+                return;
+            }
+            ok(ex, data);
+        } catch (Exception e) {
+            error(ex, 500, "bot use failed: " + e.getMessage());
+        }
+    }
+
+    private static void handleBotGive(HttpExchange ex) throws IOException {
+        if (!authorized(ex)) {
+            return;
+        }
+        JsonObject body;
+        try {
+            body = jsonBody(ex);
+        } catch (Exception e) {
+            error(ex, 400, "invalid json: " + e.getMessage());
+            return;
+        }
+        String name = optString(body, "name", "Dev");
+        String item = optString(body, "item", "minecraft:stone");
+        int count = optInt(body, "count", 1);
+        try {
+            Map<String, Object> data = onServer(() -> {
+                FakePlayer player = FakePlayers.get(name);
+                return player == null ? null : FakePlayers.give(player, item, count);
+            });
+            if (data == null) {
+                error(ex, 404, "no fake player " + name);
+                return;
+            }
+            ok(ex, data);
+        } catch (Exception e) {
+            error(ex, 500, "bot give failed: " + e.getMessage());
+        }
+    }
+
+    private static void handleBotAttack(HttpExchange ex) throws IOException {
+        if (!authorized(ex)) {
+            return;
+        }
+        JsonObject body;
+        try {
+            body = jsonBody(ex);
+        } catch (Exception e) {
+            error(ex, 400, "invalid json: " + e.getMessage());
+            return;
+        }
+        String name = optString(body, "name", "Dev");
+        int entity = optInt(body, "entity", -1);
+        String target = optString(body, "target", "");
+        double radius = optDouble(body, "radius", 4.0D);
+        try {
+            Map<String, Object> data = onServer(() -> {
+                FakePlayer player = FakePlayers.get(name);
+                return player == null ? null
+                        : FakePlayers.attack(player, entity, target, radius);
+            });
+            if (data == null) {
+                error(ex, 404, "no fake player " + name);
+                return;
+            }
+            ok(ex, data);
+        } catch (Exception e) {
+            error(ex, 500, "bot attack failed: " + e.getMessage());
+        }
+    }
+
+    private static void handleBotGameMode(HttpExchange ex) throws IOException {
+        if (!authorized(ex)) {
+            return;
+        }
+        JsonObject body;
+        try {
+            body = jsonBody(ex);
+        } catch (Exception e) {
+            error(ex, 400, "invalid json: " + e.getMessage());
+            return;
+        }
+        String name = optString(body, "name", "Dev");
+        String mode = optString(body, "gamemode", "creative");
+        try {
+            Map<String, Object> data = onServer(() -> {
+                FakePlayer player = FakePlayers.get(name);
+                if (player == null) {
+                    return null;
+                }
+                String applied = FakePlayers.setGameMode(player, mode);
+                Map<String, Object> d = FakePlayers.state(player, 1.0D);
+                d.put("applied", applied);
+                return d;
+            });
+            if (data == null) {
+                error(ex, 404, "no fake player " + name);
+                return;
+            }
+            ok(ex, data);
+        } catch (Exception e) {
+            error(ex, 500, "bot gamemode failed: " + e.getMessage());
+        }
+    }
+
     private static void handleNotClient(HttpExchange ex) throws IOException {
         if (!authorized(ex)) {
             return;
@@ -611,6 +986,71 @@ public final class ProbeServer {
         ex.sendResponseHeaders(code, bytes.length);
         try (OutputStream os = ex.getResponseBody()) {
             os.write(bytes);
+        }
+    }
+
+    private static <T> T onServer(Callable<T> task) throws Exception {
+        CompletableFuture<T> future = new CompletableFuture<>();
+        mc.execute(() -> {
+            try {
+                future.complete(task.call());
+            } catch (Throwable t) {
+                future.completeExceptionally(t);
+            }
+        });
+        return future.get(30, TimeUnit.SECONDS);
+    }
+
+    private static JsonObject jsonBody(HttpExchange ex) throws Exception {
+        String body = new String(ex.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+        if (body.isBlank()) {
+            return new JsonObject();
+        }
+        return JsonParser.parseString(body).getAsJsonObject();
+    }
+
+    private static String optString(JsonObject obj, String key, String def) {
+        try {
+            if (obj != null && obj.has(key) && !obj.get(key).isJsonNull()) {
+                return obj.get(key).getAsString();
+            }
+        } catch (Exception ignored) {
+            // 类型不对时回退默认值，让接口保持可诊断而不是直接 500。
+        }
+        return def;
+    }
+
+    private static int optInt(JsonObject obj, String key, int def) {
+        try {
+            if (obj != null && obj.has(key) && !obj.get(key).isJsonNull()) {
+                return obj.get(key).getAsInt();
+            }
+        } catch (Exception ignored) {
+            // 同上。
+        }
+        return def;
+    }
+
+    private static double optDouble(JsonObject obj, String key, double def) {
+        try {
+            if (obj != null && obj.has(key) && !obj.get(key).isJsonNull()) {
+                return obj.get(key).getAsDouble();
+            }
+        } catch (Exception ignored) {
+            // 同上。
+        }
+        return def;
+    }
+
+    private static double doubleQuery(HttpExchange ex, String key, double def) {
+        String raw = strQuery(ex, key, null);
+        if (raw == null) {
+            return def;
+        }
+        try {
+            return Double.parseDouble(raw);
+        } catch (NumberFormatException e) {
+            return def;
         }
     }
 

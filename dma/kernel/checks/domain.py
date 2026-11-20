@@ -7,6 +7,7 @@ from collections import Counter
 from typing import Iterable
 
 from ..findings import Finding
+from ..java import mask_comments
 from .common import ProjectContext, finding
 
 MUTATORS = (
@@ -58,12 +59,21 @@ def _items(ctx: ProjectContext) -> Iterable[Finding]:
                 consumed = _has_any(body, CONSUMERS)
                 returns_pass = _has_any(body, RETURNS_PASS)
                 if consumed and returns_pass:
-                    rows.append(finding(
-                        "P1-27",
-                        f"{java_class.name}.{method.name} 已消耗物品/耐久，却返回 PASS/FAIL",
-                        path=rel, line=method.line,
-                        suggestion="成功消耗返回 SUCCESS/SUCCESS_SERVER；只改状态不消耗用 CONSUME；失败返回 FAIL。",
-                    ))
+                    # 只看“最后一次消耗之后是否仍以 PASS/FAIL 收尾”。
+                    # 前面失败分支返回 FAIL、后面成功后消耗并返回 SUCCESS 是
+                    # 正确写法；同一个方法里同时出现 shrink 与 FAIL 不代表违规。
+                    last_consumed = max(
+                        (body.rfind(token) for token in CONSUMERS), default=-1
+                    )
+                    last_return = body.rfind("return ")
+                    tail = body[last_return:] if last_return >= 0 else ""
+                    if 0 <= last_consumed < last_return and _has_any(tail, RETURNS_PASS):
+                        rows.append(finding(
+                            "P1-27",
+                            f"{java_class.name}.{method.name} 已消耗物品/耐久，却返回 PASS/FAIL",
+                            path=rel, line=method.line,
+                            suggestion="成功消耗返回 SUCCESS/SUCCESS_SERVER；只改状态不消耗用 CONSUME；失败返回 FAIL。",
+                        ))
                 if "return true;" in body and "InteractionResult" in method.return_type:
                     rows.append(finding(
                         "P1-27", f"{method.name} 返回 boolean，物品交互应返回 InteractionResult",
@@ -152,14 +162,9 @@ def _blocks(ctx: ProjectContext) -> Iterable[Finding]:
                         path=rel, line=java_class.line, severity="warning",
                         suggestion="合并布尔属性为枚举，或把可变数据放进 BlockEntity。",
                     ))
-            has_shape = "getShape(" in text
-            has_collision = "getCollisionShape(" in text
-            if has_shape != has_collision:
-                rows.append(finding(
-                    "P1-31", f"{java_class.name} 只重写了渲染盒或碰撞盒之一，两者可能不一致",
-                    path=rel, line=java_class.line, severity="warning",
-                    suggestion="同时校验 getShape 与 getCollisionShape，避免视觉与碰撞错位。",
-                ))
+            # 只重写 getShape（轮廓/渲染）而沿用默认碰撞盒是装饰方块的常规写法，
+            # 很多方块还会在 Properties 里 noCollission()；无法从单方法判断是否
+            # 错位，原规则误报太多，已移除。
             if re.search(r"\.neighborChanged\s*\(|\.updateNeighborsAt\s*\(", text) and "setBlock" in text:
                 guard = any(key in text for key in ("updating", "isUpdating", "guard", "ThreadLocal", "flag"))
                 if not guard:
@@ -224,13 +229,24 @@ def _entities(ctx: ProjectContext) -> Iterable[Finding]:
         rel = ctx.rel(java.path)
         text = java.text
         extends = java_class.extends or ""
-        if not (
-            "Entity" in extends or "Mob" in extends or "Monster" in extends
-            or "Animal" in extends or "PathfinderMob" in extends
-        ):
+        # 用基类简单名判断，不能只看 "Entity" 子串：EntityRenderer /
+        # EntityModel 也包含 Entity，会把渲染器当成生物去要 registerGoals。
+        base = re.sub(r"<.*$", "", extends.strip()).split(".")[-1].strip()
+        if not base.endswith(("Entity", "Mob", "Monster", "Animal")):
             continue
-        goals = re.findall(r"(?:goalSelector|targetSelector)\.addGoal\s*\(\s*(\d+)", text)
-        duplicates = [value for value, count in Counter(goals).items() if count > 1]
+        goal_pairs = re.findall(
+            r"\b(goalSelector|targetSelector)\s*\.\s*addGoal\s*\(\s*(\d+)", text
+        )
+        # goalSelector 与 targetSelector 各自排序，同为 2 号并不冲突；
+        # 只有同一个选择器内重复优先级才会按注册顺序抢占。
+        duplicates = sorted({
+            number
+            for selector in ("goalSelector", "targetSelector")
+            for number, count in Counter(
+                value for kind, value in goal_pairs if kind == selector
+            ).items()
+            if count > 1
+        })
         if duplicates:
             rows.append(finding(
                 "P1-34", f"{java_class.name} 的 AI 目标优先级重复：{', '.join(duplicates)}",
@@ -409,18 +425,9 @@ def _events(ctx: ProjectContext) -> Iterable[Finding]:
                     suggestion="改为 void；需要返回值时直接修改事件对象。",
                 ))
             body = method.body
-            if "setCanceled(true)" in body and "isCancelable" not in body and "Cancelable" not in body:
-                rows.append(finding(
-                    "P2-25", f"{method.name} 取消事件前没有检查可取消性",
-                    path=rel, line=method.line, severity="warning",
-                    suggestion="部分事件不可取消；先判断 isCancelable()，避免运行时异常。",
-                ))
-            if "priority" not in annotations and "EventPriority" not in annotations:
-                rows.append(finding(
-                    "P2-25", f"{method.name} 未声明事件优先级",
-                    path=rel, line=method.line, severity="info",
-                    suggestion="修改数据用 LOWEST/HIGH，观察用 HIGHEST，明确顺序语义。",
-                ))
+            # Forge 事件对象自己知道是否可取消；对 RightClickBlock 这类可取消
+            # 事件直接 setCanceled(true) 是标准写法，不需要逐处 isCancelable()。
+            # 默认优先级 NORMAL 也是合法的，未声明优先级不作为缺陷。
             if any(key in body for key in ("level.setBlock", "world.setBlock", "spawnEntity", "addFreshEntity")):
                 if any(key in method.name for key in ("Break", "Place", "Block", "Entity")):
                     rows.append(finding(
@@ -442,7 +449,8 @@ def _config(ctx: ProjectContext) -> Iterable[Finding]:
         text = java.text
         if "ModConfigSpec" not in text and "ForgeConfigSpec" not in text and "ConfigBuilder" not in text:
             continue
-        for match in re.finditer(r"defineInRange\s*\(\s*[\"']([^\"']+)[\"'][^,]*,\s*([^,]+),\s*([^,]+),\s*([^,)]+)", java.masked):
+        literal = mask_comments(text)
+        for match in re.finditer(r"defineInRange\s*\(\s*[\"']([^\"']+)[\"'][^,]*,\s*([^,]+),\s*([^,]+),\s*([^,)]+)", literal):
             key, default, low, high = match.groups()
             try:
                 low_value = float(low.strip())
@@ -452,7 +460,7 @@ def _config(ctx: ProjectContext) -> Iterable[Finding]:
             if low_value > high_value:
                 rows.append(finding(
                     "P1-25", f"配置项 {key} 范围写反：{low_value} > {high_value}",
-                    path=rel, line=_line(java.masked, match.start()),
+                    path=rel, line=_line(literal, match.start()),
                     suggestion="修正 min/max，并给默认值加校验。",
                 ))
             try:
@@ -460,11 +468,11 @@ def _config(ctx: ProjectContext) -> Iterable[Finding]:
                 if not (low_value <= default_value <= high_value):
                     rows.append(finding(
                         "P1-25", f"配置项 {key} 默认值 {default_value} 超出范围 [{low_value}, {high_value}]",
-                        path=rel, line=_line(java.masked, match.start()),
+                        path=rel, line=_line(literal, match.start()),
                     ))
             except ValueError:
                 pass
-        if re.search(r"\.define\s*\(\s*[\"'][^\"']+[\"']\s*,\s*-?\d", java.masked) and "defineInRange" not in text:
+        if re.search(r"\.define\s*\(\s*[\"'][^\"']+[\"']\s*,\s*-?\d", literal) and "defineInRange" not in text:
             rows.append(finding(
                 "P1-25", f"{java_class.name} 的数值配置没有范围校验",
                 path=rel, line=java_class.line, severity="warning",

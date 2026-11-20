@@ -330,10 +330,21 @@ neoforge/      # NeoForge 入口与平台实现
 2. **白模**：只做体块，先定轮廓和比例，不急着画细节。
 3. **低模**：Minecraft 用元素盒（elements）拼，不用高模；面数越少越稳。
 4. **UV**：每个面用 0–16 的像素坐标，纹理分区不重叠、不越界。
-5. **纹理**：16 / 32 / 64 像素，透明背景，像素对齐；需要像素图时用 `pixel_art` 工具。
+5. **纹理**：16 / 32 / 64 像素，透明背景，像素对齐；方块/物品用 `texture_gen`，实体皮肤用 `entity_texture`（真实 UV 图集），`pixel_art` 只画小图标。
 6. **导出**：Java 模型 JSON；GeckoLib 用 `.geo.json` + `animation.json`。
 7. **入游戏**：blockstates / models/item 引用、渲染器注册、语言键。
 8. **验证**：物品栏、地面、第三人称、方块六面、透明与剔除。
+
+## 用 blockbench 工具建模（首选）
+```tool
+{"tool":"blockbench","action":"create","path":"src/main/resources/assets/modid/models/block/ruby_lamp.bbmodel","cubes":[{"name":"base","from":[0,0,0],"to":[16,4,16],"uv":[0,0]},{"name":"crystal","from":[4,4,4],"to":[12,14,12],"uv":[32,0]}],"size":[64,64]}
+{"tool":"blockbench","action":"preview","path":"src/main/resources/assets/modid/models/block/ruby_lamp.bbmodel","texture":"src/main/resources/assets/modid/textures/block/ruby_lamp.png"}
+{"tool":"blockbench","action":"export","path":"src/main/resources/assets/modid/models/block/ruby_lamp.bbmodel","texture":"src/main/resources/assets/modid/textures/block/ruby_lamp.png","namespace":"modid","kind":"block"}
+```
+- `cubes` 里 1 单位 = 1 像素，写 `from`/`to` 或 `from` + `size`；`uv` 是盒式 UV 原点，六个面按原版布局展开。
+- 多个 cube 不要都写 `uv:[0,0]`，否则贴图互相覆盖；不写 `uv` 时每个面映射整张贴图，只适合单立方体方块。
+- `preview` 输出 `<name>_preview.png`，会按 UV 采样真实贴图；`export` 同时写 Java 模型并复制 PNG。
+- 手绘细节交给应用里的「绘图」页：可直接在 UV 图集、图标、方块和模型面上落笔，Shift 填整面、Ctrl+Shift 填整个立方体、支持左右镜像。
 
 ## Blockbench → JSON 导出规范
 - 方块导出勾选「Texture Scale 16」；不勾会把 UV 写成 0–1 浮点，游戏读错。
@@ -376,7 +387,7 @@ neoforge/      # NeoForge 入口与平台实现
 工坊不能直接生成 `.obj` / `.fbx`；Minecraft 用 JSON 模型。需要外部 3D 渲染图时，把上面的提示词交给图像工具，不要假装已经生成模型文件。
 
 ## 交付
-模型 JSON 路径 + 完整内容；纹理规格或 `pixel_art` 参数；blockstates / 模型引用；渲染器与注册代码；游戏内验证步骤。
+模型 JSON 路径 + 完整内容；纹理规格或 `texture_gen` / `entity_texture` 参数；blockstates / 模型引用；渲染器与注册代码；游戏内验证步骤。
 """,
     },
     {
@@ -386,9 +397,42 @@ neoforge/      # NeoForge 入口与平台实现
         "body": """# 绘图、纹理与界面视觉
 
 ## 能做什么
-像素纹理、物品/方块图标、模组图标、GUI、HUD、SVG 架构图/流程图、宣传图提示词。二进制纹理用 `pixel_art` 直接生成 PNG；矢量图用 `write_file` 写 SVG 或 draw.io XML。
+像素纹理、物品/方块图标、模组图标、GUI、HUD、SVG 架构图/流程图、宣传图提示词。方块/物品/实体皮肤优先用结构化生成器，`pixel_art` 只用于 logo、GUI 小图标；矢量图用 `write_file` 写 SVG 或 draw.io XML。
 
-## pixel_art 用法
+## texture_gen 用法（方块/物品首选）
+```tool
+{"tool":"texture_gen","path":"src/main/resources/assets/modid/textures/block/twilight_stone.png","style":"stone","base":"#6f6a63","accent":"#3d3a36","size":16,"seed":7}
+{"tool":"texture_gen","path":"src/main/resources/assets/modid/textures/item/serpent_fang.png","style":"serpent_fang","base":"#d9d2b8","accent":"#8f2f3f","size":16,"seed":3}
+```
+- 方块样式：`stone` `mossy` `deepslate` `gravel` `clay` `dirt` `grass` `grass_side` `leaves` `log` `log_top` `planks` `bricks` `ore` `metal` `crystal` `fabric` `mushroom_cap` `mushroom_stem` `portal` `water` `sand` `snow` `obsidian` `glow` `glass` `flower` `sapling` `mushroom` `lantern` `panel`。
+  名字里带 `mossy/overgrown`、`deepslate`、`gravel`、`clay/terracotta` 时也会自动选中对应样式。
+- 物品直接传物品名（`ironwood_sword`、`serpent_fang`、`lich_sigil`、`arcane_dust`、`scale_shard`、`spectral_cloth`、`ironwood_bow`、`twilight_arrow`、`twilight_potion`、`grove_scroll`、`silver_ring`、`moon_amulet`、`raven_feather`、`gold_nugget`、`twilight_apple`、`honey_bread`、`raw_meat`、`wolf_hide`、`old_coin`…），自动匹配轮廓、明暗和描边。
+- 建议给 `base`（主色）与 `accent`（宝石/纹样/发光色）；省略时会按名字推断材质色。固定 `seed` 保证可复现。
+- 生成器自带多阶明度、噪声明暗、裂纹/木纹/砖缝/矿石簇等细节；不要再用两三个纯色块代替。
+
+## entity_texture 用法（生物皮肤首选）
+```tool
+{"tool":"entity_texture","path":"src/main/resources/assets/modid/textures/entity/hollow_stalker.png","layout":"humanoid","base":"#b9b3a1","accent":"#b53b3b","variant":"undead","seed":7}
+{"tool":"entity_texture","path":"src/main/resources/assets/modid/textures/entity/moss_crawler.png","layout":"boxes","boxes":[{"part":"body","uv":[0,0],"size":[8,8,12]},{"part":"head","uv":[0,17],"size":[6,4,6]}],"base":"#6f7b45","accent":"#d8c25a","seed":3}
+```
+- `humanoid` 使用原版 64×64 玩家皮肤 UV：头/帽/身体/右臂/左臂/右腿/左腿/外套/袖/裤，面部的眼睛、领口、腰带、袖口、靴子会自动画出。
+- 自定义模型用 `boxes`，每项 `uv:[u,v]`、`size:[w,h,d]`、`part`，按原版立方体六面（上/下/右/前/左/后）展开，和 `CubeListBuilder.texOffs` 完全对应。
+- 不要用正面立绘充当实体皮肤：UV 不对会把整张图撕成乱码色块。
+- 主色亮度不要低于 `#4a4a5a`：生成器会把过暗的主色自动抬亮，但手写贴图时也要遵守，
+  否则生物进游戏就是一团黑影；lint 的 P2-15 报“接近纯黑/颜色太少”时必须重新生成覆盖。
+- `variant` 写材质关键词会自动追加纹样：`bone/lich` 肋骨、`scale/serpent` 鳞片、
+  `moss/crawler` 苔点、`fire/wisp` 发光点、`robe/mage` 袍边、`wraith/shadow` 灵纹。
+  同一只生物的主色与点缀色要有明度差（至少 3 阶），否则纹样会看不见。
+- 外层（hat/jacket/sleeve/pants）生成器只画帽檐、袖口、下摆、腰带，其余保持透明；
+  不要为了让外层“厚”而整块涂满，整块涂满加随机镂空就是外层乱码色块的来源。
+- 像素风每个面只用 2~3 阶硬边明暗，按朝向定基调（顶亮、底暗、背面比正面暗一阶），
+  不要给每个像素铺连续噪声——那会糊成杂色而不是材质。
+- 验收标准是“1x 下认得出”：生成后调 `vision_review` 或看 1x 预览，问自己
+  “不看文件名能说出这是骷髅/蛇/蘑菇吗”；认不出就改轮廓或主色重画，不要只加噪点。
+- 物品图标保持 4~8 色：外描边 + 左上受光面 + 右下阴影面 + 1~2 处点缀色；
+  不要用抗锯齿/模糊/缩放插值，像素边缘必须硬。
+
+## pixel_art 用法（仅小图标）
 ```tool
 {"tool":"pixel_art","path":"src/main/resources/assets/modid/textures/item/gem.png","palette":{".":"transparent","o":"#1b1b1f","a":"#7fd6ff","h":"#d8f6ff"},"rows":["................","................","......oooo......",".....oaaaao.....","....oaaaaaao....","...oaahhaaaao...","...oaahhaaaao...","...oaaaaaaaao...","...oaaaaaaaao...","....oaaaaaao....",".....oaaaao.....","......oooo......","................","................","................","................"]}
 ```

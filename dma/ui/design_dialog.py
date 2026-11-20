@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
 )
 
 from .. import designs
+from .paint_page import PaintDialog
 from .widgets import tiny
 
 _KIND_LABEL = {"entity": "生物", "item": "物品图标", "block": "方块"}
@@ -64,6 +65,11 @@ class _VariantCard(QFrame):
             badge = QLabel("自己上传")
             badge.setObjectName("Tiny")
             badge.setStyleSheet("color: #b7a6ff;")
+            layout.addWidget(badge)
+        elif variant.get("edited"):
+            badge = QLabel("手动绘制")
+            badge.setObjectName("Tiny")
+            badge.setStyleSheet("color: #4ec9a4;")
             layout.addWidget(badge)
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
@@ -130,12 +136,17 @@ class DesignPickerDialog(QDialog):
         self.retexture_btn.setObjectName("Ghost")
         self.retexture_btn.setToolTip("保留当前选中的模型，只重新生成贴图和预览。")
         self.retexture_btn.clicked.connect(self._retexture)
+        self.paint_btn = QPushButton("手动绘制")
+        self.paint_btn.setObjectName("Ghost")
+        self.paint_btn.setToolTip("用内置画布直接改这套方案的贴图，可以点模型面落笔。")
+        self.paint_btn.clicked.connect(self._manual_paint)
         self.upload_btn = QPushButton("上传自己的方案")
         self.upload_btn.setObjectName("Ghost")
         self.upload_btn.clicked.connect(self._upload)
         self.status = tiny("")
         row.addWidget(self.regen_btn)
         row.addWidget(self.retexture_btn)
+        row.addWidget(self.paint_btn)
         row.addWidget(self.upload_btn)
         row.addWidget(self.status, 1)
         self.cancel_btn = QPushButton("取消")
@@ -216,6 +227,37 @@ class DesignPickerDialog(QDialog):
             return
         self._refresh()
         self.status.setText(f"已保留模型 {self._selected}，只更新了图案。")
+
+    def _manual_paint(self) -> None:
+        if not self._selected:
+            return
+        item = self.session.variant(self._selected)
+        rel = str(item.get("texture") or "").strip()
+        if not rel:
+            QMessageBox.information(
+                self,
+                "不能绘制",
+                "这个方案只有模型，还没有贴图。先重新生成，或上传一张 PNG 再画。",
+            )
+            return
+        texture = self.session.dir / rel
+        model_rel = str(item.get("model") or "").strip()
+        # 物品/方块的 model.json 只是贴图引用，没有可绘制的立方体。
+        model = (
+            self.session.dir / model_rel
+            if model_rel and self.session.kind == "entity"
+            else None
+        )
+        dialog = PaintDialog(texture, kind=self.session.kind, model=model, parent=self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        try:
+            self.session.update_texture(self._selected, texture)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "保存失败", str(exc))
+            return
+        self._refresh()
+        self.status.setText(f"已保存手动绘制：方案 {self._selected}。")
 
     def _upload(self) -> None:
         path, _filter = QFileDialog.getOpenFileName(

@@ -159,6 +159,40 @@ class GradlePreflightTests(TempDataCase):
         self.assertIn("--offline", argv)
         self.assertNotIn("--offline", gradle._command(root, "build"))
 
+    def test_command_forces_utf8_for_readable_errors(self) -> None:
+        root = self.tmp / "mod"
+        root.mkdir()
+        (root / ("gradlew.bat" if os.name == "nt" else "gradlew")).write_text(
+            "@echo off\n", encoding="utf-8"
+        )
+        argv = gradle._command(root, "build")
+        self.assertIn("-Dfile.encoding=UTF-8", argv)
+
+    def test_forge_gradle_command_disables_server_check(self) -> None:
+        root = self.tmp / "mod"
+        root.mkdir()
+        (root / ("gradlew.bat" if os.name == "nt" else "gradlew")).write_text(
+            "@echo off\n", encoding="utf-8"
+        )
+        (root / "build.gradle").write_text(
+            "plugins { id 'net.minecraftforge.gradle' version '[6.0,6.2)' }\n",
+            encoding="utf-8",
+        )
+        argv = gradle._command(root, "build")
+        self.assertIn("-Dnet.minecraftforge.gradle.check.certs=false", argv)
+
+    def test_non_forge_command_keeps_forge_property_out(self) -> None:
+        root = self.tmp / "mod"
+        root.mkdir()
+        (root / ("gradlew.bat" if os.name == "nt" else "gradlew")).write_text(
+            "@echo off\n", encoding="utf-8"
+        )
+        (root / "build.gradle").write_text(
+            "plugins { id 'fabric-loom' version '1.6-SNAPSHOT' }\n", encoding="utf-8"
+        )
+        argv = gradle._command(root, "build")
+        self.assertNotIn("-Dnet.minecraftforge.gradle.check.certs=false", argv)
+
     def test_network_hint_names_unreachable_host(self) -> None:
         hint = gradle._network_hint(
             "Could not resolve plugin",
@@ -251,6 +285,42 @@ class GradlePreflightTests(TempDataCase):
         self.assertIn(str(init_script), argv)
         self.assertNotIn("--offline", argv)
         prepare.assert_called_once()
+
+    def test_stall_retries_through_mirror_once(self) -> None:
+        """构建卡死后先强制走本地镜像重试，而不是直接报错或干等。"""
+        root = self.tmp / "mod-offline"
+        root.mkdir()
+        (root / ("gradlew.bat" if os.name == "nt" else "gradlew")).write_text(
+            "@echo off\n", encoding="utf-8"
+        )
+        init_script = self.tmp / "mirror.gradle"
+        init_script.write_text("// mirror", encoding="utf-8")
+        probe = {"urls": [], "unreachable": [], "hosts": [], "offline": False}
+        calls: list = []
+
+        def fake_once(argv, root, **_kwargs):  # noqa: ARG001
+            calls.append(argv)
+            if len(calls) == 1:
+                return 1, "Downloading maven artifact...\n", "compileJava 卡死"
+            return 0, "BUILD SUCCESSFUL\n", ""
+
+        with mock.patch.object(gradle, "preflight", return_value=dict(probe)):
+            with mock.patch.object(gradle, "_ensure_gradle_distribution"):
+                with mock.patch(
+                    "dma.mirrors.prepare_launch_env", return_value=init_script
+                ):
+                    with mock.patch.object(
+                        gradle, "_run_once", side_effect=fake_once
+                    ):
+                        code, output = gradle.run_gradle(
+                            root, "compileJava"
+                        )
+        self.assertEqual(code, 0)
+        self.assertEqual(len(calls), 2)
+        retry_argv = calls[1]
+        self.assertIn("--init-script", retry_argv)
+        self.assertNotIn("--offline", retry_argv)
+        self.assertIn("BUILD SUCCESSFUL", output)
 
     def test_windows_command_keeps_paths_with_spaces(self) -> None:
         """工程路径含空格时，cmd.exe 不能把 gradlew 路径截断。"""

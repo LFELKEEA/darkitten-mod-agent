@@ -20,7 +20,11 @@ CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 # 没有输出时的兜底：首次构建要跑 NeoFormRuntime 合并/反编译，单个任务
 # 静默十几分钟很正常，在线构建放宽到 15 分钟；离线模式 60 秒就判定卡死。
-DEFAULT_STALL_TIMEOUT = 900.0
+DEFAULT_STALL_TIMEOUT = 180.0
+# 某个工程一旦在联网构建时卡死过，后续构建直接强制走本地镜像，
+# 不要每次都先赌一次官方仓库可达。
+_FORCED_MIRROR: dict[str, float] = {}
+_FORCED_MIRROR_TTL = 1800.0
 OFFLINE_STALL_TIMEOUT = 60.0
 HEARTBEAT_SECONDS = 15.0
 PREFLIGHT_TIMEOUT = 3.0
@@ -115,6 +119,25 @@ def build_env(
     )
 
 
+def _forge_gradle_project(project_dir: Path) -> bool:
+    """判断工程是否使用 ForgeGradle（6.x）。"""
+    for name in (
+        "build.gradle",
+        "build.gradle.kts",
+        "settings.gradle",
+        "settings.gradle.kts",
+    ):
+        path = project_dir / name
+        try:
+            if path.is_file() and "net.minecraftforge.gradle" in path.read_text(
+                encoding="utf-8", errors="ignore"
+            ):
+                return True
+        except OSError:
+            continue
+    return False
+
+
 def _command(
     project_dir: Path,
     task: str,
@@ -129,9 +152,17 @@ def _command(
             "先补齐 Wrapper，或让助手按当前加载器生成工程骨架。"
         )
     argv = [str(gradlew), task, "--console=plain"]
+    # Windows 中文环境下 javac/gradle 默认按 GBK 输出，宿主按 UTF-8 读取时
+    # 会把“找不到符号”的细节变成乱码，模型只能看到文件行号。强制 UTF-8。
+    argv.append("-Dfile.encoding=UTF-8")
     argv.extend(
         toolchain_args([str(item) for item in envcheck.java_homes()])
     )
+    if _forge_gradle_project(project_dir):
+        # ForgeGradle 6 在插件 apply 阶段会无超时地直连 maven.minecraftforge.net
+        # 做“服务器连通性检查”。国内网络握手很慢时会卡几分钟，整个构建看起来像
+        # 死机。这个属性会同时关闭证书检查和服务器连通性检查。
+        argv.append("-Dnet.minecraftforge.gradle.check.certs=false")
     if init_script is not None:
         argv.extend(["--init-script", str(init_script)])
     if offline:
@@ -592,7 +623,15 @@ def run_gradle(
         from .. import mirrors
 
         hosts = list(probe.get("hosts") or [])
-        init_script = mirrors.prepare_launch_env(log=log, hosts=hosts)
+        forced_at = _FORCED_MIRROR.get(str(root))
+        force_mirror = (
+            forced_at is not None and time.time() - forced_at < _FORCED_MIRROR_TTL
+        )
+        if force_mirror and log:
+            log("[gradle] 该工程上次构建卡在网络上，直接走本地镜像。")
+        init_script = mirrors.prepare_launch_env(
+            log=log, hosts=hosts, force=force_mirror
+        )
         if init_script is not None:
             offline = False
             probe["mirrored"] = True
@@ -663,6 +702,63 @@ def run_gradle(
             )
             code = retry_code
             reason = retry_reason
+            output = (output + "\n" + retry_output)[-200_000:]
+    if (
+        reason
+        and output.strip()
+        and not offline
+        and not _env_flag("DMA_GRADLE_OFFLINE")
+    ):
+        # 无输出被判定卡死时，先把这一轮当成网络问题处理：
+        # 1) 强制所有仓库改走本地镜像代理（代理会并发试源并缓存）；
+        # 2) 镜像仍不行再退回 --offline，用本地缓存快速失败。
+        from .. import mirrors
+
+        _FORCED_MIRROR[str(root)] = time.time()
+        retry_script = mirrors.prepare_launch_env(
+            log=log, force=True, fresh_port=True
+        )
+        if retry_script is not None:
+            if log:
+                log("[gradle] 构建长时间无输出，强制改走本地镜像重试…")
+            retry_argv = _command(root, task, offline=False, init_script=retry_script)
+            retry_code, retry_output, retry_reason = _run_once(
+                retry_argv,
+                root,
+                task=task,
+                timeout=timeout,
+                stall_timeout=_env_number("DMA_GRADLE_STALL_TIMEOUT", 240.0),
+                cancel=cancel,
+                log=log,
+                slow=True,
+            )
+            if retry_code == 0 and not retry_reason:
+                if log:
+                    log("[gradle] 本地镜像重试成功。")
+                return retry_code, retry_output
+            output = (output + "\n" + retry_output)[-200_000:]
+            if retry_reason == "":
+                # 镜像这次给出了明确的编译结果，不需要再试离线。
+                reason = ""
+                code = retry_code
+        if reason:
+            if log:
+                log("[gradle] 镜像重试仍未成功，改用 --offline 从本地缓存重试…")
+            offline_argv = _command(root, task, offline=True)
+            retry_code, retry_output, retry_reason = _run_once(
+                offline_argv,
+                root,
+                task=task,
+                timeout=max(120, min(timeout, 600)),
+                stall_timeout=OFFLINE_STALL_TIMEOUT,
+                cancel=cancel,
+                log=log,
+                slow=False,
+            )
+            if retry_code == 0 and not retry_reason:
+                if log:
+                    log("[gradle] --offline 重试成功。")
+                return retry_code, retry_output
             output = (output + "\n" + retry_output)[-200_000:]
     if reason:
         raise GradleError(reason + _network_hint(output, probe))
@@ -776,7 +872,7 @@ def _kill(process: subprocess.Popen, root: Path | None = None) -> None:
         stop_gradle_daemon(root)
 
 
-def stop_gradle_daemon(root: Path) -> None:
+def stop_gradle_daemon(root: Path | str) -> None:
     """取消 / 超时后，停掉残留的 Gradle daemon。
 
     ``taskkill /T`` 只能杀掉 ``gradlew.bat`` 的进程树；Gradle daemon 是独立的
@@ -785,6 +881,7 @@ def stop_gradle_daemon(root: Path) -> None:
     表现就是「点了停止却还在跑」。这里用 ``gradlew --stop`` 干净地关掉当前
     ``GRADLE_USER_HOME`` 下的所有 daemon。
     """
+    root = Path(str(root)).expanduser()
     gradlew = root / ("gradlew.bat" if os.name == "nt" else "gradlew")
     if not gradlew.is_file():
         return
@@ -873,6 +970,15 @@ def install_probe(probe_jar: str | Path, run_dirs: list[str]) -> dict:
         mods = run_dir / "mods"
         mods.mkdir(parents=True, exist_ok=True)
         dest = mods / jar.name
+        # 旧版本探针可能用别的文件名装过；同名 modid 并存会让 Forge 的加载
+        # 结果不确定，先清掉本工具自己的旧探针，再写入当前版本。
+        for stale in mods.glob("*dev.jar"):
+            name = stale.name.lower()
+            if stale != dest and name.startswith("mcdev") and "probe" in name:
+                try:
+                    stale.unlink()
+                except OSError:
+                    pass
         dest.write_bytes(jar.read_bytes())
         targets.append({"runDir": str(run_dir), "dest": str(dest)})
     if not targets:

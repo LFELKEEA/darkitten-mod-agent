@@ -14,7 +14,7 @@ import re
 import threading
 from pathlib import Path
 
-from . import cards, gradle, probe, process, scenario, templates
+from . import bot, cards, game, gradle, probe, process, scenario, templates
 from .process import LaunchError, LaunchManager
 from .probe import DEFAULT_PORTS, TOKEN, ProbeError
 
@@ -24,6 +24,7 @@ __all__ = [
     "ProbeError",
     "LaunchError",
     "McdevService",
+    "bot",
     "cards",
     "gradle",
     "probe",
@@ -104,6 +105,7 @@ class McdevService:
         wait_join: bool = True,
         join_port: int = 25566,
         install_probe: bool = True,
+        background: bool = True,
     ) -> dict:
         root = Path(str(project_dir)).expanduser()
         probe_ready = templates.supports_probe(root)
@@ -123,6 +125,7 @@ class McdevService:
             wait_join=wait_join and probe_ready,
             join_port=join_port,
             wait_probe=probe_ready,
+            background=background,
         )
         result["probe"] = probe_info
         return result
@@ -151,7 +154,9 @@ class McdevService:
         if jar is None:
             jar = templates.build_probe(root, log=self._log, cancel=self._cancel)
             built = True
-        targets = [item / "mods" for item in run_dirs(root)] or [root / "run" / "mods"]
+        # install_probe 自己会在每个运行目录下建 mods/，这里不能再拼一层，
+        # 否则探针会被装到 run-server/mods/mods/ 里，游戏根本不会加载它。
+        targets = run_dirs(root) or [root / "run"]
         info = gradle.install_probe(jar, [str(item) for item in targets])
         info["built"] = built
         return info

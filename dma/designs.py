@@ -513,6 +513,7 @@ class DesignSession:
                     if item.get("model")
                     else "",
                     "uploaded": bool(item.get("uploaded")),
+                    "edited": bool(item.get("edited")),
                     "description": item.get("description", ""),
                 }
                 for item in self.variants
@@ -689,6 +690,28 @@ class DesignSession:
             "palette": palette,
         }
         self.variants.append(item)
+        self.save()
+        return item
+
+    # ------------------------------------------------------------------
+    def update_texture(self, variant_id: str, source: str | Path) -> dict[str, Any]:
+        """把手动绘制的贴图写回候选方案，并让预览立即反映这次修改。"""
+        item = self.variant(variant_id)
+        rel = str(item.get("texture") or "").strip()
+        if not rel:
+            raise ValueError("这个方案没有可绘制的贴图。")
+        target = self.dir / rel
+        origin = Path(str(source)).expanduser()
+        if not origin.is_file():
+            raise FileNotFoundError(f"文件不存在：{origin}")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if origin.resolve() != target.resolve():
+            shutil.copy2(origin, target)
+        preview_rel = str(item.get("preview") or f"{target.parent.name}/preview.png")
+        preview = self.dir / preview_rel
+        if preview.resolve() != target.resolve():
+            shutil.copy2(target, preview)
+        item["edited"] = True
         self.save()
         return item
 

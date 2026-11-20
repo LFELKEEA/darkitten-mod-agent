@@ -25,11 +25,11 @@ SEND_TO_SERVER = ("sendToServer", "send(PacketDistributor.SERVER", "ServerPlayNe
 def _looks_like_packet(java: object, java_class: object) -> bool:
     text = getattr(java, "text", "")
     name = getattr(java_class, "name", "")
-    body = getattr(java_class, "body", "")
-    return (
-        any(hint in text for hint in PACKET_HINTS)
-        and ("Packet" in name or "Payload" in name or "FriendlyByteBuf" in body or "StreamCodec" in body)
-    )
+    # 类名必须明确是 Packet/Payload。ContainerMenu 的构造器也会用到
+    # FriendlyByteBuf，仅凭缓冲区类型判断会把菜单类误认成网络包。
+    if "Packet" not in name and "Payload" not in name:
+        return False
+    return any(hint in text for hint in PACKET_HINTS)
 
 
 def _direction(name: str, rel: str) -> str:

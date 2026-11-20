@@ -56,6 +56,26 @@ def _loops(ctx: ProjectContext) -> Iterable[Finding]:
     return rows
 
 
+def _call_arity(body: str, open_paren: int) -> int:
+    """从 '(' 位置往后数顶层逗号，得到实参个数。"""
+    depth = 0
+    commas = 0
+    index = open_paren
+    while index < len(body):
+        char = body[index]
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 0:
+                break
+        elif char == "," and depth == 1:
+            commas += 1
+        index += 1
+    inner = body[open_paren + 1:index].strip()
+    return 0 if not inner else commas + 1
+
+
 def _recursion(ctx: ProjectContext) -> Iterable[Finding]:
     rows: list[Finding] = []
     for java, java_class in ctx.classes():
@@ -63,8 +83,22 @@ def _recursion(ctx: ProjectContext) -> Iterable[Finding]:
         for method in java_class.methods:
             if not method.body or method.is_constructor:
                 continue
-            target = f"{method.name}("
-            if target not in method.body:
+            # 只认真正的自调用：this.foo(...)、类名.foo(...) 或裸 foo(...)。
+            # 并且实参个数必须和当前方法一致；stillValid(access, player, block)
+            # 是父类的三参静态重载，不是 stillValid(player) 的递归。
+            pattern = re.compile(
+                rf"\b(?:this|{re.escape(java_class.name)})\s*\.\s*"
+                rf"{re.escape(method.name)}\s*\("
+                rf"|(?<![\w$.]){re.escape(method.name)}\s*\("
+            )
+            expected = len(method.params)
+            recursive = False
+            for match in pattern.finditer(method.body):
+                open_paren = method.body.rfind("(", match.start(), match.end())
+                if open_paren >= 0 and _call_arity(method.body, open_paren) == expected:
+                    recursive = True
+                    break
+            if not recursive:
                 continue
             if any(guard in method.body for guard in GUARDS):
                 continue

@@ -86,12 +86,9 @@ def _worldgen(ctx: ProjectContext) -> Iterable[Finding]:
                 path=rel, line=java_class.line,
                 suggestion="使用 level.random / RandomSource，并从区块种子派生。",
             ))
-        if "setBlock(" in text and not any(key in text for key in ("isLoaded", "getChunk(", "hasChunk", "ensureCanWrite")):
-            rows.append(finding(
-                "P2-09", f"{java_class.name} 放置方块前未检查区块边界/加载状态",
-                path=rel, line=java_class.line, severity="warning",
-                suggestion="跨越区块边界时裁剪放置范围，并确认区块已加载可写。",
-            ))
+        # worldgen 里的 setBlock 发生在区块生成线程/已锁定的区块内，
+        # 不需要也不应该用 isLoaded/hasChunk 做防御；这条规则只会在
+        # Feature/ChunkGenerator 上误报，已移除。
         if "SpawnPlacements" in text or "NaturalSpawner" in text:
             if not any(key in text for key in ("spawnCap", "mobCap", "canSpawn", "checkSpawnRules")):
                 rows.append(finding(
@@ -151,18 +148,21 @@ def _java(ctx: ProjectContext) -> Iterable[Finding]:
                         path=rel, line=method.line, severity="warning",
                         suggestion="检查桶物品的消耗与回填，处理创造模式与堆叠。",
                     ))
-            if ("Hopper" in java_class.name or "Container" in text) and "mayPlace" not in text and "canTakeItem" not in text:
+            if ("WorldlyContainer" in text or "Hopper" in java_class.name) and "mayPlace" not in text and "canTakeItem" not in text:
                 rows.append(finding(
                     "P2-43", f"{java_class.name} 容器转移没有实现 mayPlace/canTakeItem 约束",
                     path=rel, line=java_class.line, severity="info",
                     suggestion="按槽位/物品标签限制输入输出，并做服务端校验。",
                 ))
         if "extends Block" in text and "getPistonPushReaction" not in text and "PistonPushReaction" not in text:
-            rows.append(finding(
-                "P2-41", f"{java_class.name} 没有声明活塞推拉行为",
-                path=rel, line=java_class.line, severity="info",
-                suggestion="明确 getPistonPushReaction，并测试 BlockEntity/NBT 在推拉后的完整性。",
-            ))
+            # 普通装饰方块用原版默认推拉规则没有问题；只有带 BlockEntity 的
+            # 机器方块被活塞推走才会丢 NBT/状态，才需要显式声明。
+            if any(key in text for key in ("BlockEntity", "EntityBlock", "BaseEntityBlock")):
+                rows.append(finding(
+                    "P2-41", f"{java_class.name} 没有声明活塞推拉行为",
+                    path=rel, line=java_class.line, severity="info",
+                    suggestion="明确 getPistonPushReaction，并测试 BlockEntity/NBT 在推拉后的完整性。",
+                ))
         if "setBlock(" in text and "UPDATE_LIGHT" in text and "updateNeighborsAt" not in text:
             rows.append(finding(
                 "P2-11", "修改光源方块后没有触发光照更新",

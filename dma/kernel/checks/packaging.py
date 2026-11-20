@@ -209,9 +209,28 @@ def _duplicates(ctx: ProjectContext) -> Iterable[Finding]:
     generated = ctx.root / "src" / "generated" / "resources"
     if not main.is_dir() or not generated.is_dir():
         return rows
+    build = ""
+    for name in ("build.gradle", "build.gradle.kts"):
+        if ctx.exists(name):
+            build += ctx.read_rel(name)
+    # Forge datagen 的标准写法：generated 作为额外 resource srcDir，同名文件
+    # 由 duplicatesStrategy 决定覆盖顺序。工程已经显式声明策略时，这里的
+    # “重复”是设计的一部分，逐文件报警只会淹没真正的问题。
+    datagen_merge = (
+        "src/generated/resources" in build
+        and "duplicatesStrategy" in build
+    )
     main_files = {path.relative_to(main).as_posix() for path in main.rglob("*") if path.is_file()}
     generated_files = {path.relative_to(generated).as_posix() for path in generated.rglob("*") if path.is_file()}
     for name in sorted(main_files & generated_files):
+        if datagen_merge:
+            break
+        # 内容完全一致的副本不会改变产物，无需告警。
+        try:
+            if (main / name).read_bytes() == (generated / name).read_bytes():
+                continue
+        except OSError:
+            pass
         rows.append(finding(
             "P3-03", f"资源重复：{name} 同时存在于 src/main 与 src/generated",
             path=name, severity="warning",

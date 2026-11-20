@@ -15,7 +15,19 @@ from ..mappings import MappingInfo, detect_project
 from ..rules import rule as lookup_rule
 from ..symbols import SymbolIndex, build_index
 
-SKIP_PARTS = {"build", ".gradle", "out", "run", "target", ".git", "node_modules"}
+SKIP_PARTS = {
+    "build",
+    ".gradle",
+    "out",
+    "run",
+    "target",
+    ".git",
+    "node_modules",
+    # .dma/snapshots 里是历史快照，同名同内容的 Java 会被重复扫出来；
+    # 模型改完真实文件后旧快照仍然报错，lint 永远过不了。
+    ".dma",
+    ".mcdev",
+}
 
 
 def finding(
@@ -198,6 +210,7 @@ def run_checks(
     root: Path,
     *,
     levels: set[str] | None = None,
+    severities: set[str] | None = None,
     only: set[str] | None = None,
     context: ProjectContext | None = None,
     with_index: bool = True,
@@ -221,6 +234,8 @@ def run_checks(
             continue
         for item in rows:
             if levels and item.level not in levels:
+                continue
+            if severities and item.severity not in severities:
                 continue
             report.add(item)
     report.dedupe().sort()

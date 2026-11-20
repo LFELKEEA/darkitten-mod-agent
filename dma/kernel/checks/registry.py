@@ -7,9 +7,12 @@ from collections import Counter, defaultdict
 from typing import Iterable
 
 from ..findings import Finding
+from ..java import mask_comments
 from .common import ProjectContext, finding
 
-REGISTER_RE = re.compile(r"\.register\s*\(\s*(?:\(\s*\)\s*->\s*)?[\"']([^\"']+)[\"']")
+REGISTER_RE = re.compile(
+    r"(?:([A-Za-z_$][\w$.]*)\s*)?\.register\s*\(\s*(?:\(\s*\)\s*->\s*)?[\"']([^\"']+)[\"']"
+)
 CREATE_RE = re.compile(r"DeferredRegister\.create\s*\(\s*([\w.]+)\s*,\s*([^)]+)\)")
 RESOURCE_RE = re.compile(
     r"(?:new\s+(?:ResourceLocation|Identifier)\s*\(|ResourceLocation\.(?:fromNamespaceAndPath|tryBuild|parse)\s*\(|Identifier\.of\s*\()\s*[\"']([^\"']+)[\"']\s*(?:,\s*[\"']([^\"']+)[\"'])?"
@@ -28,43 +31,52 @@ def run(ctx: ProjectContext) -> Iterable[Finding]:
     register_calls = 0
     freeze_seen: list[tuple[str, int]] = []
     registered_sinks: set[str] = set()
+    seen_files: set[str] = set()
 
     for java, java_class in ctx.classes():
         rel = ctx.rel(java.path)
+        # 一个文件里有嵌套类时 ctx.classes() 会多次产出同一文件；
+        # 字面量只按文件扫一遍，否则同一处 register 会被记成重复注册。
+        file_level = rel not in seen_files
+        seen_files.add(rel)
         # fields that hold DeferredRegister
         for field in java_class.fields:
             if "DeferredRegister" in field.type:
                 deferred_fields[field.name] = rel
-        for line_no, line in enumerate(java.text.splitlines(), 1):
-            if "freeze()" in line and "Registry" in line:
-                freeze_seen.append((rel, line_no))
-        for match in CREATE_RE.finditer(java.masked):
-            registry_type = match.group(1)
-            for field_name in deferred_fields:
-                if field_name in java.masked:
-                    pass
-            register_calls += 1
-        # .register(Registry, modBus) sink registration
-        for match in re.finditer(r"(\w+)\.register\s*\(\s*(?:modBus|ModLoadingContext|eventBus|bus)", java.masked):
-            registered_sinks.add(match.group(1))
-        # registration ids grouped by variable/registry type
-        for match in REGISTER_RE.finditer(java.masked):
-            name = match.group(1)
-            line = java.masked.count("\n", 0, match.start()) + 1
-            register_names[name].append((rel, line))
-        for match in RESOURCE_RE.finditer(java.masked):
-            namespace = match.group(1)
-            path = match.group(2) or ""
-            line = java.masked.count("\n", 0, match.start()) + 1
-            if path:
-                key = f"{namespace}:{path}"
-            else:
-                key = namespace
-            resource_ids[key].append((rel, line))
-        for match in UUID_RE.finditer(java.masked):
-            value = match.group(1) or f"{match.group(2)}:{match.group(3)}"
-            line = java.masked.count("\n", 0, match.start()) + 1
-            uuids[value].append((rel, line))
+        if file_level:
+            for line_no, line in enumerate(java.text.splitlines(), 1):
+                if "freeze()" in line and "Registry" in line:
+                    freeze_seen.append((rel, line_no))
+            for match in CREATE_RE.finditer(java.masked):
+                register_calls += 1
+            # .register(Registry, modBus) sink registration
+            for match in re.finditer(r"(\w+)\.register\s*\(\s*(?:modBus|ModLoadingContext|eventBus|bus)", java.masked):
+                registered_sinks.add(match.group(1))
+        # 字符串字面量必须从原文里取；java.masked 会把引号内容清成空格，
+        # 结果就是一堆 `ID 重复` 但 ID 显示为空白，模型根本无法修。
+        if file_level:
+            literal = mask_comments(java.text)
+            # registration ids grouped by variable/registry type
+            for match in REGISTER_RE.finditer(literal):
+                receiver = match.group(1) or ""
+                name = match.group(2)
+                line = literal.count("\n", 0, match.start()) + 1
+                # 同名 ID 在不同注册表里完全合法（方块实体与菜单都叫 foo 很常见），
+                # 只有同一个 DeferredRegister 重复注册同一个 ID 才是复制模板的错。
+                register_names[f"{receiver}:{name}"].append((rel, line))
+            for match in RESOURCE_RE.finditer(literal):
+                namespace = match.group(1)
+                path = match.group(2) or ""
+                line = literal.count("\n", 0, match.start()) + 1
+                if path:
+                    key = f"{namespace}:{path}"
+                else:
+                    key = namespace
+                resource_ids[key].append((rel, line))
+            for match in UUID_RE.finditer(literal):
+                value = match.group(1) or f"{match.group(2)}:{match.group(3)}"
+                line = literal.count("\n", 0, match.start()) + 1
+                uuids[value].append((rel, line))
 
         # early DeferredRegister#get in a static field initializer
         for field in java_class.fields:
@@ -87,25 +99,23 @@ def run(ctx: ProjectContext) -> Iterable[Finding]:
                 ))
 
     # duplicate simple registration names
-    for name, places in register_names.items():
+    for key, places in register_names.items():
         if len(places) > 1:
+            receiver, _, name = key.partition(":")
             files = sorted({path for path, _ in places})
             rows.append(finding(
-                "P1-15", f"注册 ID `{name}` 重复出现 {len(places)} 次（{', '.join(files[:4])}）",
+                "P1-15",
+                f"注册 ID `{name}` 在 {receiver or '同一注册表'} 中重复出现 {len(places)} 次"
+                f"（{', '.join(files[:4])}）",
                 path=places[0][0], line=places[0][1],
                 suggestion="复制模板后忘记改 ID；为每种注册类型维护全局 ID 表。",
             ))
 
-    # duplicate full resource ids
+    # 重复的完整资源 ID：这里只审计注册调用，普通的 ResourceLocation 引用
+    # （如 minecraft:empty、同一个贴图被多个模型引用）重复是正常用法，不报。
     for key, places in resource_ids.items():
         if len(places) < 2:
             continue
-        if key.count(":") == 1:
-            rows.append(finding(
-                "P1-15", f"ResourceLocation `{key}` 在项目中重复 {len(places)} 次",
-                path=places[0][0], line=places[0][1],
-                suggestion="注册 ID 必须全局唯一；检查是否复制了模板。",
-            ))
         namespace, _, path = key.partition(":")
         if namespace == "minecraft":
             rows.append(finding(

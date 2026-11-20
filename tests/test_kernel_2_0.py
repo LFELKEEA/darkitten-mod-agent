@@ -65,8 +65,16 @@ class RuleCatalogTests(unittest.TestCase):
 class ToolSchemaTests(unittest.TestCase):
     def test_tool_definitions_are_unique(self) -> None:
         names = [item["function"]["name"] for item in TOOL_DEFINITIONS]
-        self.assertEqual(len(names), 102)
+        self.assertEqual(len(names), 115)
         self.assertEqual(len(names), len(set(names)))
+
+    def test_texture_and_player_tools_are_exposed(self) -> None:
+        names = {item["function"]["name"] for item in TOOL_DEFINITIONS}
+        for name in ("texture_gen", "entity_texture", "game_playtest",
+                     "game_bot_playtest", "game_window", "mcdev_move",
+                     "mcdev_goto", "mcdev_look", "mcdev_attack", "mcdev_mine",
+                     "mcdev_use_item"):
+            self.assertIn(name, names)
 
     def test_new_kernel_tools_are_exposed(self) -> None:
         names = {item["function"]["name"] for item in TOOL_DEFINITIONS}
@@ -181,6 +189,477 @@ class KernelBridgeTests(TempDataCase):
 # ----------------------------------------------------------------------
 # Edit helpers
 # ----------------------------------------------------------------------
+class LintScenarioTests(TempDataCase):
+    """lint 必须只看真实源码：快照目录、字符串字面量和注册表作用域。"""
+
+    def _project(self) -> Path:
+        root = self.tmp / "mod"
+        (root / "src/main/java/com/x").mkdir(parents=True)
+        (root / "src/main/resources").mkdir(parents=True)
+        (root / "build.gradle").write_text(
+            "plugins { id 'net.minecraftforge.gradle' version '[6.0,6.2)' }\n"
+            "minecraft {\n"
+            "    mappings channel: 'official', version: '1.20.1'\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        return root
+
+    def test_snapshot_java_is_not_linted(self) -> None:
+        from dma.kernel.checks import run_checks
+
+        root = self._project()
+        snap = root / ".dma/snapshots/s1/files/src/main/java/com/x"
+        snap.mkdir(parents=True)
+        (snap / "Bad.java").write_text(
+            "package com.x;\npublic class Bad { void a(){ System.out.println(1); } }\n",
+            encoding="utf-8",
+        )
+        report = run_checks(root, only={"antipattern"}, with_index=False)
+        self.assertNotIn("Bad.java", report.markdown())
+
+    def test_string_literals_survive_comment_mask(self) -> None:
+        from dma.kernel.java import mask_comments
+
+        text = '// "gone"\nString s = "keep"; /* "gone2" */\n'
+        masked = mask_comments(text)
+        self.assertEqual(len(masked), len(text))
+        self.assertIn('"keep"', masked)
+        self.assertNotIn('"gone"', masked)
+
+    def test_duplicate_id_is_scoped_per_registry(self) -> None:
+        from dma.kernel.checks import run_checks
+
+        root = self._project()
+        base = root / "src/main/java/com/x"
+        (base / "Blocks.java").write_text(
+            'package com.x;\n'
+            "class Blocks { static final RegistryObject<?> R = BLOCKS.register(\"foo\", null); }\n",
+            encoding="utf-8",
+        )
+        (base / "Menus.java").write_text(
+            'package com.x;\n'
+            "class Menus { static final RegistryObject<?> R = MENUS.register(\"foo\", null); }\n",
+            encoding="utf-8",
+        )
+        report = run_checks(root, only={"registry"}, with_index=False)
+        self.assertNotIn("注册 ID `foo`", report.markdown())
+
+        (base / "Items.java").write_text(
+            'package com.x;\n'
+            "class Items {\n"
+            "    static final RegistryObject<?> A = ITEMS.register(\"bar\", null);\n"
+            "    static final RegistryObject<?> B = ITEMS.register(\"bar\", null);\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        report = run_checks(root, only={"registry"}, with_index=False)
+        self.assertIn("注册 ID `bar`", report.markdown())
+
+    def test_noise_settings_missing_spawn_target_is_error(self) -> None:
+        import json
+
+        from dma.kernel.checks import run_checks
+
+        root = self._project()
+        target = root / "src/generated/resources/data/x/worldgen/noise_settings"
+        target.mkdir(parents=True)
+        payload = {key: {} for key in (
+            "sea_level", "disable_mob_generation", "aquifers_enabled",
+            "ore_veins_enabled", "legacy_random_source", "default_block",
+            "default_fluid", "noise", "noise_router", "surface_rule",
+        )}
+        (target / "x.json").write_text(json.dumps(payload), encoding="utf-8")
+        report = run_checks(root, only={"datapack"}, with_index=False)
+        self.assertIn("spawn_target", report.markdown())
+
+        payload["spawn_target"] = []
+        (target / "x.json").write_text(json.dumps(payload), encoding="utf-8")
+        report = run_checks(root, only={"datapack"}, with_index=False)
+        self.assertNotIn("spawn_target", report.markdown())
+
+    def test_helper_registered_item_without_model_is_flagged(self) -> None:
+        from dma.kernel.checks import run_checks
+
+        root = self._project()
+        (root / "src/main/resources/assets/twilight_grove").mkdir(parents=True)
+        base = root / "src/main/java/com/x"
+        (base / "ModItems.java").write_text(
+            "package com.x;\n"
+            "class ModItems {\n"
+            "    static final DeferredRegister<Item> ITEMS ="
+            " DeferredRegister.create(ForgeRegistries.ITEMS, \"twilight_grove\");\n"
+            "    static final RegistryObject<Item> A = simple(\"dust\");\n"
+            "    static final RegistryObject<Item> B = simple(\"shard\");\n"
+            "    private static RegistryObject<Item> simple(String name) {\n"
+            "        return ITEMS.register(name, () -> new Item(new Item.Properties()));\n"
+            "    }\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        generated = root / "src/generated/resources/assets/twilight_grove/models/item"
+        generated.mkdir(parents=True)
+        (generated / "dust.json").write_text('{"parent": "item/generated"}', encoding="utf-8")
+        report = run_checks(root, only={"assets"}, with_index=False)
+        text = report.markdown()
+        self.assertNotIn("物品 dust 缺少物品模型", text)
+        self.assertIn("物品 shard 缺少物品模型", text)
+
+    def test_unregistered_model_layer_is_error(self) -> None:
+        from dma.kernel.checks import run_checks
+
+        root = self._project()
+        base = root / "src/main/java/com/x"
+        (base / "BugRenderer.java").write_text(
+            "package com.x;\n"
+            "import net.minecraft.client.model.geom.ModelLayerLocation;\n"
+            "class BugRenderer {\n"
+            "    static final ModelLayerLocation LAYER ="
+            " new ModelLayerLocation(TwilightGrove.id(\"bug\"), \"main\");\n"
+            "    BugRenderer(Context context) {\n"
+            "        super(context, new BugModel(context.bakeLayer(LAYER)));\n"
+            "    }\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        report = run_checks(root, only={"render"}, with_index=False)
+        self.assertIn("模型层 bug#main", report.markdown())
+
+        (base / "ClientSetup.java").write_text(
+            "package com.x;\n"
+            "class ClientSetup {\n"
+            "    void layers(EntityRenderersEvent.RegisterLayerDefinitions event) {\n"
+            "        event.registerLayerDefinition(BugRenderer.LAYER, BugModel::createBodyLayer);\n"
+            "    }\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        report = run_checks(root, only={"render"}, with_index=False)
+        self.assertNotIn("模型层 bug#main", report.markdown())
+
+    def test_forge_mappings_channel_dsl_is_accepted(self) -> None:
+        from dma.kernel.checks import run_checks
+
+        root = self._project()
+        report = run_checks(root, only={"gradle"}, with_index=False)
+        self.assertNotIn("缺少 mappings 配置", report.markdown())
+
+    def test_nested_class_does_not_double_register(self) -> None:
+        from dma.kernel.checks import run_checks
+
+        root = self._project()
+        base = root / "src/main/java/com/x"
+        (base / "Mods.java").write_text(
+            'package com.x;\n'
+            "class Mods {\n"
+            "    static final RegistryObject<?> A = REG.register(\"spawns\", null);\n"
+            "    static final class Inner {}\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        report = run_checks(root, only={"registry"}, with_index=False)
+        self.assertNotIn("注册 ID `spawns`", report.markdown())
+
+    def test_severity_filter_accepts_error_keyword(self) -> None:
+        from dma.kernel.checks import run_checks
+
+        root = self._project()
+        base = root / "src/main/java/com/x"
+        (base / "Bad.java").write_text(
+            "package com.x;\npublic class Bad { void a(){ System.out.println(1); } }\n",
+            encoding="utf-8",
+        )
+        everything = run_checks(root, only={"antipattern"}, with_index=False)
+        errors_only = run_checks(
+            root, only={"antipattern"}, severities={"error"}, with_index=False
+        )
+        self.assertIn("System.out", everything.markdown())
+        self.assertNotIn("System.out", errors_only.markdown())
+        self.assertEqual(errors_only.counts()["total"], 0)
+
+    def test_failure_branch_before_consume_is_not_pass_after_consume(self) -> None:
+        """失败分支返回 FAIL、成功后消耗并返回 SUCCESS 是正确写法。"""
+        from dma.kernel.checks import run_checks
+
+        root = self._project()
+        base = root / "src/main/java/com/x"
+        (base / "Activator.java").write_text(
+            'package com.x;\n'
+            "class Activator {\n"
+            "    public InteractionResult useOn(Context ctx) {\n"
+            "        if (bad(ctx)) { return InteractionResult.FAIL; }\n"
+            "        ctx.getItemInHand().shrink(1);\n"
+            "        return InteractionResult.sidedSuccess(false);\n"
+            "    }\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        report = run_checks(root, only={"domain"}, with_index=False)
+        self.assertNotIn("P1-27", report.markdown())
+
+    def test_consume_then_pass_is_still_flagged(self) -> None:
+        from dma.kernel.checks import run_checks
+
+        root = self._project()
+        base = root / "src/main/java/com/x"
+        (base / "Leaky.java").write_text(
+            'package com.x;\n'
+            "class Leaky {\n"
+            "    public InteractionResult useOn(Context ctx) {\n"
+            "        ctx.getItemInHand().shrink(1);\n"
+            "        return InteractionResult.PASS;\n"
+            "    }\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        report = run_checks(root, only={"domain"}, with_index=False)
+        self.assertIn("P1-27", report.markdown())
+
+    def test_same_name_overload_is_not_recursion(self) -> None:
+        from dma.kernel.checks import run_checks
+
+        root = self._project()
+        base = root / "src/main/java/com/x"
+        (base / "Menu.java").write_text(
+            'package com.x;\n'
+            "class Menu {\n"
+            "    public boolean stillValid(Player p) {\n"
+            "        return stillValid(access, p, block);\n"
+            "    }\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        report = run_checks(root, only={"stress"}, with_index=False)
+        self.assertNotIn("递归调用自己", report.markdown())
+
+    def test_true_recursion_is_flagged(self) -> None:
+        from dma.kernel.checks import run_checks
+
+        root = self._project()
+        base = root / "src/main/java/com/x"
+        (base / "Loop.java").write_text(
+            'package com.x;\n'
+            "class Loop {\n"
+            "    int f(int n) { return f(n - 1); }\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        report = run_checks(root, only={"stress"}, with_index=False)
+        self.assertIn("递归调用自己", report.markdown())
+
+    def test_datagen_resource_merge_is_not_duplicate(self) -> None:
+        from dma.kernel.checks import run_checks
+
+        root = self._project()
+        (root / "build.gradle").write_text(
+            "plugins { id 'net.minecraftforge.gradle' version '[6.0,6.2)' }\n"
+            "minecraft { mappings channel: 'official', version: '1.20.1' }\n"
+            "sourceSets.main.resources { srcDir 'src/generated/resources' }\n"
+            "processResources { duplicatesStrategy = DuplicatesStrategy.INCLUDE }\n",
+            encoding="utf-8",
+        )
+        main = root / "src/main/resources/assets/x"
+        gen = root / "src/generated/resources/assets/x"
+        main.mkdir(parents=True)
+        gen.mkdir(parents=True)
+        (main / "a.json").write_text('{"a": 1}', encoding="utf-8")
+        (gen / "a.json").write_text('{"a": 2}', encoding="utf-8")
+        report = run_checks(root, only={"packaging"}, with_index=False)
+        self.assertNotIn("资源重复", report.markdown())
+
+    def test_javadoc_version_string_is_not_branch(self) -> None:
+        from dma.kernel.checks import run_checks
+
+        root = self._project()
+        base = root / "src/main/java/com/x"
+        (base / "Doc.java").write_text(
+            'package com.x;\n'
+            "/** 适配 1.20.1 的渲染路径。 */\n"
+            "public class Doc { public void draw() { }\n }\n",
+            encoding="utf-8",
+        )
+        report = run_checks(root, only={"version"}, with_index=False)
+        self.assertNotIn("P3-28", report.markdown())
+
+    def test_nbt_scalar_default_is_not_contains_issue(self) -> None:
+        from dma.kernel.checks import run_checks
+
+        root = self._project()
+        base = root / "src/main/java/com/x"
+        (base / "Store.java").write_text(
+            'package com.x;\n'
+            "class Store {\n"
+            "    int value;\n"
+            "    public void load(CompoundTag tag) {\n"
+            "        value = tag.getInt(\"Value\");\n"
+            "    }\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        report = run_checks(root, only={"serialization"}, with_index=False)
+        self.assertNotIn("未校验 contains", report.markdown())
+
+    def test_event_cancel_is_not_flagged(self) -> None:
+        from dma.kernel.checks import run_checks
+
+        root = self._project()
+        base = root / "src/main/java/com/x"
+        (base / "Events.java").write_text(
+            'package com.x;\n'
+            "class Events {\n"
+            "    @SubscribeEvent\n"
+            "    public void onRightClick(PlayerInteractEvent.RightClickBlock event) {\n"
+            "        event.setCanceled(true);\n"
+            "    }\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        report = run_checks(root, only={"domain"}, with_index=False)
+        self.assertNotIn("取消事件前没有检查可取消性", report.markdown())
+
+    def test_humanoid_default_outer_layers_are_error(self) -> None:
+        from dma.kernel.checks import run_checks
+
+        root = self._project()
+        base = root / "src/main/java/com/x"
+        (base / "StalkerModel.java").write_text(
+            'package com.x;\n'
+            "class StalkerModel extends HumanoidModel<Stalker> {\n"
+            "    static LayerDefinition createBodyLayer() {\n"
+            "        MeshDefinition mesh = HumanoidModel.createMesh(CubeDeformation.NONE, 0.0F);\n"
+            "        PartDefinition root = mesh.getRoot();\n"
+            "        root.addOrReplaceChild(\"head\", CubeListBuilder.create(), PartPose.ZERO);\n"
+            "        root.addOrReplaceChild(\"body\", CubeListBuilder.create(), PartPose.ZERO);\n"
+            "        root.addOrReplaceChild(\"right_arm\", CubeListBuilder.create(), PartPose.ZERO);\n"
+            "        root.addOrReplaceChild(\"left_arm\", CubeListBuilder.create(), PartPose.ZERO);\n"
+            "        root.addOrReplaceChild(\"right_leg\", CubeListBuilder.create(), PartPose.ZERO);\n"
+            "        root.addOrReplaceChild(\"left_leg\", CubeListBuilder.create(), PartPose.ZERO);\n"
+            "        return LayerDefinition.create(mesh, 64, 64);\n"
+            "    }\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        report = run_checks(root, only={"render"}, with_index=False)
+        text = report.markdown()
+        self.assertIn("P1-12", text)
+        self.assertIn("jacket", text)
+        self.assertIn("彩色乱码", text)
+
+    def test_humanoid_cleared_outer_layers_pass(self) -> None:
+        from dma.kernel.checks import run_checks
+
+        root = self._project()
+        base = root / "src/main/java/com/x"
+        (base / "StalkerModel.java").write_text(
+            'package com.x;\n'
+            "class StalkerModel extends HumanoidModel<Stalker> {\n"
+            "    static LayerDefinition createBodyLayer() {\n"
+            "        MeshDefinition mesh = HumanoidModel.createMesh(CubeDeformation.NONE, 0.0F);\n"
+            "        PartDefinition root = mesh.getRoot();\n"
+            "        root.addOrReplaceChild(\"head\", CubeListBuilder.create(), PartPose.ZERO);\n"
+            "        root.addOrReplaceChild(\"body\", CubeListBuilder.create(), PartPose.ZERO);\n"
+            "        root.addOrReplaceChild(\"right_arm\", CubeListBuilder.create(), PartPose.ZERO);\n"
+            "        root.addOrReplaceChild(\"left_arm\", CubeListBuilder.create(), PartPose.ZERO);\n"
+            "        root.addOrReplaceChild(\"right_leg\", CubeListBuilder.create(), PartPose.ZERO);\n"
+            "        root.addOrReplaceChild(\"left_leg\", CubeListBuilder.create(), PartPose.ZERO);\n"
+            "        root.addOrReplaceChild(\"hat\", CubeListBuilder.create(), PartPose.ZERO);\n"
+            "        root.addOrReplaceChild(\"jacket\", CubeListBuilder.create(), PartPose.ZERO);\n"
+            "        root.addOrReplaceChild(\"left_sleeve\", CubeListBuilder.create(), PartPose.ZERO);\n"
+            "        root.addOrReplaceChild(\"right_sleeve\", CubeListBuilder.create(), PartPose.ZERO);\n"
+            "        root.addOrReplaceChild(\"left_pants\", CubeListBuilder.create(), PartPose.ZERO);\n"
+            "        root.addOrReplaceChild(\"right_pants\", CubeListBuilder.create(), PartPose.ZERO);\n"
+            "        return LayerDefinition.create(mesh, 64, 64);\n"
+            "    }\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        report = run_checks(root, only={"render"}, with_index=False)
+        self.assertNotIn("P1-12", report.markdown())
+
+    def test_duplicate_particle_registration_is_error(self) -> None:
+        from dma.kernel.checks import run_checks
+
+        root = self._project()
+        base = root / "src/main/java/com/x"
+        (base / "ClientA.java").write_text(
+            "package com.x;\n"
+            "class ClientA {\n"
+            "    void on(RegisterParticleProvidersEvent event) {\n"
+            "        event.registerSpriteSet(ModParticles.SPORE.get(), Provider::new);\n"
+            "    }\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        (base / "ClientB.java").write_text(
+            "package com.x;\n"
+            "class ClientB {\n"
+            "    void on(RegisterParticleProvidersEvent event) {\n"
+            "        event.registerSpriteSet(ModParticles.SPORE.get(), Provider::new);\n"
+            "    }\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        report = run_checks(root, only={"render"}, with_index=False)
+        text = report.markdown()
+        self.assertIn("P2-15", text)
+        self.assertIn("被重复注册", text)
+        self.assertIn("NPE", text)
+
+    def test_single_particle_registration_passes(self) -> None:
+        from dma.kernel.checks import run_checks
+
+        root = self._project()
+        base = root / "src/main/java/com/x"
+        (base / "ClientA.java").write_text(
+            "package com.x;\n"
+            "class ClientA {\n"
+            "    void on(RegisterParticleProvidersEvent event) {\n"
+            "        event.registerSpriteSet(ModParticles.SPORE.get(), Provider::new);\n"
+            "        event.registerSpriteSet(ModParticles.GLOW.get(), Provider::new);\n"
+            "    }\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        report = run_checks(root, only={"render"}, with_index=False)
+        self.assertNotIn("P2-15", report.markdown())
+
+    def test_flat_entity_texture_is_error(self) -> None:
+        from PIL import Image
+
+        from dma.kernel.checks import run_checks
+
+        root = self._project()
+        target = root / "src/main/resources/assets/testmod/textures/entity/flat.png"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        Image.new("RGBA", (64, 64), (8, 8, 10, 255)).save(target)
+        report = run_checks(root, only={"render"}, with_index=False)
+        text = report.markdown()
+        self.assertIn("接近纯黑", text)
+
+    def test_detailed_entity_texture_passes(self) -> None:
+        from dma.kernel.checks import run_checks
+        from dma.kernel.tools import texture
+
+        root = self._project()
+        target = root / "src/main/resources/assets/testmod/textures/entity/skin.png"
+        texture.generate_entity(target, base="#5a4a7a", accent="#66e0d0", seed=2)
+        report = run_checks(root, only={"render"}, with_index=False)
+        self.assertNotIn("P2-15", report.markdown().split("P2-15", 1)[0])
+        self.assertNotIn("接近纯黑", report.markdown())
+
+    def test_flat_item_texture_is_error(self) -> None:
+        from PIL import Image
+
+        from dma.kernel.checks import run_checks
+
+        root = self._project()
+        target = root / "src/main/resources/assets/testmod/textures/item/blob.png"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        Image.new("RGBA", (16, 16), (120, 80, 200, 255)).save(target)
+        report = run_checks(root, only={"render"}, with_index=False)
+        self.assertIn("纯色方块", report.markdown())
+
+
 class EditHelperTests(TempDataCase):
     SOURCE = """package a;
 
@@ -287,6 +766,113 @@ class AssetToolTests(TempDataCase):
             self.skipTest(str(exc))
         data = target.read_bytes()
         self.assertTrue(data.startswith(b"\x89PNG\r\n\x1a\n"))
+
+    def test_blockbench_uses_minecraft_box_uv(self) -> None:
+        from dma.kernel.tools import blockbench
+
+        # 4x12x4 limb at atlas origin (40,16), the vanilla arm layout.
+        limb = blockbench.cube("arm", (0, 0, 0), (4, 12, 4), uv=(40, 16))
+        rects = limb.face_uvs((64, 64))
+        self.assertEqual(rects["up"], (44, 16, 48, 20))
+        self.assertEqual(rects["down"], (48, 16, 52, 20))
+        self.assertEqual(rects["east"], (40, 20, 44, 32))
+        self.assertEqual(rects["north"], (44, 20, 48, 32))
+        self.assertEqual(rects["west"], (48, 20, 52, 32))
+        self.assertEqual(rects["south"], (52, 20, 56, 32))
+        # Without a UV origin every face still maps the whole texture.
+        block = blockbench.cube("block", (0, 0, 0), (16, 16, 16))
+        self.assertEqual(block.face_uvs((16, 16))["north"], (0, 0, 16, 16))
+        # Vanilla cross plants reuse the whole texture on both planes.
+        plant = blockbench.cross_model("plant")
+        self.assertIsNone(plant.cubes[0].uv)
+        self.assertEqual(plant.cubes[0].face_uvs((16, 16))["north"], (0, 0, 16, 16))
+
+    def test_blockbench_custom_cubes_round_trip_and_export(self) -> None:
+        from dma.kernel.tools import blockbench
+
+        model = blockbench.model_from_spec("chair", [
+            {"name": "seat", "from": [0, 8, 0], "to": [16, 12, 16], "uv": [0, 0]},
+            {"name": "leg", "from": [0, 0, 0], "size": [4, 8, 4], "uv": [32, 0]},
+        ], texture_size=(64, 64))
+        self.assertEqual(blockbench.validate(model), [])
+        path = self.tmp / "chair.bbmodel"
+        blockbench.save_bbmodel(model, path)
+        loaded = blockbench.load_bbmodel(path)
+        self.assertEqual(len(loaded.cubes), 2)
+        self.assertEqual(loaded.cubes[1].uv, (32, 0))
+        written = blockbench.export(
+            loaded, self.tmp, namespace="demo", name="chair", kind="block",
+        )
+        self.assertTrue(written[0].is_file())
+        java = json.loads(written[0].read_text(encoding="utf-8"))
+        self.assertEqual(java["texture_size"], [64, 64])
+        self.assertEqual(java["textures"]["0"], "demo:block/chair")
+        self.assertNotIn("uv", java["elements"][0])
+        self.assertEqual(
+            java["elements"][0]["faces"]["north"]["uv"], [16, 16, 32, 20]
+        )
+
+    def test_blockbench_preview_samples_texture(self) -> None:
+        from dma.kernel.tools import blockbench
+
+        try:
+            from PIL import Image
+        except Exception as exc:  # noqa: BLE001 - optional dependency
+            self.skipTest(str(exc))
+        atlas = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+        for y in range(64):
+            for x in range(64):
+                atlas.putpixel(
+                    (x, y),
+                    (230, 60, 60, 255) if (x // 8 + y // 8) % 2 == 0
+                    else (60, 200, 90, 255),
+                )
+        texture = self.tmp / "atlas.png"
+        atlas.save(texture)
+        model = blockbench.model_from_spec("bench", [
+            {"name": "top", "from": [0, 8, 0], "to": [16, 12, 16], "uv": [0, 0]},
+        ], texture_name=blockbench.texture_data_uri(texture), texture_size=(64, 64))
+        target = self.tmp / "bench_preview.png"
+        try:
+            blockbench.preview(model, target, size=(120, 120))
+        except RuntimeError as exc:
+            self.skipTest(str(exc))
+        image = Image.open(target).convert("RGBA")
+        colors = {
+            image.getpixel((x, y))
+            for y in range(image.height)
+            for x in range(image.width)
+        }
+        self.assertTrue(any(c[0] > 150 and c[1] < 120 for c in colors))
+        self.assertTrue(any(c[1] > 100 and c[0] < 150 for c in colors))
+        self.assertGreaterEqual(len(colors), 6)
+
+    def test_blockbench_export_converts_euler_to_java_rotation(self) -> None:
+        from dma.kernel.tools import blockbench
+
+        model = blockbench.model_from_spec("slope", [
+            {"name": "ramp", "from": [0, 0, 0], "to": [16, 4, 16], "uv": [0, 0],
+             "origin": [8, 4, 8], "rotation": [0, 22.5, 0]},
+        ], texture_size=(64, 64))
+        self.assertEqual(blockbench.validate(model), [])
+        java = blockbench.export_java_model(model, namespace="demo")
+        element = java["elements"][0]
+        self.assertEqual(
+            element["rotation"],
+            {"origin": [8, 4, 8], "axis": "y", "angle": 22.5, "rescale": False},
+        )
+        self.assertNotIn("origin", element)
+        # Multiple axes are not representable in a Java model.
+        bad = blockbench.model_from_spec("bad", [
+            {"name": "cube", "from": [0, 0, 0], "to": [8, 8, 8],
+             "rotation": [10, 20, 0]},
+        ])
+        self.assertTrue(any("单轴" in issue for issue in blockbench.validate(bad)))
+        over = blockbench.model_from_spec("over", [
+            {"name": "cube", "from": [0, 0, 0], "to": [8, 8, 8],
+             "rotation": [0, 60, 0]},
+        ])
+        self.assertTrue(any("-45..45" in issue for issue in blockbench.validate(over)))
 
     def test_configgen_writes_screen_lang_and_schema(self) -> None:
         fields = configgen.parse_schema(

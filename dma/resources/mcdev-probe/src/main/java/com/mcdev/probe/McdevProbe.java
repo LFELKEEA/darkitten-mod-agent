@@ -35,6 +35,7 @@ public final class McdevProbe {
             int port = Integer.getInteger("mcdev.probe.client.port", DEFAULT_CLIENT_PORT);
             String token = System.getProperty("mcdev.probe.token", DEFAULT_TOKEN);
             ClientProbeServer.start(port, token);
+            BackgroundWindow.apply(net.minecraft.client.Minecraft.getInstance());
         });
     }
 

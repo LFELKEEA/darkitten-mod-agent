@@ -73,7 +73,7 @@ def run(ctx: ProjectContext) -> Iterable[Finding]:
                 path=build_name,
                 suggestion="添加 id 'net.minecraftforge.gradle' version '[6.0,6.2)'。",
             ))
-        if not re.search(r"\bmappings\s*[({]", build):
+        if not re.search(r"\bmappings\s*(?:[({]|channel\s*:)", build):
             rows.append(finding(
                 "P0-12", "ForgeGradle 缺少 mappings 配置",
                 path=build_name,

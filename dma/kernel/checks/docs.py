@@ -205,6 +205,11 @@ def _javadoc(ctx: ProjectContext) -> Iterable[Finding]:
     rows: list[Finding] = []
     for java in ctx.java_files:
         rel = ctx.rel(java.path)
+        # 只有对外发布的 API 才值得逐方法要求 Javadoc。游戏 Mod 的内部
+        # BlockEntity/Entity/Renderer 都算实现细节，逐条报文档只会淹没
+        # 真正的缺陷。
+        if "/api/" not in rel.replace("\\", "/").lower():
+            continue
         for java_class in java.all_classes():
             if "public" not in java_class.modifiers:
                 continue
@@ -218,6 +223,16 @@ def _javadoc(ctx: ProjectContext) -> Iterable[Finding]:
                 if "public" not in method.modifiers or method.is_constructor:
                     continue
                 if method.annotation("Override"):
+                    continue
+                # 事件回调与简单取值器不值得逐条要求 Javadoc；机械地列 100 条
+                # 会淹没真正缺文档的公共 API。
+                if re.match(r"on[A-Z]", method.name):
+                    continue
+                if re.match(r"(?:get|set|is|has|to|with)[A-Z_]\w*$", method.name):
+                    continue
+                if method.name in {"id", "toString", "hashCode", "equals"}:
+                    continue
+                if len([line for line in (method.body or "").splitlines() if line.strip()]) <= 3:
                     continue
                 if not _has_javadoc(java.text, method.line):
                     rows.append(finding(

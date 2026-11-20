@@ -54,10 +54,16 @@ def run_i18n(ctx: ProjectContext) -> Iterable[Finding]:
     used = _used_keys(ctx)
     rel_base = ctx.rel(base)
     for key in sorted(used):
-        if key.startswith(("item.", "block.", "entity.", "gui.", "message.", "config.")) and key not in base_data:
+        if not key.startswith(("item.", "block.", "entity.", "gui.", "message.", "config.")):
+            continue
+        # "item.twilight_grove." + id 这种动态拼接只能取到前缀，不能当缺失键。
+        if key.endswith((".", "_")) or "%" in key:
+            continue
+        if key not in base_data:
+            # 玩家可见文本缺键会直接显示原始 key，属于交付缺陷而不是风格建议。
             rows.append(finding(
                 "P3-37", f"翻译键缺失：{key}",
-                path=rel_base, severity="warning",
+                path=rel_base, severity="error",
                 suggestion="在 lang 文件中补充该键，或改用已有键。",
             ))
     for key, value in base_data.items():

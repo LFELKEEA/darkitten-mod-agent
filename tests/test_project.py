@@ -93,6 +93,19 @@ class ProjectTests(TempDataCase):
         self.assertIn("src/A.java", tree)
         self.assertIn("README.md", tree)
 
+    def test_search_skips_run_directories(self) -> None:
+        project = self.make()
+        project_mod.write_text(project.root, "src/A.java", "class A { int gold; }\n")
+        # 开发端目录里塞满世界文件，不能把 file_tree 的配额吃光。
+        for index in range(30):
+            project_mod.write_text(
+                project.root, f"run-server/world/region/r.{index}.mca", "binary\n"
+            )
+        hits = project_mod.search_text(project.root, "gold")
+        self.assertTrue(hits and hits[0].startswith("src/A.java"))
+        tree = project_mod.file_tree(project.root, max_entries=5000)
+        self.assertFalse(any(item.startswith("run-server/") for item in tree))
+
     def test_write_strips_markdown_fences_from_code(self) -> None:
         project = self.make()
         content = "```java\npackage x;\n\npublic class A {}\n```\n"

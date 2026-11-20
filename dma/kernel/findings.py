@@ -161,7 +161,10 @@ class Report:
     def score(self) -> int:
         """0-100 delivery score; errors dominate."""
         counts = self.counts()
-        penalty = counts["error"] * 12 + counts["warning"] * 3 + counts["info"]
+        # 通过的工程不应该因为几十条风格提示永远显示 0 分。error 仍然
+        # 主导；warning/info 的扣分设上限，保留区分度但不掩盖结论。
+        soft = min(40, counts["warning"] * 2 + counts["info"])
+        penalty = counts["error"] * 12 + soft
         return max(0, 100 - min(100, penalty))
 
     def failed_rules(self, levels: Iterable[str] | None = None) -> list[str]:

@@ -305,13 +305,23 @@ def _infer_meta(project: Project) -> None:
             pass
 
 
+def _skip_dir(name: str) -> bool:
+    if name.startswith(".") or name in SKIP_DIRS:
+        return True
+    # Forge 开发端默认落在 run-server / run-client / run-data 等目录，里面是
+    # 世界存档和日志，动辄上万文件。不跳过会把 file_tree 的条目配额吃光，
+    # 导致 search_text 根本走不到 src，模型搜什么都是“没有找到”。
+    lowered = name.lower()
+    return lowered.startswith("run-") or lowered.startswith("run_")
+
+
 def file_tree(root: Path, max_entries: int = 240) -> list[str]:
     base = Path(root)
     if not base.is_dir():
         return []
     result: list[str] = []
     for current, dirs, files in os.walk(base):
-        dirs[:] = sorted(d for d in dirs if d not in SKIP_DIRS and not d.startswith("."))
+        dirs[:] = sorted(d for d in dirs if not _skip_dir(d))
         for name in sorted(files):
             path = Path(current) / name
             try:

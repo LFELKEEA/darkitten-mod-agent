@@ -7,6 +7,9 @@
   "mixins": [
     "ServerLevelMixin"
   ],
+  "client": [
+    "WindowMixin"
+  ],
   "injectors": {
     "defaultRequire": 1
   }

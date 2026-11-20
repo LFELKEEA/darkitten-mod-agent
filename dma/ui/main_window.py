@@ -33,6 +33,8 @@ from .connectors_page import ConnectorsPage
 from .environment_page import EnvironmentPage
 from .knowledge_page import KnowledgePage
 from .memory_page import MemoryPage
+from .mod_library_page import ModLibraryPage
+from .paint_page import PaintPage
 from .settings_page import SettingsPage
 from .skills_page import SkillsPage
 from .studio_page import StudioPage
@@ -91,6 +93,7 @@ class MainWindow(QMainWindow):
         self._build()
         self.active_project = self.chat_page.project
         self.build_page.sync_project(self.active_project)
+        self.modlib_page.set_project(self.active_project)
         self.project_changed.connect(self._track_project)
         QTimer.singleShot(800, self._offer_shortcut)
         QTimer.singleShot(2200, self._check_update_startup)
@@ -122,6 +125,8 @@ class MainWindow(QMainWindow):
         self.stack = QStackedWidget()
         self.chat_page = ChatPage(self)
         self.studio_page = StudioPage(self)
+        self.paint_page = PaintPage(self)
+        self.modlib_page = ModLibraryPage(self)
         self.tutorial_page = TutorialPage(self)
         self.build_page = BuildPage(self)
         self.center_page = CenterPage(self)
@@ -134,6 +139,8 @@ class MainWindow(QMainWindow):
         pages = [
             ("对话", self.chat_page),
             ("快速生成", self.studio_page),
+            ("绘图", self.paint_page),
+            ("模型库", self.modlib_page),
             ("教程", self.tutorial_page),
             ("编译运行", self.build_page),
             ("开发中心", self.center_page),
@@ -217,6 +224,8 @@ class MainWindow(QMainWindow):
             self.build_page.sync_project(project)
         if hasattr(self, "studio_page"):
             self.studio_page.set_project(project)
+        if hasattr(self, "modlib_page"):
+            self.modlib_page.set_project(project)
         if project is not None:
             self.config.project_root = str(project.root.parent)
             self.save_config()

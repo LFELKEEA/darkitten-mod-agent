@@ -61,7 +61,12 @@ def _safe_relid(value: str, namespace: str) -> str:
 
 
 def _exists(ctx: ProjectContext, relative: str) -> bool:
-    return (ctx.resource_root() / relative).is_file()
+    # datagen 的产物在 src/generated/resources，不一起看会把已经生成好的
+    # blockstate / 模型全部误报成缺失。
+    return any(
+        (ctx.root / base / relative).is_file()
+        for base in ("src/main/resources", "src/generated/resources")
+    )
 
 
 def _model_path(namespace: str, model: str) -> str:
@@ -260,9 +265,10 @@ def _registered_assets(ctx: ProjectContext, namespaces: set[str]) -> Iterable[Fi
     for name in sorted(items - blocks):
         if not (_exists(ctx, f"assets/{namespace}/models/item/{name}.json") or _exists(ctx, f"assets/{namespace}/items/{name}.json")):
             rows.append(finding(
-                "P1-12", f"物品 {name} 缺少物品模型",
-                path=f"assets/{namespace}/models/item/{name}.json", severity="warning",
-                suggestion="添加 models/item/<name>.json 或 1.21.4+ 的 items/<name>.json。",
+                "P1-12", f"物品 {name} 缺少物品模型，会显示成紫黑方块",
+                path=f"assets/{namespace}/models/item/{name}.json", severity="error",
+                suggestion="添加 models/item/<name>.json 或 1.21.4+ 的 items/<name>.json；"
+                           "datagen 里补 ItemModelProvider 输出，避免逐个手写。",
             ))
     for path in ctx.glob("src/main/resources/assets/**/models/item/*.json"):
         data = ctx.load_json(path)
@@ -284,6 +290,10 @@ def _register_names(ctx: ProjectContext, markers: Iterable[str]) -> set[str]:
         if not any(marker in text for marker in markers):
             continue
         for match in re.finditer(r"\.register\s*\(\s*\"([\w./-]+)\"", text):
+            names.add(match.group(1))
+        # 常见的注册辅助方法：simple("name") / armor("name", ...)。
+        # 只扫带注册表标记的类，避免把同名的普通工具方法算进来。
+        for match in re.finditer(r"\b(?:simple|armor)\s*\(\s*\"([\w./-]+)\"", text):
             names.add(match.group(1))
     return names
 

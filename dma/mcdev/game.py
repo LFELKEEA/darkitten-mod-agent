@@ -221,6 +221,22 @@ def state(*, radius: int = 8, port: int | None = None) -> dict:
     return _data(f"/player/state?radius={max(1, min(int(radius), 64))}", port=port)
 
 
+def window_status(*, port: int | None = None) -> dict:
+    return _data("/window", port=port)
+
+
+def set_window_visible(
+    visible: bool, *, focus: bool = False, port: int | None = None
+) -> dict:
+    """显示/隐藏客户端窗口；隐藏后渲染与截图仍然可用。"""
+    return _data(
+        "/window",
+        method="POST",
+        payload={"visible": bool(visible), "focus": bool(focus)},
+        port=port,
+    )
+
+
 def ui_snapshot(*, port: int | None = None, widget_limit: int = 80) -> dict:
     data = _data("/ui/snapshot", port=port)
     widgets = data.get("widgets")

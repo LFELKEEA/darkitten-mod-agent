@@ -130,6 +130,9 @@ READ_ONLY_TOOLS = {
 # 只读工具刷新 _progress_at 会让 PROGRESS_TIMEOUT 永远不触发，导致「只读死循环」卡死；
 # 这里用 streak 主动打断，而不是等 45 分钟兜底。
 READONLY_STREAK_LIMIT = 8
+# 这些校验工具的重复调用不会改变结果，重复 3 次后必须打断，
+# 否则模型会一步一调地把整轮额度耗在“再确认一次”上。
+VERIFY_TOOLS = {"lint_project", "validate_resources", "asset_lint", "mcdev_prepare"}
 AUTO_BUILD_MAX = 5
 BUILD_TRIGGER_EXTS = {
     ".java", ".kt", ".kts", ".gradle", ".properties", ".json", ".json5",
@@ -139,7 +142,7 @@ BUILD_TRIGGER_EXTS = {
 KERNEL_TOOLS = {
     "lint_project", "symbol_query", "mapping_translate", "impact_analysis",
     "log_parse", "snapshot", "snapshot_list", "rollback", "asset_lint",
-    "texture_gen", "vision_review", "blockbench", "testgen", "migration_plan",
+    "texture_gen", "entity_texture", "vision_review", "blockbench", "testgen", "migration_plan",
     "screenshot_collect", "offline_cache", "asset_library", "config_gen",
     "matrix_plan", "debug_scaffold", "project_fact_check",
     "workflow_plan", "workflow_status", "workflow_next", "workflow_complete",
@@ -748,6 +751,9 @@ class AgentWorker(QObject):
         self._read_offsets: dict[str, int] = {}
         self._native_disabled = False
         self._symbol_index = None
+        # scaffold_project 可能在对话中途才创建工程；创建后必须把任务图
+        # 重新绑到真实目录，否则 workflow_* 只改内存，不会落盘也不会拦验收。
+        self._project_dirty = False
         # 桌面端创建 worker 后会置为 True，用于弹出方案选择窗口；
         # 无界面的调用（测试、脚本）默认自动采用第一个方案。
         self.ui_available = False
@@ -845,6 +851,91 @@ class AgentWorker(QObject):
         reply = ai.request_chat(self.config.ai, messages, cancel=self._cancel)
         return reply, parse_tool_calls(reply), None
 
+    def _build_cache_path(self) -> Path | None:
+        root = getattr(self.project, "root", None)
+        if root is None:
+            return None
+        return Path(root) / ".dma" / "last_build.txt"
+
+    def _save_build_report(self, report: str) -> None:
+        """把最后一次编译结果落盘，下一轮开局直接拿错误清单，不再从头探索。"""
+        path = self._build_cache_path()
+        if path is None or not report:
+            return
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(report[:120_000], encoding="utf-8")
+        except OSError:
+            pass
+
+    def _load_build_report(self) -> str:
+        path = self._build_cache_path()
+        if path is None:
+            return ""
+        try:
+            return path.read_text(encoding="utf-8")
+        except OSError:
+            return ""
+
+    def _build_cache_stale(self) -> bool:
+        """缓存之后如果 src 又被改过，提示模型先重新编译再动手。"""
+        path = self._build_cache_path()
+        root = getattr(self.project, "root", None)
+        if path is None or root is None or not path.is_file():
+            return False
+        try:
+            built_at = path.stat().st_mtime
+            for item in (Path(root) / "src").rglob("*"):
+                if item.suffix in {".java", ".kt"} and item.stat().st_mtime > built_at:
+                    return True
+        except OSError:
+            return False
+        return False
+
+    def _validate_cache_path(self) -> Path | None:
+        root = getattr(self.project, "root", None)
+        if root is None:
+            return None
+        return Path(root) / ".dma" / "last_validate.txt"
+
+    def _save_validate_report(self, report: str) -> None:
+        """缓存资源校验清单，下一轮开局直接接着补缺失项，不必重新扫一遍。"""
+        path = self._validate_cache_path()
+        if path is None or not report:
+            return
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(report[:100_000], encoding="utf-8")
+        except OSError:
+            pass
+
+    def _load_validate_report(self) -> str:
+        path = self._validate_cache_path()
+        if path is None:
+            return ""
+        try:
+            return path.read_text(encoding="utf-8")
+        except OSError:
+            return ""
+
+    @staticmethod
+    def _validate_report_has_issues(report: str) -> bool:
+        if not report:
+            return False
+        if "未发现问题" in report:
+            return False
+        return "问题总数" in report or "注册项覆盖" in report
+
+    def _resume_workspace(self) -> bool:
+        """工程里已有任务图时视为续做，避免首轮又从头规划和联网找参考。"""
+        root = getattr(self.project, "root", None)
+        if root is None:
+            return False
+        try:
+            return (Path(root) / ".dma" / "workflow.json").is_file()
+        except OSError:
+            return False
+
     def _reference_preflight(self) -> str:
         """实现类需求先在线找参考：搜索、反编译、抽取片段，再交给模型。
 
@@ -852,6 +943,9 @@ class AgentWorker(QObject):
         失败不会阻塞主流程，模型仍可自己调用 mod_reference。
         """
         if not bool(getattr(self.config, "auto_reference", True)):
+            return ""
+        # 续轮不再重复联网找参考：首轮已经把资料写进上下文，每轮重搜既慢又打断修复节奏。
+        if getattr(self, "history", None) or self._resume_workspace():
             return ""
         project = self.project
         if project is None:
@@ -891,6 +985,9 @@ class AgentWorker(QObject):
 
     def _large_plan_preflight(self) -> str:
         """需求跨多个机制时先生成阶段计划，避免大型模组写成散装文件。"""
+        # 续轮沿用首轮的计划，不再每轮重建，避免模型被重复计划淹没而忘记编译。
+        if getattr(self, "history", None) or self._resume_workspace():
+            return ""
         project = self.project
         if project is None:
             return ""
@@ -919,6 +1016,24 @@ class AgentWorker(QObject):
             + planner.render(plan)
         )
 
+    def _bind_kernel(self) -> None:
+        """把任务图/规格绑定到当前工程目录。
+
+        没有工程时 KernelBridge 只在内存里建任务图，workflow_complete 会
+        假装成功却不落盘；scaffold_project 之后必须重新绑定。
+        """
+        project = self.project
+        meta = getattr(project, "meta", None)
+        self.kernel = KernelBridge(
+            project.root if project is not None else None,
+            idea=self.user_text,
+            loader=getattr(meta, "loader", "") or "NeoForge",
+            mc=getattr(meta, "mc_version", "") or "1.21.1",
+            modid=getattr(meta, "mod_id", "") or "",
+            package="",
+            side="both",
+        )
+
     def _loop(self) -> AgentRun:
         project = self.project
         project_key = str(project.root) if project is not None else ""
@@ -935,15 +1050,7 @@ class AgentWorker(QObject):
                 knowledge_hits = self.knowledge.overview_hits(
                     project=project_key, limit=1
                 )
-        self.kernel = KernelBridge(
-            project.root if project is not None else None,
-            idea=self.user_text,
-            loader=getattr(getattr(project, "meta", None), "loader", "") or "NeoForge",
-            mc=getattr(getattr(project, "meta", None), "mc_version", "") or "1.21.1",
-            modid=getattr(getattr(project, "meta", None), "mod_id", "") or "",
-            package="",
-            side="both",
-        )
+        self._bind_kernel()
         plan_text = self._large_plan_preflight()
         reference_text = self._reference_preflight()
         facts_text = ""
@@ -974,6 +1081,75 @@ class AgentWorker(QObject):
         messages: list[dict[str, Any]] = [{"role": "system", "content": system}]
         messages.extend(_history_window(self.history, self.config.context_turns))
         messages.append({"role": "user", "content": self.user_text})
+        if self._resume_workspace():
+            # 续做工程：上一轮的编译结果直接带进上下文，模型不必再读十几个文件
+            # 猜哪里出错，能省下一整段探索步骤和 token。
+            cached = self._load_build_report()
+            if cached and "错误" in cached:
+                stale = self._build_cache_stale()
+                head = (
+                    "这是上一轮最后一次编译的结果缓存，直接按这份清单修，"
+                    "不要再读文件探索、不要重新规划。"
+                )
+                if stale:
+                    head += (
+                        "注意：缓存之后 src 又被改过，先调用 build_project 重新编译确认，"
+                        "再按最新结果修。"
+                    )
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": head + "\n\n" + cached[:60_000],
+                    }
+                )
+            validate_cached = self._load_validate_report()
+            if self._validate_report_has_issues(validate_cached):
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "这是上一轮 validate_resources 的缺失清单（缓存，可能已补过一部分）。"
+                            "直接按清单继续补齐，不要重新读文件或重新规划；"
+                            "清单里的条目先看目标文件是否已存在，存在就跳过。"
+                            "补齐后再跑一次 validate_resources 拿最新结果。\n\n"
+                            + validate_cached[:60_000]
+                        ),
+                    }
+                )
+
+        def refresh_system() -> None:
+            """scaffold_project 之后重建系统提示，补上真实的工程信息。"""
+            current = self.project
+            facts = ""
+            if current is not None:
+                try:
+                    from . import modfacts
+
+                    meta = getattr(current, "meta", None)
+                    facts = modfacts.brief(
+                        str(getattr(meta, "loader", "") or ""),
+                        str(getattr(meta, "mc_version", "") or ""),
+                    )
+                except Exception:  # noqa: BLE001 - 事实层失败不应阻断对话
+                    facts = ""
+            messages[0] = {
+                "role": "system",
+                "content": build_system_prompt(
+                    current,
+                    self.skill_store,
+                    memory_context(memory_items),
+                    self.connector_store.catalog_text(),
+                    max_steps=self.config.max_steps,
+                    knowledge_text=knowledge_context(knowledge_hits),
+                    query=self.user_text,
+                    kernel_text=(
+                        self.kernel.prompt_block() if self.kernel is not None else ""
+                    ),
+                    plan_text=plan_text,
+                    reference_text=reference_text,
+                    facts_text=facts,
+                ),
+            }
         final_text = ""
         run = AgentRun()
         limit = max(0, int(self.config.max_steps or 0))
@@ -984,9 +1160,21 @@ class AgentWorker(QObject):
         applied_mark = 0
         pending_fix = False
         last_build_report = ""
+        last_signature = ""
+        repeat_rounds = 0
+        recent_sigs: list[str] = []
+        self._recent_edits: list[tuple[str, str, str]] = []
+        verify_counts: dict[str, int] = {}
+        verify_nudged: set[str] = set()
+        last_applied = len(run.applied)
+        no_change_rounds = 0
 
         while True:
             if limit > 0 and step >= limit:
+                # 轮次步数用尽：如果这轮写过代码却还没编译，先补一次 compileJava，
+                # 把最新错误清单落盘，下一轮开局就能直接接着修。
+                if len(run.applied) > applied_mark:
+                    self._quick_build()
                 break
             if self.cancelled:
                 raise AgentError("已取消")
@@ -1000,20 +1188,26 @@ class AgentWorker(QObject):
             if self._readonly_streak >= READONLY_STREAK_LIMIT:
                 # 连续只读多次却没有任何写入，说明模型陷入了「反复读文件、不动手」的
                 # 探索死循环（只读工具会刷新 _progress_at，PROGRESS_TIMEOUT 拦不住）。
-                # 主动注入强指令打断循环，要求立即开始写代码。
+                # 主动注入强指令打断循环。
                 self._readonly_streak = 0
-                self.status.emit("连续多次只读未写入，正在要求模型立即写代码…")
-                messages.append(
-                    {
-                        "role": "user",
-                        "content": (
-                            "你已经连续多次只读文件（list_files / read_file）却没有写任何代码，"
-                            "陷入了探索循环。停止继续读取，立即开始实现："
-                            "用 write_file 直接写出第一个代码文件（入口类或注册类），"
-                            "然后继续写后续文件。不要再输出「我先看看」这类描述，直接调用写文件工具。"
-                        ),
-                    }
-                )
+                self.status.emit("连续多次只读未写入，正在要求模型立即动手…")
+                if self._resume_workspace():
+                    # 续做已有工程：这里最忌让模型“重写入口类”，会把成熟代码整批覆盖。
+                    guidance = (
+                        "你已经连续多次只读文件（list_files / read_file）却没有做任何修改。"
+                        "这是续做已有工程，不要重写入口类、注册类或任何已有文件。"
+                        "停止继续读取，改为：先调用 build_project 拿到真实编译错误，"
+                        "再按 文件:行号 用 edit_file 修第一组错误，修完立即重新编译。"
+                        "不要输出计划，直接调用工具。"
+                    )
+                else:
+                    guidance = (
+                        "你已经连续多次只读文件（list_files / read_file）却没有写任何代码，"
+                        "陷入了探索循环。停止继续读取，立即开始实现："
+                        "用 write_file 直接写出第一个代码文件（入口类或注册类），"
+                        "然后继续写后续文件。不要再输出「我先看看」这类描述，直接调用写文件工具。"
+                    )
+                messages.append({"role": "user", "content": guidance})
             if limit <= 0:
                 self.status.emit(f"正在请求模型（第 {step} 轮，不限制）…")
             else:
@@ -1114,6 +1308,37 @@ class AgentWorker(QObject):
             if visible:
                 self.assistant.emit(visible)
 
+            signature = "||".join(
+                sorted(
+                    f"{call.name}:"
+                    + json.dumps(call.args, sort_keys=True, ensure_ascii=False)
+                    for call in calls
+                )
+            )
+            if signature == last_signature:
+                repeat_rounds += 1
+            else:
+                last_signature = signature
+                repeat_rounds = 0
+            call_sigs = [
+                call.name
+                + ":"
+                + json.dumps(call.args, sort_keys=True, ensure_ascii=False)
+                for call in calls
+                if call.name
+                in {
+                    "write_file",
+                    "edit_file",
+                    "replace_in_file",
+                    "apply_patch",
+                    "scaffold_project",
+                    "scaffold_forge_project",
+                }
+            ]
+            if call_sigs:
+                recent_sigs.extend(call_sigs)
+                del recent_sigs[:-30]
+            looping_calls = any(recent_sigs.count(sig) >= 3 for sig in call_sigs)
             if native_message is not None:
                 assistant_message: dict[str, Any] = {"role": "assistant", "content": reply}
                 if native_message.get("tool_calls"):
@@ -1146,6 +1371,84 @@ class AgentWorker(QObject):
                         "content": "\n\n".join(results)[:MAX_STEP_RESULT],
                     }
                 )
+            for call in calls:
+                if call.name not in VERIFY_TOOLS:
+                    continue
+                sig = call.name + ":" + json.dumps(call.args, sort_keys=True, ensure_ascii=False)
+                verify_counts[sig] = verify_counts.get(sig, 0) + 1
+                if verify_counts[sig] >= 3 and sig not in verify_nudged:
+                    verify_nudged.add(sig)
+                    self.status.emit(f"{call.name} 已重复执行，提醒模型换下一步…")
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": (
+                                f"{call.name} 这一轮已经执行过多次，结果不会变化。"
+                                "不要再用同样的参数重复校验：按上一次的报告去修文件，"
+                                "或者换下一项检查（build_project / validate_resources / "
+                                "lint_project / mcdev_prepare），也可以直接给出结论。"
+                            ),
+                        }
+                    )
+            if repeat_rounds >= 2:
+                # 模型有时会连续多轮输出完全相同的一组工具调用（尤其是一次写多个
+                # 文件后），把“已完成”误当成“还没开始”。这里明确打断。
+                repeat_rounds = 0
+                self.status.emit("检测到重复的工具调用，已要求继续下一步…")
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "你连续多轮输出了完全相同的工具调用。上面的文件和修改已经执行过，"
+                            "结果就是你现在看到的内容，重复调用不会产生新结果。"
+                            "请立刻停止重复：检查当前工程还缺什么，继续写下一个不同的文件；"
+                            "如果代码已经写完，直接调用 build_project（或 gradlew build）编译并修复错误。"
+                        ),
+                    }
+                )
+            if looping_calls:
+                # 同一个写操作用完全相同的参数执行了三次：再继续只会白烧上下文，
+                # 直接结束本轮，让外层重新发起并先编译拿新错误。
+                self.status.emit("检测到重复写入，提前结束本轮…")
+                run.text = self._finalize_text(
+                    "同一个写操作已经用完全相同的参数执行了三次，结果不会改变，"
+                    "本轮先停在这里。工程代码已保留；下一轮请先调用 build_project "
+                    "拿到最新编译错误，再按报错行修复，不要重复同一次替换。"
+                )
+                return run
+            if self._project_dirty:
+                self._project_dirty = False
+                refresh_system()
+            mutating = any(
+                call.name
+                in {
+                    "write_file",
+                    "edit_file",
+                    "replace_in_file",
+                    "apply_patch",
+                    "scaffold_project",
+                    "scaffold_forge_project",
+                }
+                for call in calls
+            )
+            if len(run.applied) > last_applied:
+                no_change_rounds = 0
+            elif mutating:
+                # 只有“想改但没改成”才算空转；纯读文件交给只读连击和进度超时兜底，
+                # 否则续做时读 10 个文件就会被误判成空转、提前结束本轮。
+                no_change_rounds += 1
+            else:
+                no_change_rounds = 0
+            last_applied = len(run.applied)
+            if no_change_rounds >= 10:
+                # 连续多轮工具调用都没有真正改动文件：模型在空转（重复失败的
+                # edit、反复读同一个文件等）。结束本轮，让外层带着任务图重新
+                # 发起一轮，比无限重试更有效。
+                run.text = self._finalize_text(
+                    "本轮连续多次工具调用没有产生新的文件改动，先结束这一轮。"
+                    "工程里的代码已经保留，下一轮请直接根据编译错误或任务图继续。"
+                )
+                return run
             _compact_messages(messages)
             if self.kernel is not None and step % 12 == 0 and step < limit:
                 # 每 12 轮同步一次任务图进度，防止长任务里模型忘记当前应做的功能。
@@ -1225,6 +1528,7 @@ class AgentWorker(QObject):
         except Exception as exc:  # noqa: BLE001 - 自动编译失败不应吞掉本轮结果
             return False, f"自动编译没有开始：{exc}"
         report = _build_report(result, root=self.project.root)
+        self._save_build_report(report)
         if self.kernel is not None:
             verdict = self.kernel.record_build(result.ok, result.output)
             if verdict.get("action") == "stop":
@@ -1235,6 +1539,22 @@ class AgentWorker(QObject):
                 )
         if result.ok:
             self._emit_artifact(result)
+        return result.ok, report
+
+    def _quick_build(self) -> tuple[bool, str]:
+        """轮次收尾用的轻量编译：只跑 compileJava，保证下一轮有最新错误清单。"""
+        if self.project is None:
+            return False, ""
+        self.status.emit("轮次结束前刷新编译结果…")
+        self._progress_at = time.monotonic()
+        try:
+            result = _run_gradle(
+                self.project.root, "compileJava", 600, self._cancel, self._build_log
+            )
+        except Exception as exc:  # noqa: BLE001 - 收尾编译失败不阻断本轮
+            return False, f"收尾编译没有开始：{exc}"
+        report = _build_report(result, root=self.project.root)
+        self._save_build_report(report)
         return result.ok, report
 
     def _emit_artifact(self, result: "BuildOutcome") -> None:
@@ -1341,6 +1661,8 @@ class AgentWorker(QObject):
         except Exception:  # noqa: BLE001 - 元数据保存失败不影响工程
             pass
         self.project = new_project
+        self._bind_kernel()
+        self._project_dirty = True
         self._progress_at = time.monotonic()
         self.project_created.emit(str(target))
         package_name = package or f"com.example.{mod_id}"
@@ -1588,6 +1910,36 @@ class AgentWorker(QObject):
                     return "write_file 缺少 path。"
                 if not item.content.strip():
                     return "write_file 的 content 为空，已拒绝。"
+                # 同名同内容重复写入是模型常见的空转：告诉它“没变化”，
+                # 避免它把同一次写入当成还没完成，反复重写同一文件。
+                target = None
+                try:
+                    target = project_mod.safe_path(self.project.root, item.path)
+                except Exception:  # noqa: BLE001 - 路径非法时交给 _stage_file 报错
+                    target = None
+                if target is not None and not target.exists():
+                    # 修不好就新建 Foo2.java / Foo3.java 是模型的另一种逃跑方式，
+                    # 只会让同一个类出现多个副本、错误更多。直接拒绝并让它改原文件。
+                    match = re.match(r"(.+?)\d+\.java$", target.name)
+                    if match and target.with_name(match.group(1) + ".java").exists():
+                        return (
+                            f"不要新建副本文件 {target.name}：原文件 "
+                            f"{match.group(1)}.java 已经存在。"
+                            "请直接编辑或整文件重写原文件，不要用数字后缀另起一个类。"
+                        )
+                try:
+                    if target is not None and target.is_file():
+                        current = target.read_text(encoding="utf-8", errors="replace")
+                        if current.replace("\r\n", "\n") == item.content.replace(
+                            "\r\n", "\n"
+                        ):
+                            return (
+                                f"内容未变化：{item.path}（{len(item.content)} 字符）。"
+                                "该文件已经是这个内容，不要重复写入；"
+                                "请继续下一个文件、执行编译，或给出结论。"
+                            )
+                except Exception:  # noqa: BLE001 - 比较失败时照常写入
+                    pass
                 if not self._stage_file(item, run):
                     return f"写入失败：路径不合法或没有打开工程（{item.path}）。"
                 try:
@@ -1733,6 +2085,7 @@ class AgentWorker(QObject):
                 if not target.is_dir():
                     return f"资源目录不存在：{target}"
                 report = arttools.validate_resources(target)
+                self._save_validate_report(report)
                 return report[:MAX_TOOL_RESULT]
             if name in {"edit_file", "replace_in_file", "apply_patch"}:
                 relative = str(args.get("path") or "").strip()
@@ -1746,6 +2099,12 @@ class AgentWorker(QObject):
                 mode = str(args.get("mode") or "auto").strip().lower()
                 if not relative:
                     return "edit_file 缺少 path。"
+                if not symbol and not member and old == new:
+                    return (
+                        "old 和 new 完全相同，文件不会有任何变化。"
+                        "当前代码已经是这个样子，请不要重复替换；"
+                        "如果这里不是编译错误的原因，请检查真正的报错行，或直接继续下一步。"
+                    )
                 try:
                     current = project_mod.read_text(
                         self.project.root, relative, max_chars=2 * 1024 * 1024
@@ -1795,12 +2154,52 @@ class AgentWorker(QObject):
                     if not old:
                         return "edit_file 缺少 old（要替换的原文）。"
                     if old not in current:
+                        # 模型常把中文注释/缩进抄错，导致 old 永远匹配不上，
+                        # 然后同一段 old 反复重试。直接把文件里的真实片段贴回去，
+                        # 让它能复制正确的原文。
+                        excerpt = ""
+                        lines = current.splitlines()
+                        anchor = next(
+                            (line.strip() for line in old.splitlines() if line.strip()),
+                            "",
+                        )
+                        if anchor:
+                            for index, line in enumerate(lines):
+                                if anchor in line:
+                                    start = max(0, index - 3)
+                                    end = min(len(lines), index + 18)
+                                    excerpt = "\n".join(lines[start:end])
+                                    break
+                        hint = (
+                            "\n\n文件里对应位置实际是（请直接复制，注意中文注释和缩进）：\n"
+                            + excerpt
+                            if excerpt
+                            else ""
+                        )
                         return (
                             f"没有在 {relative} 里找到要替换的原文。"
-                            "请先用 read_file 确认内容，old 必须和文件里的字符完全一致。"
+                            "请先用 read_file 确认内容，old 必须和文件里的字符完全一致；"
+                            "如果多次匹配不上，直接用 write_file 重写整个文件。"
+                            + hint
+                        )
+                    key = relative.replace("\\", "/")
+                    recent = getattr(self, "_recent_edits", None) or []
+                    if old != new and any(
+                        path == key and prev_old == new and prev_new == old
+                        for path, prev_old, prev_new in recent
+                    ):
+                        return (
+                            f"检测到 edit_file 来回震荡：{relative} 里这段内容刚刚从 A 改成 B，"
+                            "现在又要从 B 改回 A，文件会被反复改回去。\n"
+                            "先停止替换并调用 build_project 编译，确认哪种写法真的能通过；"
+                            "也可以用 dev_docs / api_lookup 查 1.20.1 的正确符号路径。"
+                            "如果两种写法都会报同一个错，说明真正的问题在别处，不要继续切换。"
                         )
                     updated = current.replace(old, new, 1)
                     detail = "替换 1 处"
+                    recent.append((key, old, new))
+                    del recent[:-20]
+                    self._recent_edits = recent
                 item = PendingFile(path=relative, content=updated, reason="edit")
                 if not self._stage_file(item, run):
                     return f"修改失败：路径不合法（{relative}）。"
@@ -2072,6 +2471,7 @@ class AgentWorker(QObject):
                     return f"编译没有开始：{exc}"
                 self._progress_at = time.monotonic()
                 report = _build_report(result, root=self.project.root)
+                self._save_build_report(report)
                 if self.kernel is not None and task == "build":
                     verdict = self.kernel.record_build(result.ok, result.output)
                     if verdict.get("action") == "stop":
@@ -2140,7 +2540,7 @@ class AgentWorker(QObject):
                 return self._execute_center(name, args)
             if name in KERNEL_TOOLS:
                 return self._execute_kernel(name, args)
-            if name.startswith("mcdev_"):
+            if name.startswith("mcdev_") or name == "game_playtest":
                 return self._execute_mcdev(name, args)
             if name.startswith("game_"):
                 return self._execute_game(name, args)
@@ -2154,12 +2554,13 @@ class AgentWorker(QObject):
                 "mcdev_prepare、mcdev_stop、mcdev_launch_status、mcdev_status、"
                 "mcdev_command、mcdev_ui、mcdev_click、mcdev_screenshot、mcdev_run_dump、"
                 "mcdev_use、mcdev_install_probe、mcdev_scenario、mcdev_build、"
-                "mcdev_gametest、mcdev_build_probe、"
+                "mcdev_gametest、mcdev_build_probe、mcdev_move、mcdev_look、mcdev_attack、"
+                "mcdev_mine、mcdev_break、mcdev_use_item、mcdev_inventory、game_playtest、"
                 "game_observe、game_setup、game_new_world、game_language、"
                 "game_control、game_test、"
                 "lint_project、symbol_query、mapping_translate、impact_analysis、"
                 "log_parse、snapshot、snapshot_list、rollback、asset_lint、"
-                "texture_gen、vision_review、blockbench、testgen、migration_plan、"
+                "texture_gen、entity_texture、vision_review、blockbench、testgen、migration_plan、"
                 "screenshot_collect、offline_cache。"
             )
         except Exception as exc:
@@ -2708,12 +3109,24 @@ class AgentWorker(QObject):
             mc = str(args.get("mc") or getattr(meta, "mc_version", "") or "")
             return modfacts.report(root, loader, mc)[:MAX_TOOL_RESULT]
         if name == "lint_project":
-            levels = {str(args.get("level"))} if args.get("level") else None
+            raw = str(args.get("level") or "").strip()
+            # level 既可能是 P0..P3，也可能是 error/warning/info。以前把
+            # "error" 直接塞进 levels（P 级别集合），过滤后一条不剩，
+            # lint 会错误地报告“通过”。
+            severities = None
+            levels = None
+            if raw:
+                lowered = raw.lower()
+                if lowered in {"error", "warning", "info"}:
+                    severities = {lowered}
+                else:
+                    levels = {raw.upper()}
             from .kernel.checks import run_checks
 
             report = run_checks(
                 root,
                 levels=levels,
+                severities=severities,
                 only={str(args["checker"])} if args.get("checker") else None,
             )
             if self.kernel is not None:
@@ -2827,27 +3240,94 @@ class AgentWorker(QObject):
             relative = str(args.get("path") or "").strip()
             if not relative.lower().endswith(".png"):
                 return "texture_gen 只支持 .png。"
+            if "/textures/entity/" in relative.replace("\\", "/").lower():
+                return ("实体皮肤不能用 texture_gen（物品模板只有 16x16，贴到模型上会被拉伸）。"
+                        "请改用 entity_texture，指定 layout/boxes 生成 64x64 UV 图集。")
             target = project_mod.safe_path(root, relative)
             size = _arg_int(args, "size", 16)
-            style = str(args.get("style") or args.get("kind") or "noise")
-            base = str(args.get("base") or args.get("palette") or "#7a7a7a")
+            style = str(args.get("style") or args.get("kind") or "").strip().lower()
+            stem_name = relative.rsplit("/", 1)[-1].rsplit(".", 1)[0]
+            is_block = "/block/" in relative.replace("\\", "/")
+            if not style or style in {"block", "tile", "texture"}:
+                style = (tool_texture.infer_block_style(stem_name)
+                         if is_block else "box")
+            raw_base = args.get("base") or args.get("palette")
+            if raw_base:
+                base = str(raw_base)
+            elif is_block:
+                base = tool_texture.block_color(stem_name, style)
+            else:
+                base = tool_texture.material_color(stem_name)
+            # Ore/crystal sparkle needs a contrasting mineral hue; deriving
+            # it from the stone base made every ore grey on grey.
+            default_accent = (
+                tool_texture.block_accent(stem_name, style, base)
+                if style in tool_texture.BLOCK_STYLES
+                else tool_texture.shade(base, 1.35)
+            )
+            accent = str(args.get("accent") or default_accent)
+            seed = _arg_int(args, "seed", 0)
+            transparent = bool(args.get("transparent"))
             try:
-                if style in {"ingot", "gem", "stick", "sword", "dust"}:
-                    tool_texture.generate_item(target, style, base=base, size=size)
-                else:
+                if style in tool_texture.BLOCK_STYLES:
                     tool_texture.generate(
                         target,
                         tool_texture.TextureSpec(
                             size=(size, size), style=style, base=base,
-                            accent=str(args.get("accent") or "#4a4a4a"),
-                            seed=_arg_int(args, "seed", 0),
+                            accent=accent, seed=seed, transparent=transparent,
+                            max_colors=64,
                         ),
+                    )
+                else:
+                    tool_texture.generate_item(
+                        target, style, base=base, accent=accent,
+                        size=size, seed=seed,
                     )
                 check = tool_texture.validate(target)
             except Exception as exc:  # noqa: BLE001 - 缺 Pillow 或参数错误
                 return f"贴图生成失败：{exc}"
             return json.dumps(
-                {"path": relative, "validation": check}, ensure_ascii=False, indent=2
+                {"path": relative, "style": style, "validation": check},
+                ensure_ascii=False, indent=2,
+            )[:MAX_TOOL_RESULT]
+        if name == "entity_texture":
+            relative = str(args.get("path") or "").strip()
+            if not relative.lower().endswith(".png"):
+                return "entity_texture 只支持 .png。"
+            target = project_mod.safe_path(root, relative)
+            layout = str(args.get("layout") or "humanoid").strip().lower()
+            raw_size = args.get("size")
+            if isinstance(raw_size, (list, tuple)) and len(raw_size) == 2:
+                size = (max(16, min(256, int(raw_size[0]))), max(16, min(256, int(raw_size[1]))))
+            else:
+                size = (64, 64)
+            boxes = args.get("boxes")
+            if boxes is not None and not isinstance(boxes, list):
+                return "entity_texture 的 boxes 必须是数组。"
+            try:
+                stem = relative.rsplit("/", 1)[-1].rsplit(".", 1)[0]
+                entity_base = str(args.get("base") or tool_texture.material_color(
+                    stem, "#8a8a9a"))
+                entity_accent = str(args.get("accent") or tool_texture.entity_accent(
+                    str(args.get("variant") or stem), entity_base))
+                tool_texture.generate_entity(
+                    target,
+                    layout=layout,
+                    base=entity_base,
+                    accent=entity_accent,
+                    seed=_arg_int(args, "seed", 0),
+                    size=size,
+                    variant=str(args.get("variant") or ""),
+                    boxes=boxes,
+                    transparent=True if args.get("transparent") is None
+                    else bool(args.get("transparent")),
+                )
+                check = tool_texture.validate(target, expected_size=size)
+            except Exception as exc:  # noqa: BLE001
+                return f"实体皮肤生成失败：{exc}"
+            return json.dumps(
+                {"path": relative, "layout": layout, "validation": check},
+                ensure_ascii=False, indent=2,
             )[:MAX_TOOL_RESULT]
         if name == "vision_review":
             relative = str(args.get("path") or "").strip()
@@ -2858,18 +3338,64 @@ class AgentWorker(QObject):
             action = str(args.get("action") or "create").lower()
             relative = str(args.get("path") or "").strip()
             target = project_mod.safe_path(root, relative)
+            namespace = str(args.get("namespace") or "").strip() or (
+                self.kernel.spec.modid if self.kernel is not None and self.kernel.spec else "mod"
+            )
+            texture_arg = str(args.get("texture") or "").strip()
+            texture_path = None
+            texture_name = ""
+            if texture_arg:
+                try:
+                    candidate = project_mod.safe_path(root, texture_arg)
+                except Exception:  # noqa: BLE001 - resource name, not a file
+                    candidate = None
+                if candidate is not None and candidate.is_file():
+                    texture_path = candidate
+                    texture_name = tool_blockbench.texture_data_uri(candidate)
+                elif not texture_arg.lower().endswith(".png") and "/" not in texture_arg and "\\" not in texture_arg:
+                    texture_name = texture_arg
             if action in {"create", "export"}:
-                shape = str(args.get("shape") or "full")
-                model = (
-                    tool_blockbench.cross_model(target.stem)
-                    if shape == "cross"
-                    else tool_blockbench.full_block(target.stem)
-                )
+                shape = str(args.get("shape") or "full").lower()
+                cube_specs = args.get("cubes")
+                raw_size = args.get("size")
+                texture_size = (64, 64) if isinstance(cube_specs, list) and cube_specs else (16, 16)
+                if isinstance(raw_size, list) and len(raw_size) == 2:
+                    try:
+                        texture_size = (
+                            max(1, int(raw_size[0])),
+                            max(1, int(raw_size[1])),
+                        )
+                    except (TypeError, ValueError):
+                        pass
+                if isinstance(cube_specs, list) and cube_specs:
+                    model = tool_blockbench.model_from_spec(
+                        target.stem,
+                        cube_specs,
+                        texture_name=texture_name,
+                        texture_size=texture_size,
+                        author=str(args.get("author") or ""),
+                    )
+                elif shape == "cross":
+                    model = tool_blockbench.cross_model(
+                        target.stem, texture="0",
+                    )
+                    model.texture_name = texture_name
+                else:
+                    model = tool_blockbench.full_block(target.stem, texture="0")
+                    model.texture_name = texture_name
                 tool_blockbench.save_bbmodel(model, target)
                 if action == "export":
-                    exported = tool_blockbench.export(model, target.with_suffix(".json"))
-                    return f"已生成 {relative}，导出模型 {exported}"
-                return f"已生成 {relative}（{len(model.cubes)} 个立方体）"
+                    written = tool_blockbench.export(
+                        model,
+                        root,
+                        namespace=namespace,
+                        name=str(args.get("name") or target.stem),
+                        texture_png=texture_path,
+                        kind=str(args.get("kind") or "block"),
+                    )
+                    rel = [item.relative_to(root).as_posix() for item in written]
+                    return f"已生成 {relative}，导出：" + "、".join(rel)
+                return f"已生成 {relative}（{len(model.cubes)} 个立方体，贴图 {texture_size[0]}×{texture_size[1]}）"
             if action == "load":
                 model = tool_blockbench.load_bbmodel(target)
                 return json.dumps(tool_blockbench.summary(model), ensure_ascii=False, indent=2)
@@ -2879,8 +3405,11 @@ class AgentWorker(QObject):
                 return json.dumps({"issues": issues}, ensure_ascii=False, indent=2)
             if action == "preview":
                 model = tool_blockbench.load_bbmodel(target)
-                output = target.with_suffix(".png")
-                tool_blockbench.preview(model, output)
+                output = target.with_name(target.stem + "_preview.png")
+                if texture_path is None:
+                    sibling = target.with_suffix(".png")
+                    texture_path = sibling if sibling.is_file() else None
+                tool_blockbench.preview(model, output, texture=texture_path)
                 return f"预览图已生成：{output.relative_to(root).as_posix()}"
             return "blockbench action 只能是 create / export / load / validate / preview。"
         if name == "testgen":
@@ -3091,6 +3620,7 @@ class AgentWorker(QObject):
                 wait_join=bool(args.get("wait_join", True)),
                 join_port=join_port,
                 install_probe=bool(args.get("install_probe", True)),
+                background=bool(args.get("background", True)),
             )
             self._progress_at = time.monotonic()
             return json.dumps(result, ensure_ascii=False, indent=2)[:MAX_TOOL_RESULT]
@@ -3164,6 +3694,53 @@ class AgentWorker(QObject):
                 self.kernel.record_test(code == 0, summary)
             self._progress_at = time.monotonic()
             return f"{head}\n{summary}\n\n{output[-MAX_BUILD_RESULT:]}"[:MAX_TOOL_RESULT]
+        if name in {"mcdev_bot", "game_bot_playtest", "game_window"}:
+            port = args.get("port")
+            try:
+                port = int(port) if port else None
+            except (TypeError, ValueError):
+                port = None
+        if name == "mcdev_bot":
+            from .mcdev import bot as mcbot
+
+            action = str(args.get("action") or "state").strip().lower()
+            try:
+                result = mcbot.control(action, args, port=port)
+            except Exception as exc:  # noqa: BLE001 - 返回可读失败原因
+                return f"mcdev_bot {action} 执行失败：{exc}"
+            self._progress_at = time.monotonic()
+            return json.dumps(result, ensure_ascii=False, indent=2)[:MAX_TOOL_RESULT]
+        if name == "game_bot_playtest":
+            from .mcdev import bot as mcbot
+
+            try:
+                result = mcbot.playtest(
+                    name=str(args.get("name") or mcbot.DEFAULT_BOT),
+                    port=port,
+                    log=lambda text: self.status.emit(f"[bot] {text}"[-160:]),
+                )
+            except Exception as exc:  # noqa: BLE001
+                return f"game_bot_playtest 执行失败：{exc}"
+            self._progress_at = time.monotonic()
+            return json.dumps(result, ensure_ascii=False, indent=2)[:MAX_TOOL_RESULT]
+        if name == "game_window":
+            from .mcdev import game as mcgame
+
+            action = str(args.get("action") or "status").strip().lower()
+            try:
+                if action == "status":
+                    result = mcgame.window_status(port=port)
+                elif action in {"show", "hide"}:
+                    result = mcgame.set_window_visible(
+                        action == "show",
+                        focus=bool(args.get("focus")),
+                        port=port,
+                    )
+                else:
+                    return "game_window 的 action 只能是 status、show 或 hide。"
+            except Exception as exc:  # noqa: BLE001
+                return f"game_window {action} 执行失败：{exc}"
+            return json.dumps(result, ensure_ascii=False, indent=2)[:MAX_TOOL_RESULT]
 
         side = str(args.get("side") or "server").strip().lower()
         if side not in {"server", "client"}:
@@ -3241,6 +3818,117 @@ class AgentWorker(QObject):
                 ensure_ascii=False,
                 indent=2,
             )[:MAX_TOOL_RESULT]
+        if name == "mcdev_goto":
+            try:
+                tx = float(args.get("x"))
+                tz = float(args.get("z"))
+            except (TypeError, ValueError):
+                return "mcdev_goto 需要数字 x 和 z。"
+            try:
+                timeout = max(3.0, min(120.0, float(args.get("timeout") or 25)))
+            except (TypeError, ValueError):
+                timeout = 25.0
+            from .mcdev import gameplay
+
+            result = gameplay.goto(
+                tx, tz, timeout=timeout,
+                radius=float(args.get("radius") or 0.9),
+                log=lambda text: self.status.emit(f"[goto] {text}"[-160:]),
+            )
+            return json.dumps(result, ensure_ascii=False, indent=2)[:MAX_TOOL_RESULT]
+        if name == "mcdev_move":
+            mode = str(args.get("mode") or "walk").strip().lower()
+            ms = max(0, min(10_000, _arg_int(args, "ms", 1000)))
+            payload: dict[str, Any] = {"mode": mode, "ms": ms}
+            for key in ("x", "y", "z", "dx", "dy", "dz"):
+                if args.get(key) is not None:
+                    payload[key] = args.get(key)
+            for key in ("keys", "sprint", "sneak", "jump"):
+                if args.get(key) is not None:
+                    payload[key] = args.get(key)
+            timeout = 20.0 + ms / 1000.0
+            return json.dumps(
+                mcdev.probe.probe_json(
+                    side, "/player/move", method="POST", payload=payload, port=port,
+                    timeout=timeout,
+                ),
+                ensure_ascii=False,
+                indent=2,
+            )[:MAX_TOOL_RESULT]
+        if name == "mcdev_look":
+            payload = {}
+            for key in ("x", "y", "z", "yaw", "pitch", "entity", "target"):
+                if args.get(key) is not None:
+                    payload[key] = args.get(key)
+            return json.dumps(
+                mcdev.probe.probe_json(
+                    side, "/player/look", method="POST", payload=payload, port=port
+                ),
+                ensure_ascii=False,
+                indent=2,
+            )[:MAX_TOOL_RESULT]
+        if name == "mcdev_attack":
+            payload = {
+                "radius": args.get("radius") if args.get("radius") is not None else 4.0,
+            }
+            if args.get("entity") is not None:
+                payload["entity"] = args.get("entity")
+            if args.get("target"):
+                payload["target"] = args.get("target")
+            return json.dumps(
+                mcdev.probe.probe_json(
+                    side, "/player/attack", method="POST", payload=payload, port=port
+                ),
+                ensure_ascii=False,
+                indent=2,
+            )[:MAX_TOOL_RESULT]
+        if name in {"mcdev_mine", "mcdev_break"}:
+            payload = {
+                "x": _arg_int(args, "x", 0),
+                "y": _arg_int(args, "y", 64),
+                "z": _arg_int(args, "z", 0),
+            }
+            if name == "mcdev_mine":
+                payload["timeoutMs"] = _arg_int(args, "timeoutMs", 6000)
+                path = "/player/mine"
+                timeout = 20.0
+            else:
+                path = "/player/break"
+                timeout = 15.0
+            return json.dumps(
+                mcdev.probe.probe_json(
+                    side, path, method="POST", payload=payload, port=port, timeout=timeout
+                ),
+                ensure_ascii=False,
+                indent=2,
+            )[:MAX_TOOL_RESULT]
+        if name == "mcdev_use_item":
+            return json.dumps(
+                mcdev.probe.probe_json(
+                    side, "/player/use_item", method="POST", payload={}, port=port
+                ),
+                ensure_ascii=False,
+                indent=2,
+            )[:MAX_TOOL_RESULT]
+        if name == "mcdev_inventory":
+            return json.dumps(
+                mcdev.probe.probe_json(side, "/player/inventory", port=port),
+                ensure_ascii=False,
+                indent=2,
+            )[:MAX_TOOL_RESULT]
+        if name == "game_playtest":
+            from .mcdev import gameplay
+
+            try:
+                result = gameplay.playtest(
+                    side=side,
+                    port=port,
+                    seconds=max(1, min(10, _arg_int(args, "seconds", 2))),
+                    log=lambda text: self.status.emit(f"[playtest] {text}"[-200:]),
+                )
+            except Exception as exc:  # noqa: BLE001 - 失败要返回证据而不是抛出
+                return f"game_playtest 执行失败：{exc}"
+            return json.dumps(result, ensure_ascii=False, indent=2)[:MAX_TOOL_RESULT]
         return f"未知的 mcdev 工具：{name}"
 
     # ------------------------------------------------------------------

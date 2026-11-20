@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
+import time
 import unittest
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from unittest import mock
 
 from dma import mcdev
-from dma.mcdev import cards, game, gradle as mcdev_gradle, process as mcdev_process
+from dma.mcdev import cards, game, gameplay, gradle as mcdev_gradle, process as mcdev_process
 from dma.mcdev import scenario, server_files
 
 from .base import TempDataCase
@@ -276,6 +278,183 @@ class LaunchCancelTests(unittest.TestCase):
         service.set_cancel(second)
         service.restore_cancel(previous, first)
         self.assertIs(service._cancel, second)
+
+
+class BackgroundModeTests(TempDataCase):
+    """全后台运行所需的运行文件：创造模式、隐藏窗口、失焦不暂停。"""
+
+    def test_server_properties_default_to_creative(self) -> None:
+        root = self.tmp / "mod"
+        root.mkdir()
+        server_files.ensure_server_properties(root, 25566)
+        text = (root / "run" / "server.properties").read_text(encoding="utf-8")
+        self.assertIn("gamemode=creative", text)
+        self.assertIn("force-gamemode=true", text)
+        self.assertIn("online-mode=false", text)
+
+    def test_probe_options_hide_window_and_disable_pause(self) -> None:
+        root = self.tmp / "mod"
+        root.mkdir()
+        changed = server_files.ensure_client_background(root, background=True)
+        self.assertTrue(changed)
+        path = root / "run" / "config" / "mcdev-probe.properties"
+        text = path.read_text(encoding="utf-8")
+        self.assertIn("background=true", text)
+        self.assertIn("pause-on-lost-focus=false", text)
+        options = (root / "run" / "options.txt").read_text(encoding="utf-8")
+        self.assertIn("pauseOnLostFocus:false", options)
+        fml = (root / "run" / "config" / "fml.toml").read_text(encoding="utf-8")
+        self.assertIn("earlyWindowControl = false", fml)
+        # 幂等：内容一致时不再重复写。
+        self.assertEqual(server_files.ensure_client_background(root, background=True), [])
+
+    def test_background_false_really_shows_window(self) -> None:
+        root = self.tmp / "mod"
+        root.mkdir()
+        server_files.ensure_client_background(root, background=True)
+        server_files.ensure_client_background(root, background=False)
+        text = (root / "run" / "config" / "mcdev-probe.properties").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("background=false", text)
+        self.assertIn(
+            "pauseOnLostFocus:true",
+            (root / "run" / "options.txt").read_text(encoding="utf-8"),
+        )
+        self.assertIn(
+            "earlyWindowControl = true",
+            (root / "run" / "config" / "fml.toml").read_text(encoding="utf-8"),
+        )
+
+
+class WindowHideTests(unittest.TestCase):
+    def test_hide_loop_rehides_window_that_shows_again(self) -> None:
+        entry = mcdev_process.LaunchEntry(
+            kind="client",
+            project_dir=".",
+            pid=2,
+            port=39002,
+            log_path="",
+            started_at=time.time(),
+        )
+        calls: list[tuple[int, bool]] = []
+
+        def fake_show(hwnd: int, visible: bool) -> bool:
+            calls.append((hwnd, visible))
+            if len(calls) >= 3:
+                entry.running = False
+            return True
+
+        with mock.patch.object(mcdev_process, "_glfw_windows", return_value=[4242]), \
+                mock.patch.object(mcdev_process, "_show_window", side_effect=fake_show):
+            mcdev_process._hide_new_windows(set(), entry)
+
+        self.assertGreaterEqual(len(calls), 3)
+        self.assertTrue(all(hwnd == 4242 and not visible for hwnd, visible in calls))
+
+
+class ProbeInstallTests(TempDataCase):
+    def test_install_probe_replaces_old_probe_jars(self) -> None:
+        root = self.tmp / "mod"
+        mods = root / "run" / "mods"
+        mods.mkdir(parents=True)
+        stale = mods / "mcdev_probe-0.1.0-dev.jar"
+        stale.write_bytes(b"old")
+        other = mods / "othermod-1.0-dev.jar"
+        other.write_bytes(b"keep")
+        jar = self.tmp / "mcdev-probe-dev.jar"
+        jar.write_bytes(b"new")
+        with mock.patch.object(
+            mcdev_gradle,
+            "_read_manifest",
+            return_value="MixinConfigs: mcdev_probe.mixins.json",
+        ):
+            mcdev_gradle.install_probe(jar, [str(root / "run")])
+        self.assertFalse(stale.exists())
+        self.assertTrue(other.exists())
+        self.assertEqual((mods / jar.name).read_bytes(), b"new")
+
+    def test_stop_gradle_daemon_accepts_string_path(self) -> None:
+        root = self.tmp / "mod"
+        root.mkdir()
+        (root / "gradlew.bat").write_text("@echo off\n", encoding="utf-8")
+        with mock.patch.object(mcdev_gradle.subprocess, "run") as run:
+            mcdev_gradle.stop_gradle_daemon(str(root))
+        self.assertTrue(run.called)
+
+
+class BotControlTests(unittest.TestCase):
+    """用本地假服务端探针验证假玩家接口与高层动作分派。"""
+
+    def setUp(self) -> None:
+        self.requests: list[tuple[str, dict]] = []
+
+        class Handler(BaseHTTPRequestHandler):
+            def _reply(self, payload: dict) -> None:
+                body = json.dumps({"ok": True, "data": payload}).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_GET(self):  # noqa: N802
+                test.requests.append((self.path, {}))
+                self._reply({"path": self.path})
+
+            def do_POST(self):  # noqa: N802
+                length = int(self.headers.get("Content-Length") or 0)
+                raw = self.rfile.read(length).decode("utf-8") if length else "{}"
+                try:
+                    payload = json.loads(raw)
+                except json.JSONDecodeError:
+                    payload = {"raw": raw}
+                test.requests.append((self.path, payload))
+                self._reply({"path": self.path, "received": payload})
+
+            def log_message(self, *args):  # noqa: D401
+                return
+
+        test = self
+        self.server = HTTPServer(("127.0.0.1", 0), Handler)
+        self.port = self.server.server_address[1]
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+
+    def tearDown(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=2)
+
+    def test_spawn_defaults_to_creative(self) -> None:
+        mcdev.bot.spawn("Dev", x=1, y=64, z=2, port=self.port)
+        path, payload = self.requests[-1]
+        self.assertEqual(path, "/bot/spawn")
+        self.assertEqual(payload["gamemode"], "creative")
+        self.assertEqual(payload["x"], 1.0)
+
+    def test_control_maps_walk_to_move(self) -> None:
+        mcdev.bot.control(
+            "walk", {"name": "Dev", "dx": 3, "dz": -1, "steps": 12}, port=self.port
+        )
+        path, payload = self.requests[-1]
+        self.assertEqual(path, "/bot/move")
+        self.assertEqual(payload["mode"], "walk")
+        self.assertEqual(payload["steps"], 12)
+
+    def test_state_and_gamemode_paths(self) -> None:
+        mcdev.bot.state("Dev", radius=6, port=self.port)
+        self.assertTrue(self.requests[-1][0].startswith("/bot/state?name=Dev"))
+        mcdev.bot.gamemode("Dev", "survival", port=self.port)
+        path, payload = self.requests[-1]
+        self.assertEqual(path, "/bot/gamemode")
+        self.assertEqual(payload["gamemode"], "survival")
+
+    def test_window_visibility_payload(self) -> None:
+        mcdev.game.set_window_visible(False, port=self.port)
+        path, payload = self.requests[-1]
+        self.assertEqual(path, "/window")
+        self.assertFalse(payload["visible"])
 
 
 class GameControlTests(unittest.TestCase):
@@ -775,6 +954,174 @@ class TemplateTests(TempDataCase):
         self.assertEqual(status.get("processes"), [])
 
 
+class StaleLaunchTests(TempDataCase):
+    """源码改过之后不能复用旧开发端，否则验证的是上一版 class。"""
+
+    def _project(self) -> tuple[Path, Path, Path]:
+        root = self.tmp / "mod"
+        source = root / "src/main/java/a/A.java"
+        source.parent.mkdir(parents=True)
+        source.write_text("class A {}", encoding="utf-8")
+        built = root / "build/classes/java/main/a/A.class"
+        built.parent.mkdir(parents=True)
+        built.write_bytes(b"x")
+        return root, source, built
+
+    def test_needs_rebuild_when_source_newer(self) -> None:
+        root, source, built = self._project()
+        now = time.time()
+        os.utime(built, (now - 100, now - 100))
+        os.utime(source, (now, now))
+        self.assertTrue(mcdev_process.project_needs_rebuild(root))
+
+    def test_fresh_build_is_reused(self) -> None:
+        root, source, built = self._project()
+        now = time.time()
+        os.utime(source, (now - 100, now - 100))
+        os.utime(built, (now, now))
+        self.assertFalse(mcdev_process.project_needs_rebuild(root))
+
+    def test_missing_classes_force_rebuild(self) -> None:
+        root = self.tmp / "mod2"
+        source = root / "src/main/java/A.java"
+        source.parent.mkdir(parents=True)
+        source.write_text("class A {}", encoding="utf-8")
+        self.assertTrue(mcdev_process.project_needs_rebuild(root))
+
+    def test_stale_tracked_server_is_stopped_before_launch(self) -> None:
+        root, _, _ = self._project()
+        manager = mcdev_process.LaunchManager()
+        fake_process = mock.Mock()
+        fake_process.poll.return_value = None
+        manager._entries["server"] = mcdev_process.LaunchEntry(
+            kind="server",
+            project_dir=str(root),
+            pid=1,
+            port=39001,
+            log_path=str(root / "log.txt"),
+            started_at=0.0,
+            process=fake_process,
+        )
+        with (
+            mock.patch.object(
+                mcdev_process, "project_needs_rebuild", return_value=True
+            ),
+            mock.patch.object(
+                mcdev_process.probe_mod, "probe_status_once", return_value=False
+            ),
+            mock.patch.object(
+                manager, "stop", side_effect=RuntimeError("stop called")
+            ) as stop_mock,
+        ):
+            with self.assertRaises(RuntimeError):
+                manager.launch("server", root, 5000)
+        stop_mock.assert_called_once_with("server")
+
+    def test_fresh_tracked_server_is_reused(self) -> None:
+        root, _, _ = self._project()
+        manager = mcdev_process.LaunchManager()
+        fake_process = mock.Mock()
+        fake_process.poll.return_value = None
+        manager._entries["server"] = mcdev_process.LaunchEntry(
+            kind="server",
+            project_dir=str(root),
+            pid=1,
+            port=39001,
+            log_path=str(root / "log.txt"),
+            started_at=0.0,
+            process=fake_process,
+        )
+        with (
+            mock.patch.object(
+                mcdev_process, "project_needs_rebuild", return_value=False
+            ),
+            mock.patch.object(
+                mcdev_process.probe_mod, "probe_status_once", return_value=False
+            ),
+        ):
+            result = manager.launch("server", root, 5000)
+        self.assertTrue(result["alreadyRunning"])
+        self.assertFalse(result["stale"])
+
+
+class ClientCrashTests(unittest.TestCase):
+    """客户端启动即崩溃时不要连着重试三次，直接交日志。"""
+
+    def _crashed(self) -> mcdev_process.LaunchEntry:
+        return mcdev_process.LaunchEntry(
+            kind="client", project_dir="", pid=1, port=39002,
+            log_path="", started_at=0.0, running=False, exit_code=1,
+            tail="java.lang.IllegalArgumentException: No model for layer x#main",
+        )
+
+    def test_crashed_client_stops_retrying(self) -> None:
+        manager = mcdev_process.LaunchManager()
+        manager._entries["client"] = self._crashed()
+        with (
+            mock.patch.object(manager, "wait_client_ready", return_value=False),
+            mock.patch.object(manager, "connect_client"),
+            mock.patch.object(manager, "wait_client_join", return_value=(False, "")),
+            mock.patch.object(manager, "stop") as stop_mock,
+        ):
+            result = manager._join_client(Path("."), {"pid": 1}, 5000, 25566)
+        self.assertTrue(result.get("crashed"))
+        self.assertEqual(result.get("exitCode"), 1)
+        self.assertEqual(len(result.get("attempts") or []), 1)
+        stop_mock.assert_not_called()
+
+    def test_wait_client_ready_returns_when_process_died(self) -> None:
+        manager = mcdev_process.LaunchManager()
+        manager._entries["client"] = self._crashed()
+        started = time.time()
+        self.assertFalse(manager.wait_client_ready(30_000))
+        self.assertLess(time.time() - started, 5.0)
+
+
+class BackgroundFocusTests(unittest.TestCase):
+    """客户端必须在后台跑：窗口抢走前台后要还回去，不能接管鼠标。"""
+
+    def test_restore_focus_skips_without_previous(self) -> None:
+        with (
+            mock.patch.object(mcdev_process, "_glfw_windows", return_value=[11]),
+            mock.patch.object(mcdev_process, "_force_foreground") as force_mock,
+        ):
+            mcdev_process._restore_focus(0, set(), timeout=0.2, poll=0.01, settle=0.01)
+        force_mock.assert_not_called()
+
+    def test_restore_focus_ignores_windows_that_pre_existed(self) -> None:
+        with (
+            mock.patch.object(mcdev_process, "_glfw_windows", return_value=[11]),
+            mock.patch.object(mcdev_process, "foreground_window", return_value=11),
+            mock.patch.object(mcdev_process, "_force_foreground") as force_mock,
+        ):
+            mcdev_process._restore_focus(
+                99, {11}, timeout=0.2, poll=0.01, settle=0.01
+            )
+        force_mock.assert_not_called()
+
+    def test_restore_focus_returns_front_when_game_grabs_it(self) -> None:
+        with (
+            mock.patch.object(mcdev_process, "_glfw_windows", return_value=[11, 12]),
+            mock.patch.object(mcdev_process, "foreground_window", return_value=12),
+            mock.patch.object(mcdev_process, "_force_foreground", return_value=True) as force_mock,
+        ):
+            mcdev_process._restore_focus(
+                99, {11}, timeout=2.0, poll=0.01, settle=0.01
+            )
+        force_mock.assert_called_once_with(99)
+
+    def test_restore_focus_does_not_steal_an_unrelated_window(self) -> None:
+        with (
+            mock.patch.object(mcdev_process, "_glfw_windows", return_value=[12]),
+            mock.patch.object(mcdev_process, "foreground_window", return_value=77),
+            mock.patch.object(mcdev_process, "_force_foreground") as force_mock,
+        ):
+            mcdev_process._restore_focus(
+                99, set(), timeout=2.0, poll=0.01, settle=0.01
+            )
+        force_mock.assert_not_called()
+
+
 class NoProbeLaunchTests(TempDataCase):
     def test_run_dir_prefers_run(self) -> None:
         root = self.tmp / "mod"
@@ -787,6 +1134,73 @@ class NoProbeLaunchTests(TempDataCase):
         root.mkdir()
         self.assertEqual(server_files.run_dir_for(root), root / "run")
         self.assertEqual(server_files.run_dir_for(root, "client"), root / "run")
+
+    def test_stalled_launch_stops_waiting(self) -> None:
+        """启动日志长时间无新输出时不能再傻等到超时。"""
+        manager = mcdev_process.LaunchManager()
+        manager._sleep = lambda _s: None
+        fake_process = mock.Mock()
+        fake_process.poll.return_value = None
+        entry = mcdev_process.LaunchEntry(
+            kind="server",
+            project_dir=str(self.tmp),
+            pid=1,
+            port=0,
+            log_path=str(self.tmp / "log.txt"),
+            started_at=0.0,
+            tail="To honour the JVM settings...\n",
+        )
+        with mock.patch.object(mcdev_process, "_STALL_SECONDS", 0.05):
+            ready = manager._wait_for_started("server", 60_000, fake_process, entry)
+        self.assertFalse(ready)
+
+    def test_wait_for_probe_accepts_started_log(self) -> None:
+        """探针没响应但日志已经 Done 时，不能把正常服务端判成失败再杀掉。"""
+        manager = mcdev_process.LaunchManager()
+        manager._sleep = lambda _s: None
+        fake_process = mock.Mock()
+        fake_process.poll.return_value = None
+        entry = mcdev_process.LaunchEntry(
+            kind="server",
+            project_dir=str(self.tmp),
+            pid=1,
+            port=39001,
+            log_path=str(self.tmp / "log.txt"),
+            started_at=0.0,
+            tail='Done (5.130s)! For help, type "help"\n',
+        )
+        with mock.patch.object(
+            mcdev_process.probe_mod, "probe_status_once", return_value=False
+        ):
+            ready = manager._wait_for_probe("server", 39001, 60_000, fake_process, entry)
+        self.assertTrue(ready)
+
+    def test_ensure_probe_installs_into_run_mods(self) -> None:
+        """探针必须装进 <run>/mods，不能是 <run>/mods/mods。"""
+        root = self.tmp / "mod"
+        root.mkdir()
+        (root / "build.gradle").write_text(
+            "runs {\n    server { workingDirectory project.file('run-server') }\n}\n",
+            encoding="utf-8",
+        )
+        jar = self.tmp / "mcdev-probe-dev.jar"
+        jar.write_bytes(b"x")
+        seen: dict = {}
+
+        def fake_install(probe_jar, dirs):
+            seen["dirs"] = list(dirs)
+            return {"targets": []}
+
+        service = mcdev.McdevService()
+        with (
+            mock.patch.object(mcdev.templates, "supports_probe", return_value=True),
+            mock.patch.object(mcdev.templates, "find_probe_jar", return_value=jar),
+            mock.patch.object(
+                mcdev.gradle, "install_probe", side_effect=fake_install
+            ),
+        ):
+            service.ensure_probe(root)
+        self.assertEqual(seen["dirs"], [str(root / "run-server")])
 
     def test_started_markers(self) -> None:
         self.assertTrue(mcdev_process._looks_started("server", "Done (3.586s)!"))
@@ -920,6 +1334,64 @@ class NoProbeLaunchTests(TempDataCase):
         rendered = argv if isinstance(argv, str) else " ".join(argv)
         self.assertIn("--init-script", rendered)
         self.assertIn(str(script), rendered)
+
+
+class GameplayTests(unittest.TestCase):
+    def test_playtest_reports_when_world_is_not_ready(self) -> None:
+        with mock.patch.object(
+            gameplay, "_state", return_value={"inWorld": False, "screen": "TitleScreen"}
+        ):
+            result = gameplay.playtest()
+        self.assertFalse(result["ok"])
+        self.assertIn("in_world", result["failed"])
+        self.assertEqual("TitleScreen", result["steps"][0]["screen"])
+
+    def test_recorder_only_passes_when_every_step_passes(self) -> None:
+        recorder = gameplay._Recorder()
+        recorder.add("a", True)
+        recorder.add("b", False)
+        summary = recorder.summary()
+        self.assertFalse(summary["ok"])
+        self.assertEqual(["b"], summary["failed"])
+        self.assertEqual(1, summary["passed"])
+
+    def test_goto_stops_when_inside_radius(self) -> None:
+        states = [
+            {"inWorld": True, "x": 0, "z": 0},
+            {"inWorld": True, "x": 3, "z": 0},
+            {"inWorld": True, "x": 5.2, "z": 0},
+        ]
+        calls: list[tuple] = []
+
+        def fake_state(_port=None):
+            return states.pop(0) if states else {"inWorld": True, "x": 5.2, "z": 0}
+
+        def fake_call(side, path, *, method="GET", payload=None, port=None, timeout=15.0):
+            calls.append((path, payload))
+            return {"ok": True, "data": {}}
+
+        with mock.patch.object(gameplay, "_state", fake_state), \
+             mock.patch.object(gameplay, "_call", side_effect=fake_call), \
+             mock.patch.object(gameplay.time, "sleep", return_value=None):
+            result = gameplay.goto(5, 0, timeout=10)
+        self.assertTrue(result["ok"])
+        self.assertLessEqual(result["distance"], 0.9)
+        self.assertTrue(any(path == "/player/look" for path, _ in calls))
+        self.assertTrue(any(path == "/player/move" for path, _ in calls))
+
+    def test_goto_reports_timeout(self) -> None:
+        def fake_call(side, path, *, method="GET", payload=None, port=None, timeout=15.0):
+            return {"ok": True, "data": {}}
+
+        clock = iter([0.0, 0.0, 20.0, 40.0, 60.0])
+        with mock.patch.object(
+            gameplay, "_state", lambda _p=None: {"inWorld": True, "x": 0, "z": 0}
+        ), mock.patch.object(gameplay, "_call", side_effect=fake_call), \
+             mock.patch.object(gameplay.time, "sleep", return_value=None), \
+             mock.patch.object(gameplay.time, "time", lambda: next(clock, 99.0)):
+            result = gameplay.goto(100, 0, timeout=5)
+        self.assertFalse(result["ok"])
+        self.assertEqual("timeout", result["reason"])
 
 
 if __name__ == "__main__":

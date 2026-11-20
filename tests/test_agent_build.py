@@ -136,6 +136,97 @@ class BuildToolTests(TempDataCase):
         status = _tool_status(ToolCall(name="build_project", args={"task": "runClient"}))
         self.assertIn("runClient", status)
 
+    def test_build_report_cache_roundtrip(self) -> None:
+        """编译结果要落盘，下一轮开局能读回来。"""
+        report = "编译失败（退出码 1）。\n\n共解析出 3 个错误\nA.java:1 找不到符号"
+        self.worker._save_build_report(report)
+        self.assertEqual(self.worker._load_build_report(), report)
+        self.assertFalse(self.worker._build_cache_stale())
+
+    def test_build_cache_stale_after_source_edit(self) -> None:
+        """缓存之后又改了 java，应该提示先重新编译。"""
+        import os
+        import time
+        from pathlib import Path
+
+        self.worker._save_build_report("编译失败（退出码 1）。\n共解析出 1 个错误")
+        src = Path(self.project.root) / "src" / "main" / "java" / "A.java"
+        src.parent.mkdir(parents=True, exist_ok=True)
+        src.write_text("package a;", encoding="utf-8")
+        cache = Path(self.project.root) / ".dma" / "last_build.txt"
+        past = cache.stat().st_mtime - 10
+        os.utime(cache, (past, past))
+        now = time.time()
+        os.utime(src, (now + 5, now + 5))
+        self.assertTrue(self.worker._build_cache_stale())
+
+    def test_resume_injects_cached_build_errors(self) -> None:
+        """续做工程时，缓存的错误清单要直接进入第一轮上下文。"""
+        from pathlib import Path
+
+        dma_dir = Path(self.project.root) / ".dma"
+        dma_dir.mkdir(parents=True, exist_ok=True)
+        (dma_dir / "workflow.json").write_text("{}", encoding="utf-8")
+        self.worker._save_build_report(
+            "编译失败（退出码 1）。\n\n共解析出 2 个错误\n"
+            "src/main/java/com/x/ModBlocks.java:12: 错误: 找不到符号"
+        )
+        seen: list[list[dict]] = []
+
+        def fake(ai, messages, **_kwargs):
+            seen.append(list(messages))
+            return "本轮结束。"
+
+        with mock.patch("dma.agent.ai.request_chat", side_effect=fake):
+            self.worker._loop()
+
+        joined = "\n".join(str(m.get("content") or "") for m in seen[0])
+        self.assertIn("上一轮最后一次编译的结果缓存", joined)
+        self.assertIn("ModBlocks.java:12", joined)
+
+    def test_resume_injects_cached_validate_issues(self) -> None:
+        """续做时缓存里的资源缺失清单也要带进上下文，避免每轮重扫。"""
+        from pathlib import Path
+
+        dma_dir = Path(self.project.root) / ".dma"
+        dma_dir.mkdir(parents=True, exist_ok=True)
+        (dma_dir / "workflow.json").write_text("{}", encoding="utf-8")
+        self.worker._save_validate_report(
+            "- **问题总数**: 3\n- **注册项覆盖**: 方块 1；缺失 3 项\n\n"
+            "## 注册项资源覆盖\n- assets/x/blockstates/a.json 缺失"
+        )
+        seen: list[list[dict]] = []
+
+        def fake(ai, messages, **_kwargs):
+            seen.append(list(messages))
+            return "本轮结束。"
+
+        with mock.patch("dma.agent.ai.request_chat", side_effect=fake):
+            self.worker._loop()
+
+        joined = "\n".join(str(m.get("content") or "") for m in seen[0])
+        self.assertIn("上一轮 validate_resources 的缺失清单", joined)
+        self.assertIn("blockstates/a.json", joined)
+
+    def test_clean_validate_cache_is_not_injected(self) -> None:
+        from pathlib import Path
+
+        dma_dir = Path(self.project.root) / ".dma"
+        dma_dir.mkdir(parents=True, exist_ok=True)
+        (dma_dir / "workflow.json").write_text("{}", encoding="utf-8")
+        self.worker._save_validate_report("未发现问题。")
+        seen: list[list[dict]] = []
+
+        def fake(ai, messages, **_kwargs):
+            seen.append(list(messages))
+            return "本轮结束。"
+
+        with mock.patch("dma.agent.ai.request_chat", side_effect=fake):
+            self.worker._loop()
+
+        joined = "\n".join(str(m.get("content") or "") for m in seen[0])
+        self.assertNotIn("上一轮 validate_resources 的缺失清单", joined)
+
 
 class BuildReportTests(unittest.TestCase):
     def test_prompt_requires_self_build(self) -> None:
@@ -170,6 +261,35 @@ class BuildReportTests(unittest.TestCase):
         self.assertIn("cannot find symbol", text)
         self.assertIn("ModEntities.java:12", text)
         self.assertIn("错误分布", text)
+
+    def test_failure_structured_errors_chinese_javac(self) -> None:
+        """中文 Windows 的 javac 输出“错误:”，也必须转成结构化清单。"""
+        output = (
+            "> Task :compileJava FAILED\n"
+            "D:/proj/src/main/java/com/x/ModBlocks.java:12: 错误: 找不到符号\n"
+            "        Block log = ModBlocks.TWILIGHT_LOG.get();\n"
+            " 符号:   变量 TWILIGHT_LOG\n"
+            " 位置: 类 ModBlocks\n"
+            "D:/proj/src/main/java/com/x/ModItems.java:8: 错误: 不兼容的类型\n"
+            "BUILD FAILED in 5s\n"
+        )
+        text = _build_report(BuildOutcome(ok=False, code=1, output=output))
+        self.assertIn("编译失败，共解析出", text)
+        self.assertIn("ModBlocks.java:12", text)
+        self.assertIn("ModItems.java:8", text)
+        self.assertIn("找不到符号", text)
+
+    def test_failure_keeps_same_message_for_different_files(self) -> None:
+        """同一条“找不到符号”出现在两个文件时，两个位置都要保留。"""
+        output = (
+            "D:/p/src/main/java/com/x/A.java:3: 错误: 找不到符号\n"
+            "D:/p/src/main/java/com/x/B.java:9: 错误: 找不到符号\n"
+            "BUILD FAILED in 1s\n"
+        )
+        text = _build_report(BuildOutcome(ok=False, code=1, output=output))
+        self.assertIn("共解析出 2 个错误", text)
+        self.assertIn("A.java:3", text)
+        self.assertIn("B.java:9", text)
 
     def test_success_without_jars_explains(self) -> None:
         result = BuildOutcome(ok=True, code=0, output="BUILD SUCCESSFUL")

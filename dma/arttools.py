@@ -776,7 +776,7 @@ def validate_resources(root: str) -> str:
     problems: list[tuple[str, str]] = []  # (相对文件, 问题描述)。
     counters = {
         "json": 0, "blockstate": 0, "model": 0, "texture": 0,
-        "lang": 0, "png": 0, "namespace": 0,
+        "lang": 0, "png": 0, "namespace": 0, "coverage": 0,
     }
     json_files = 0
     png_files = 0
@@ -866,17 +866,34 @@ def validate_resources(root: str) -> str:
                 if width % 16 != 0 or height % 16 != 0:
                     add(path, f"PNG 尺寸 {width}x{height} 不是 16 的倍数", "png")
 
+    # 注册项 ↔ 资源文件覆盖检查：只校验“文件本身没问题”是不够的，
+    # 注册了 80 个方块却只有 1 个 blockstate 也必须报出来。
+    coverage_lines: list[str] = []
+    coverage_items: list[tuple[str, str]] = []
+    coverage_summary = ""
+    try:
+        coverage_items, coverage_summary, coverage_lines = _coverage_report(root_path)
+    except Exception:  # noqa: BLE001 - 覆盖检查失败不能拖垮整个校验
+        coverage_items, coverage_summary, coverage_lines = [], "", []
+    counters["coverage"] = len(coverage_items)
+
     # 组装报告。
     lines: list[str] = [
         "# 资源校验报告",
         "",
         f"- **目录**: {root}",
         f"- **JSON 文件**: {json_files} 个 | **PNG 文件**: {png_files} 个",
-        f"- **问题总数**: {len(problems)}",
-        "",
+        f"- **问题总数**: {len(problems) + len(coverage_items)}",
     ]
+    if coverage_summary:
+        lines.append(f"- **注册项覆盖**: {coverage_summary}")
+    lines.append("")
 
-    if not problems:
+    if coverage_lines:
+        lines.extend(coverage_lines)
+        lines.append("")
+
+    if not problems and not coverage_items:
         lines.append("未发现问题。")
         return "\n".join(lines)
 
@@ -899,7 +916,169 @@ def validate_resources(root: str) -> str:
     lines.append(f"- lang 键/值问题: {counters['lang']}")
     lines.append(f"- PNG 尺寸问题: {counters['png']}")
     lines.append(f"- 命名空间格式问题: {counters['namespace']}")
+    lines.append(f"- 注册项资源缺失: {counters['coverage']}")
     return "\n".join(lines)
+
+
+_REG_DECL_RE = re.compile(
+    r"DeferredRegister\s*<\s*(\w+)(?:\s*<[^>]*>)?\s*>\s+(\w+)\s*="
+)
+_REG_CALL_RE = re.compile(r"\b(\w+)\.register\s*\(\s*\"([A-Za-z0-9_.\-]+)\"")
+_HELPER_CALL_RE = re.compile(r"\bregister(NoItem)?\s*\(\s*\"([A-Za-z0-9_.\-]+)\"")
+_MODID_RE = re.compile(r'(?m)^\s*modId\s*=\s*"([^"]+)"')
+
+
+def _coverage_report(resources: Path) -> tuple[list[tuple[str, str]], str, list[str]]:
+    """对比 Java 里的注册项与 assets/data 文件，列出缺失资源。
+
+    返回 ``(问题列表, 摘要, 报告行)``；无法判断时返回空结果。
+    """
+    # resources 目录形如 <项目>/src/main/resources；不是这种结构就不做覆盖检查。
+    parts = [p.lower() for p in resources.parts]
+    try:
+        idx = parts.index("resources")
+    except ValueError:
+        return [], "", []
+    if idx < 2 or parts[idx - 1] != "main" or parts[idx - 2] != "src":
+        return [], "", []
+    java_root = (resources.parent / "java").resolve()
+    if not java_root.is_dir():
+        return [], "", []
+
+    mod_id = ""
+    toml = resources / "META-INF" / "mods.toml"
+    if toml.is_file():
+        try:
+            match = _MODID_RE.search(toml.read_text(encoding="utf-8", errors="ignore"))
+            mod_id = match.group(1) if match else ""
+        except OSError:
+            mod_id = ""
+    if not mod_id or "${" in mod_id:
+        # mods.toml 里的 modId 常写成 ${mod_id} 占位符，构建时才展开；
+        # 从 Java 入口类的 MOD_ID 常量取真实值。
+        mod_id = ""
+        for path in java_root.rglob("*.java"):
+            try:
+                text = path.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                continue
+            match = re.search(r'MOD_ID\s*=\s*"([a-z0-9_]+)"', text)
+            if match:
+                mod_id = match.group(1)
+                break
+    if not mod_id:
+        return [], "", []
+
+    blocks: set[str] = set()
+    no_item_blocks: set[str] = set()
+    items: set[str] = set()
+    entities: set[str] = set()
+    datagen = False
+    for path in java_root.rglob("*.java"):
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        if "GatherDataEvent" in text or "extends DataGenerator" in text:
+            datagen = True
+        decls = {var: kind for kind, var in _REG_DECL_RE.findall(text)}
+        for var, reg_id in _REG_CALL_RE.findall(text):
+            kind = decls.get(var, "")
+            if kind == "Block":
+                blocks.add(reg_id)
+            elif kind == "Item":
+                items.add(reg_id)
+            elif kind == "EntityType":
+                entities.add(reg_id)
+        if "Block" in decls.values():
+            for no_item, reg_id in _HELPER_CALL_RE.findall(text):
+                blocks.add(reg_id)
+                if no_item:
+                    no_item_blocks.add(reg_id)
+        elif "Item" in decls.values():
+            # 物品注册文件里的 register("id", ...) 是普通物品。
+            for reg_id in [m[1] for m in _HELPER_CALL_RE.findall(text)]:
+                if reg_id not in blocks:
+                    items.add(reg_id)
+    # 有数据生成器时，资源通常写在 src/generated/resources 并在构建时并入；
+    # 只有确实存在生成产物才跳过覆盖检查，否则仍按手写资源来要求。
+    generated = resources.parents[2] / "src" / "generated" / "resources"
+    has_generated = generated.is_dir() and any(
+        path.is_file() for path in generated.rglob("*") if path.suffix == ".json"
+    )
+    if (datagen and has_generated) or not (blocks or items or entities):
+        return [], "", []
+
+    assets = resources / "assets" / mod_id
+    problems: list[tuple[str, str]] = []
+    missing_blockstates = sorted(b for b in blocks if not (assets / "blockstates" / f"{b}.json").is_file())
+    with_item = sorted(blocks - no_item_blocks)
+    missing_item_models = sorted(
+        i for i in (set(with_item) | items)
+        if not (assets / "models" / "item" / f"{i}.json").is_file()
+    )
+
+    def add_group(title: str, target_dir: str, names: list[str]) -> None:
+        if not names:
+            return
+        shown = names[:80]
+        for name in shown:
+            problems.append(
+                (
+                    f"assets/{mod_id}/{target_dir}",
+                    f"{title}: {name}",
+                )
+            )
+        if len(names) > len(shown):
+            problems.append(
+                (
+                    f"assets/{mod_id}/{target_dir}",
+                    f"{title}: 还有 {len(names) - len(shown)} 个未列出",
+                )
+            )
+
+    add_group("缺少 blockstate（注册了方块但没有方块状态文件）", "blockstates",
+              [f"{b} -> blockstates/{b}.json" for b in missing_blockstates])
+    add_group("缺少物品模型（注册了物品/BlockItem 但没有模型）", "models/item",
+              [f"{i} -> models/item/{i}.json" for i in missing_item_models])
+
+    lang_missing: list[str] = []
+    for lang in ("zh_cn", "en_us"):
+        lang_file = assets / "lang" / f"{lang}.json"
+        data: dict = {}
+        if lang_file.is_file():
+            try:
+                data = json.loads(lang_file.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                data = {}
+        keys = [f"block.{mod_id}.{b}" for b in sorted(blocks)]
+        keys += [f"item.{mod_id}.{i}" for i in sorted(items)]
+        keys += [f"entity.{mod_id}.{e}" for e in sorted(entities)]
+        missing = [k for k in keys if k not in data]
+        if missing:
+            head = "、".join(missing[:20])
+            more = f" …（共 {len(missing)} 个）" if len(missing) > 20 else ""
+            lang_missing.append(f"{lang}.json 缺少 {len(missing)} 个键: {head}{more}")
+    for message in lang_missing:
+        problems.append((f"assets/{mod_id}/lang", message))
+
+    total_missing = len(missing_blockstates) + len(missing_item_models) + len(lang_missing)
+    summary = (
+        f"方块 {len(blocks)}（含物品 {len(with_item)}）| 物品 {len(items)} | "
+        f"实体 {len(entities)}；缺失 {total_missing} 项"
+    )
+    lines = ["## 注册项资源覆盖", ""]
+    if not problems:
+        lines.append("注册的方块/物品都有对应的 blockstate、物品模型与语言键。")
+        return [], summary, lines
+    lines.append(
+        "下面这些资源缺失不会让编译失败，但进游戏会显示紫黑方块或英文 key。"
+        "按清单补齐 blockstates / models/item / lang。"
+    )
+    lines.append("")
+    for target, message in problems:
+        lines.append(f"- {target}: {message}")
+    return problems, summary, lines
 
 
 def _iter_models(data: Any) -> list[str]:

@@ -208,6 +208,10 @@ def _shading(ctx: ProjectContext, build: str, imports: dict[str, list[tuple[str,
             suggestion="为反射/ServiceLoader 类添加保留规则，或关闭 minimize。",
         ))
     if "duplicatesStrategy" in build and "INCLUDE" in build:
+        # datagen 工程把 src/generated/resources 并进 main，INCLUDE 是官方
+        # 模板用来让生成资源覆盖手写资源的正常配置，不是隐蔽的打包缺陷。
+        if "src/generated/resources" in build:
+            return rows
         rows.append(finding(
             "P3-03", "duplicatesStrategy=INCLUDE 会静默覆盖同名资源",
             path="build.gradle", line=1, severity="warning",

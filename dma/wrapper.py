@@ -13,6 +13,9 @@ DEFAULT_DISTRIBUTION = "9.8.2"
 
 # ModDevGradle 2.x 官方只声明兼容 Gradle 8.x，9.x 还没验证。
 MODDEV_DISTRIBUTION = "8.10.2"
+# ForgeGradle 6 的 1.20.1 官方 MDK 用 8.1.1；Gradle 9 移除了 FG 依赖的
+# convention API，配置阶段就会失败。
+FORGE_DISTRIBUTION = "8.1.1"
 
 PROPERTIES = """distributionBase=GRADLE_USER_HOME
 distributionPath=wrapper/dists
@@ -29,6 +32,7 @@ _PLUGIN_PATTERNS = {
     "moddev": re.compile(r"net\.neoforged\.moddev"),
     "neogradle": re.compile(r"net\.neoforged\.gradle(?:\.userdev)?"),
     "loom": re.compile(r"fabric-loom"),
+    "forge": re.compile(r"net\.minecraftforge\.gradle"),
 }
 
 Log = Callable[[str], None]
@@ -145,6 +149,16 @@ def compatible_version(project_root: Path | None) -> tuple[str, str]:
             return (
                 MODDEV_DISTRIBUTION,
                 f"NeoGradle {version} 建议使用 Gradle 8.x，当前是 {current}",
+            )
+        return "", ""
+    if "forge" in stack:
+        version = stack["forge"] or "6.x"
+        if not current:
+            return FORGE_DISTRIBUTION, f"ForgeGradle {version} 对应 Gradle 8.x"
+        if current.split(".")[0] != "8":
+            return (
+                FORGE_DISTRIBUTION,
+                f"ForgeGradle {version} 不兼容 Gradle {current}，需要 8.x",
             )
         return "", ""
     if not current:

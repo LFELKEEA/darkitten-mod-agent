@@ -349,47 +349,47 @@ def _close_minecraft_window(pid: int) -> None:
 
 
 def _capture_window(project: Path, out: Path, pid: int) -> None:
+    """后台窗口截图：不抢焦点、不置顶、不还原窗口。
+
+    PrintWindow 的 PW_RENDERFULLCONTENT 从 DWM 合成面取图，窗口被别的程序
+    盖住时也能拿到画面；以前用 CopyFromScreen 必须先 SetForegroundWindow，
+    结果每次自动验证都会把游戏窗口弹到最前、顺手接管用户的鼠标。
+    """
     ps1 = project / ".mcmod" / "capture_window.ps1"
     write_text(ps1, r'''
 param([string]$Out, [int]$TargetPid)
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 Add-Type @"
 using System;
 using System.Runtime.InteropServices;
 public class Win32 {
   [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
-  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
-  [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int cmd);
+  [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr hWnd, IntPtr hdcBlt, uint flags);
   [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr hWnd);
-  [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr after, int x, int y, int cx, int cy, uint flags);
   [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
   public struct RECT { public int Left, Top, Right, Bottom; }
 }
 "@
-# Make GetWindowRect and CopyFromScreen share the same physical-pixel space
-# on HiDPI displays; otherwise the capture is offset by the scale factor.
 [Win32]::SetProcessDPIAware() | Out-Null
 $p = Get-Process -Id $TargetPid
 if (-not $p) { Write-Error "Minecraft window not found"; exit 1 }
-$h = $p.MainWindowHandle
-if ([Win32]::IsIconic($h)) { [Win32]::ShowWindow($h, 9) | Out-Null }   # SW_RESTORE
-# Raise above other windows so CopyFromScreen captures the game, not the IDE.
-[Win32]::SetWindowPos($h, [IntPtr]::new(-1), 0, 0, 0, 0, 0x0003) | Out-Null  # HWND_TOPMOST, NOSIZE|NOMOVE
-[Win32]::SetForegroundWindow($h) | Out-Null
-Start-Sleep -Milliseconds 1500
+$hwnd = $p.MainWindowHandle
+if ($hwnd -eq [IntPtr]::Zero) { Write-Error "Minecraft window handle not ready"; exit 2 }
+if ([Win32]::IsIconic($hwnd)) { Write-Error "Minecraft window is minimized; background capture skipped"; exit 3 }
 $rect = New-Object 'Win32+RECT'
-[Win32]::GetWindowRect($p.MainWindowHandle, [ref]$rect) | Out-Null
-$w = $rect.Right - $rect.Left
-$h = $rect.Bottom - $rect.Top
-if ($w -le 0 -or $h -le 0) { Write-Error "Invalid window size"; exit 1 }
-$bmp = New-Object System.Drawing.Bitmap $w, $h
+[Win32]::GetWindowRect($hwnd, [ref]$rect) | Out-Null
+$width = $rect.Right - $rect.Left
+$height = $rect.Bottom - $rect.Top
+if ($width -le 0 -or $height -le 0) { Write-Error "Invalid window size"; exit 1 }
+$bmp = New-Object System.Drawing.Bitmap $width, $height
 $g = [System.Drawing.Graphics]::FromImage($bmp)
-$g.CopyFromScreen($rect.Left, $rect.Top, 0, 0, $bmp.Size)
+$hdc = $g.GetHdc()
+# 2 = PW_RENDERFULLCONTENT，窗口在后台也能从 DWM 合成面取到完整内容。
+[Win32]::PrintWindow($hwnd, $hdc, 2) | Out-Null
+$g.ReleaseHdc($hdc)
 $bmp.Save($Out, [System.Drawing.Imaging.ImageFormat]::Png)
 $g.Dispose(); $bmp.Dispose()
-[Win32]::SetWindowPos($h, [IntPtr]::new(-2), 0, 0, 0, 0, 0x0003) | Out-Null  # HWND_NOTOPMOST
 Write-Output $Out
 ''')
     run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(ps1),

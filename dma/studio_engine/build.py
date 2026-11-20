@@ -457,7 +457,9 @@ def build(
 
 ERROR_PATTERNS = [
     re.compile(r"^(?P<file>.+?\.java):(?P<line>\d+): error: (?P<message>.+)$", re.MULTILINE),
-    re.compile(r"^(?P<file>.+?\.java):(?P<line>\d+): error: (?P<message>.+)$", re.MULTILINE),
+    # 中文 Windows 上 javac 输出的是“错误:”，只认英文会让结构化反馈整体失效，
+    # 模型只能拿到上百 KB 原始日志。两种标点都兼容。
+    re.compile(r"^(?P<file>.+?\.java):(?P<line>\d+): 错误[：:]\s*(?P<message>.+)$", re.MULTILINE),
 ]
 
 
@@ -495,19 +497,46 @@ def parse_errors(output: str) -> list[dict[str, Any]]:
             ]):
                 errors.append({"file": "", "line": 0, "message": line.strip(),
                                "hint": classify(line, output)})
-    # Deduplicate by message.
+    # 按「文件:行:消息」去重，不能只按消息去重：大工程里大量“找不到符号”
+    # 分散在不同文件，只留一条会让模型以为只有一个错误。
     unique: list[dict[str, Any]] = []
-    seen_msg: set[str] = set()
+    seen_loc: set[tuple[str, int, str]] = set()
     for e in errors:
-        if e["message"] in seen_msg:
+        key = (str(e.get("file") or ""), int(e.get("line") or 0), str(e.get("message") or ""))
+        if key in seen_loc:
             continue
-        seen_msg.add(e["message"])
+        seen_loc.add(key)
         unique.append(e)
-    return unique[:80]
+    return unique[:200]
 
 
 def classify(message: str, output: str) -> str:
     m = message.lower()
+    # 中文 javac 的诊断直接用中文匹配；只认英文会让所有提示退化成“查看完整日志”。
+    if "找不到符号" in message:
+        return (
+            "符号不存在：版本 API 不匹配或 import 缺失。"
+            "用 dev_docs 的 sources 核对 1.20.1 的类名/方法名，不要凭记忆改。"
+        )
+    if "不兼容的类型" in message:
+        return (
+            "类型不匹配：常见于 Item.Properties / BlockBehaviour.Properties / 泛型注册器。"
+            "核对目标版本的真实签名。"
+        )
+    if "程序包" in message and "不存在" in message:
+        return "Minecraft 包不存在：映射或依赖配置错误，检查 build.gradle 与 mappings。"
+    if "不会覆盖" in message or "不是抽象的" in message:
+        return (
+            "方法签名与父类/接口不一致，或漏了抽象方法。"
+            "用 dev_docs 核对 1.20.1 的真实方法名与参数。"
+        )
+    if "名称冲突" in message:
+        return "名称冲突：同一个类里出现了同名但参数类型不同的方法/字段，换成不同名字。"
+    if "是公共的" in message and "应在名为" in message:
+        return (
+            "公共类必须与文件名一致：把类名改成文件名对应的名字，"
+            "不要新建 Xxx2.java 这类副本。"
+        )
     if "cannot find symbol" in m:
         if "identifier" in m or "resourcelocation" in m:
             return ("符号/类名随版本改名：1.21.9+/26.x 官方映射用 Identifier.fromNamespaceAndPath，"

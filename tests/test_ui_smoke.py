@@ -27,8 +27,14 @@ class UiSmokeTests(TempDataCase):
         window.config.update_url = ""
         window.show()
         self.app.processEvents()
-        self.assertEqual(window.stack.count(), 11)
+        self.assertEqual(window.stack.count(), 13)
         self.assertIsNotNone(window.chat_page)
+        self.assertIsNotNone(window.paint_page)
+        self.assertIsNotNone(window.paint_page.canvas)
+        self.assertIsNotNone(window.paint_page.preview)
+        self.assertIsNotNone(window.modlib_page)
+        self.assertIsNotNone(window.modlib_page.list)
+        self.assertIsNotNone(window.modlib_page.new_btn)
         self.assertIsNotNone(window.center_page)
         self.assertIsNotNone(window.center_page.instance_list)
         self.assertIsNotNone(window.studio_page)
@@ -55,6 +61,8 @@ class UiSmokeTests(TempDataCase):
         self.assertIs(window.stack.currentWidget(), window.studio_page)
         window.go_to(window.tutorial_page)
         self.assertIs(window.stack.currentWidget(), window.tutorial_page)
+        window.go_to(window.modlib_page)
+        self.assertIs(window.stack.currentWidget(), window.modlib_page)
         window.go_to(window.build_page)
         self.assertIs(window.stack.currentWidget(), window.build_page)
         self.assertIsNotNone(window.knowledge_page)
@@ -70,6 +78,239 @@ class UiSmokeTests(TempDataCase):
         window.close()
         window.memory.close()
         self.app.processEvents()
+
+    def test_paint_page_paints_saves_and_loads_kinds(self) -> None:
+        from dma.ui.paint_page import PaintPage
+
+        page = PaintPage(None)
+        try:
+            page._new_document("item", 16, 16)
+            page.canvas.set_color("#ff8800")
+            page.canvas.begin_stroke()
+            page.canvas.paint_pixel(2, 3)
+            page.canvas.end_stroke()
+            self.assertEqual(page.canvas.image().pixelColor(2, 3).name(), "#ff8800")
+            self.assertTrue(page.canvas.is_dirty())
+
+            page.preview.resize(320, 320)
+            page.preview.set_image(page.canvas.image())
+            geometry = page.preview._item_geometry()
+            self.assertIsNotNone(geometry)
+            gx, gy, zoom = geometry
+            from PySide6.QtCore import QPointF, QRect
+
+            point = QPointF(gx + 2 * zoom + zoom / 2, gy + 3 * zoom + zoom / 2)
+            self.assertEqual(page.preview._item_pixel(point), (2, 3))
+
+            target = self.tmp / "painted.png"
+            page.canvas.save(target)
+            self.assertTrue(target.is_file())
+            self.assertFalse(page.canvas.is_dirty())
+
+            page.load_texture(target, kind="block")
+            self.assertEqual(page._kind, "block")
+            page.preview.resize(320, 320)
+            page.preview._compute_layout()
+            page.preview._render_faces()
+            self.assertEqual(len(page.preview._faces), 3)
+            page._set_color("#00ff00")
+            page._paint_from_model(3, 3, page.preview._faces[0]["rect"], False)
+            page._end_model_stroke()
+            self.assertEqual(page.canvas.image().pixelColor(3, 3).name(), "#00ff00")
+
+            atlas = self.tmp / "skin64.png"
+            from PySide6.QtGui import QColor, QImage
+
+            image = QImage(64, 64, QImage.Format_ARGB32)
+            image.fill(QColor("#223344"))
+            image.save(str(atlas))
+            page.load_texture(atlas, kind="entity")
+            self.assertEqual(page._kind, "entity")
+            self.assertEqual(page.canvas.image().width(), 64)
+            self.assertEqual(len(page.canvas._guides), 12)
+            page.preview.resize(320, 320)
+            page.preview._compute_layout()
+            page.preview._render_faces()
+            full_faces = len(page.preview._faces)
+            page.preview.set_hide_overlay(True)
+            page.preview._render_faces()
+            self.assertLess(len(page.preview._faces), full_faces)
+            page.preview.set_hide_overlay(False)
+            page.preview._render_faces()
+            self.assertEqual(len(page.preview._faces), full_faces)
+
+            # 镜像：右臂正面 (44,20) 应映射到左臂正面 (39,52)，身体则同面翻转。
+            page.mirror_box.setChecked(True)
+            self.assertEqual(page._mirror_pixel(44, 20), (39, 52))
+            self.assertEqual(page._mirror_pixel(20, 20), (27, 20))
+            page.canvas.set_color("#ff0000")
+            page.canvas.begin_stroke()
+            page.canvas.paint_pixel(44, 20)
+            page.canvas.end_stroke()
+            self.assertEqual(page.canvas.image().pixelColor(44, 20).name(), "#ff0000")
+            self.assertEqual(page.canvas.image().pixelColor(39, 52).name(), "#ff0000")
+            page._fill_from_model(QRect(44, 20, 4, 12), False)
+            self.assertEqual(page.canvas.image().pixelColor(45, 21).name(), "#ff0000")
+            self.assertEqual(page.canvas.image().pixelColor(38, 53).name(), "#ff0000")
+
+            page.canvas.set_color("#00ff00")
+            right_arm = page.preview._boxes[3]
+            page._fill_box_from_model(list(page.preview._face_rects(right_arm).values()), False)
+            self.assertEqual(page.canvas.image().pixelColor(44, 16).name(), "#00ff00")
+            self.assertEqual(page.canvas.image().pixelColor(36, 52).name(), "#00ff00")
+        finally:
+            page.close()
+            page.deleteLater()
+            self.app.processEvents()
+
+    def test_paint_page_loads_embedded_bbmodel_texture(self) -> None:
+        from PySide6.QtGui import QColor, QImage
+
+        from dma.kernel.tools import blockbench
+        from dma.ui.paint_page import PaintPage, model_texture_image, parse_model
+
+        atlas = self.tmp / "bench_atlas.png"
+        image = QImage(64, 64, QImage.Format_ARGB32)
+        image.fill(QColor("#c07834"))
+        image.save(str(atlas))
+
+        model = blockbench.model_from_spec("bench", [
+            {"name": "top", "from": [0, 8, 0], "to": [16, 12, 16], "uv": [0, 0]},
+            {"name": "leg", "from": [0, 0, 0], "to": [4, 8, 4], "uv": [32, 0]},
+        ], texture_name=blockbench.texture_data_uri(atlas), texture_size=(64, 64))
+        path = self.tmp / "bench.bbmodel"
+        blockbench.save_bbmodel(model, path)
+
+        boxes = parse_model(path)
+        self.assertEqual(len(boxes), 2)
+        self.assertEqual(boxes[0].uv, (0, 0))
+        self.assertEqual(boxes[1].uv, (32, 0))
+        embedded = model_texture_image(path)
+        self.assertIsNotNone(embedded)
+        self.assertEqual((embedded.width(), embedded.height()), (64, 64))
+
+        page = PaintPage(None)
+        try:
+            page._load_model_path(path)
+            self.assertEqual(page.canvas.image().width(), 64)
+            self.assertEqual(page._model_path, path)
+            self.assertEqual(len(page.preview._boxes), 2)
+            self.assertEqual(page._kind, "custom")
+            page.preview.resize(320, 320)
+            page.preview._compute_layout()
+            page.preview._render_faces()
+            self.assertEqual(len(page.preview._faces), 6)
+        finally:
+            page.close()
+            page.deleteLater()
+            self.app.processEvents()
+
+    def test_paint_page_supports_multitexture_models(self) -> None:
+        import json
+
+        from PySide6.QtGui import QColor, QImage
+
+        from dma.kernel.tools import blockbench
+        from dma.ui.paint_page import (
+            PaintPage, model_kind, model_texture_images, parse_model,
+        )
+
+        first = self.tmp / "first.png"
+        second = self.tmp / "second.png"
+        for target, color in ((first, "#ff0000"), (second, "#00ff00")):
+            image = QImage(64, 64, QImage.Format_ARGB32)
+            image.fill(QColor(color))
+            image.save(str(target))
+
+        model = blockbench.model_from_spec("bench", [
+            {"name": "top", "from": [0, 8, 0], "to": [16, 12, 16], "uv": [0, 0]},
+            {"name": "leg", "from": [0, 0, 0], "to": [4, 8, 4], "uv": [32, 0]},
+        ], texture_name=blockbench.texture_data_uri(first), texture_size=(64, 64))
+        path = self.tmp / "double.bbmodel"
+        blockbench.save_bbmodel(model, path)
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        raw["textures"]["1"] = blockbench.texture_data_uri(second)
+        path.write_text(json.dumps(raw), encoding="utf-8")
+
+        self.assertEqual(model_kind(path), "custom")
+        self.assertEqual([key for key, _ in model_texture_images(path)], ["0", "1"])
+
+        page = PaintPage(None)
+        try:
+            page._load_model_path(path, texture_index=1)
+            self.assertEqual(page._kind, "custom")
+            self.assertEqual(page.canvas.image().pixelColor(0, 0).name(), "#00ff00")
+            boxes = parse_model(path)
+            top = page.preview._face_rects(boxes[0])["top"]
+            self.assertEqual((top.x(), top.y(), top.width(), top.height()), (16, 0, 16, 16))
+        finally:
+            page.close()
+            page.deleteLater()
+            self.app.processEvents()
+
+    def test_paint_page_uses_per_face_uvs_from_java_models(self) -> None:
+        import json
+
+        from PySide6.QtCore import QRect
+        from PySide6.QtGui import QColor, QImage
+
+        from dma.ui.paint_page import PaintPage, model_kind, parse_model
+
+        raw = {
+            "elements": [{
+                "from": [0, 0, 0], "to": [16, 16, 16],
+                "faces": {
+                    "north": {"uv": [16, 0, 32, 16]},
+                    "south": {"uv": [32, 0, 48, 16]},
+                    "east": {"uv": [0, 16, 16, 32]},
+                    "west": {"uv": [16, 16, 32, 32]},
+                    "up": {"uv": [0, 32, 16, 48]},
+                    "down": {"uv": [32, 32, 48, 48]},
+                },
+            }],
+        }
+        path = self.tmp / "custom_block.json"
+        path.write_text(json.dumps(raw), encoding="utf-8")
+        self.assertEqual(model_kind(path), "custom")
+        boxes = parse_model(path)
+        self.assertEqual(boxes[0].faces["front"], QRect(32, 0, 16, 16))
+        self.assertEqual(boxes[0].faces["top"], QRect(0, 32, 16, 16))
+
+        page = PaintPage(None)
+        try:
+            image = QImage(64, 64, QImage.Format_ARGB32)
+            image.fill(QColor("#336699"))
+            page.canvas.set_image(image)
+            page.preview.set_image(image)
+            page.preview.set_kind("custom")
+            page.preview.set_boxes(boxes)
+            page.preview.resize(320, 320)
+            page.preview._compute_layout()
+            page.preview._render_faces()
+            self.assertEqual(len(page.preview._faces), 3)
+            rects = page.preview._face_rects(boxes[0])
+            self.assertEqual(rects["front"], QRect(32, 0, 16, 16))
+            self.assertEqual(rects["back"], QRect(16, 0, 16, 16))
+        finally:
+            page.close()
+            page.deleteLater()
+            self.app.processEvents()
+
+    def test_paint_page_palette_has_extended_colors_and_recent(self) -> None:
+        from dma.ui.paint_page import _PALETTE, _PALETTE_EXTRA, PaintPage
+
+        colors = {color.upper() for color in _PALETTE + _PALETTE_EXTRA}
+        self.assertGreaterEqual(len(colors), 60)
+        page = PaintPage(None)
+        try:
+            page._set_color("#123456")
+            self.assertEqual(page._recent_colors[0], "#123456")
+            self.assertTrue(page.recent_buttons[0].isEnabled())
+            self.assertEqual(page.recent_buttons[0].toolTip(), "#123456")
+        finally:
+            page.close()
+            page.deleteLater()
+            self.app.processEvents()
 
     def test_new_project_dialog_reads_catalog_versions(self) -> None:
         from dma import catalog

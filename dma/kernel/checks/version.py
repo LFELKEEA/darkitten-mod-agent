@@ -43,7 +43,8 @@ def _adapter_isolation(ctx: ProjectContext) -> Iterable[Finding]:
         rel = ctx.rel(java.path)
         if any(part in rel.lower() for part in ("/compat/", "/adapter/", "/platform/", "/version/")):
             continue
-        text = ctx.read(java.path)
+        # 用掩掉注释的文本；Javadoc 里写“1.20.1”不是业务代码分支。
+        text = java.masked
         match = _VERSION_BRANCH.search(text)
         if not match:
             continue

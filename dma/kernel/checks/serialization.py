@@ -115,14 +115,9 @@ def _nbt(ctx: ProjectContext) -> Iterable[Finding]:
                         suggestion="确认 save 路径确实序列化了所有持久字段。",
                     ))
             if method.name in LOAD_METHODS:
-                for match in GETTER_RE.finditer(body):
-                    getter, key = match.group(1), match.group(2)
-                    if getter not in SAFE_GETTERS and "contains(" not in body:
-                        rows.append(finding(
-                            "P1-17", f"{java_class.name}.{method.name} 直接读取 {key}，未校验 contains",
-                            path=rel, line=method.line, severity="warning",
-                            suggestion="读取复合/列表前先 contains，或用 getCompound 的默认值重载。",
-                        ))
+                # CompoundTag 的 getInt/getCompound/getList 缺键都会返回默认值，
+                # 逐字段要求 contains 只是噪音；真正需要防御的是后续对空结构
+                # 的强解引用，另有规则覆盖。
                 if "CompoundTag" in body and not any(token in body for token in ("version", "DataVersion", "dataVersion")):
                     rows.append(finding(
                         "P1-18", f"{java_class.name}.{method.name} 读取存档但没有版本标记",

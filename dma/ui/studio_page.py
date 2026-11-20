@@ -74,6 +74,11 @@ class StudioPage(QWidget):
             )
         )
         head.addLayout(box, 1)
+        self.modlib_btn = QPushButton("模型库")
+        self.modlib_btn.setObjectName("Ghost")
+        self.modlib_btn.setToolTip("查看和编辑这个工程里的实体、方块、物品、群系与维度。")
+        self.modlib_btn.clicked.connect(self._open_modlib)
+        head.addWidget(self.modlib_btn)
         self.open_dir_btn = QPushButton("打开工程目录")
         self.open_dir_btn.setObjectName("Ghost")
         self.open_dir_btn.clicked.connect(self._open_project_dir)
@@ -213,6 +218,15 @@ class StudioPage(QWidget):
         outer.addWidget(log_card, 1)
 
     # ------------------------------------------------------------------
+    def _open_modlib(self) -> None:
+        page = getattr(self.main, "modlib_page", None)
+        if page is None:
+            return
+        project = getattr(self.main, "active_project", None)
+        if project is not None:
+            page.set_project(project)
+        self.main.go_to(page)
+
     def _pick_dest(self) -> None:
         folder = QFileDialog.getExistingDirectory(self, "选择输出目录", self.dest.text())
         if folder:

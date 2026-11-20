@@ -115,7 +115,8 @@ def _ensure_repo() -> None:
 def _sync_remote() -> None:
     """Fetch origin/main and align the index without touching the worktree."""
     resolve = _resolve_args()
-    fetch = _git("fetch", *resolve, "origin", BRANCH)
+    # -c 必须放在子命令之前，否则 git 会把 -c 当成 fetch 的参数。
+    fetch = _git(*resolve, "fetch", "origin", BRANCH)
     if fetch.returncode != 0:
         # The first run may find an empty repository.
         if "couldn't find remote ref" in (fetch.stderr or "").lower():
@@ -220,7 +221,7 @@ def main() -> int:
         return 0
 
     resolve = _resolve_args()
-    push = _git("push", *resolve, "origin", f"HEAD:{BRANCH}")
+    push = _git(*resolve, "push", "origin", f"HEAD:{BRANCH}")
     if push.returncode != 0:
         raise RuntimeError((push.stderr or push.stdout).strip())
     say(f"已推送：https://github.com/LFELKEEA/darkitten-mod-agent/commit/{sha}")

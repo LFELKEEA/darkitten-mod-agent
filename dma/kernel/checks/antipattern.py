@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Iterable
 
 from ..findings import Finding
+from ..java import mask_comments
 from .common import ProjectContext, finding
 
 STATIC_HOLDERS = ("Level", "World", "Player", "Entity", "BlockEntity", "LevelChunk", "WorldChunk", "ServerPlayer")
@@ -170,10 +171,11 @@ def run(ctx: ProjectContext) -> Iterable[Finding]:
                     suggestion="只在有状态时激活 tick，或使用 scheduled tick。",
                 ))
         # File sandbox (P3-43)
-        for match in re.finditer(r"(?:new\s+File|Paths?\.get)\s*\(\s*[\"']((?:[A-Za-z]:[\\/]|/)[^\"']*)", java.masked):
+        literal = mask_comments(text)
+        for match in re.finditer(r"(?:new\s+File|Paths?\.get)\s*\(\s*[\"']((?:[A-Za-z]:[\\/]|/)[^\"']*)", literal):
             rows.append(finding(
                 "P3-43", f"直接使用绝对路径：{match.group(1)[:80]}",
-                path=rel, line=java.masked.count("\n", 0, match.start()) + 1,
+                path=rel, line=literal.count("\n", 0, match.start()) + 1,
                 suggestion="路径限制在游戏目录内（FMLPaths/GAMEDIR），拒绝 ../ 与系统目录。",
             ))
         # Command injection (P3-41)

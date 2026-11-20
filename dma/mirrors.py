@@ -49,6 +49,9 @@ OFFICIAL_HOSTS: tuple[str, ...] = (
     "maven.minecraftforge.net",
     "maven.fabricmc.net",
 )
+# 这些站点经常“能连上但下载极慢”，可达性探测判断为直连可用，构建却会
+# 在解析插件/依赖时静默卡几分钟。只要镜像已经启用，就一并改写。
+ALWAYS_MIRRORED: tuple[str, ...] = ("maven.minecraftforge.net",)
 _HOST_CACHE: dict[str, tuple[float, bool]] = {}
 _HOST_TTL = 60.0
 # 合并 NeoFormRuntime 时只需要快源；慢的备用源留给 Gradle 自己按需拉。
@@ -535,13 +538,13 @@ def _race(
                 if held is not None and not required_failed:
                     # 权威源明确说没有，其它源的内容才可信。
                     stop.set()
-                    winner = held
+                    winner = held[1:]
                     held = None
                     break
                 # 权威源故障：不能用过期副本冒充正确结果，退出等 503。
                 break
     if winner is None and held is not None and not (authoritative and required_failed):
-        winner = held
+        winner = held[1:]
         held = None
     if held is not None:
         if held[3] is not None:
@@ -1114,7 +1117,8 @@ SYNTH_SCHEMA = 3
 _PINNED_PREFIXES = {
     "cpw/": ("stellar",),
     "net/neoforged/": ("stellar",),
-    "net/minecraftforge/": ("stellar",),
+    # ForgeGradle 的插件标记只发布在 maven.minecraftforge.net；Stellar 那份
+    # net/minecraftforge/ 元数据只有 7.x，钉死它会让 [6.0,6.2) 永远解析失败。
     "io/codechicken/": ("stellar",),
     "org/vineflower/": ("stellar",),
     # Gradle 自己的工具链解析插件只在插件门户上，先问门户可以少绕一圈。
@@ -1371,6 +1375,8 @@ class MirrorService:
     def store(self, maven_path: str, data: bytes) -> Path:
         cache = cache_path(maven_path)
         cache.parent.mkdir(parents=True, exist_ok=True)
+        if cache.is_dir():
+            raise OSError(f"镜像缓存路径与目录冲突：{cache}")
         tmp = cache.with_suffix(cache.suffix + ".part")
         tmp.write_bytes(data)
         os.replace(tmp, cache)
@@ -1383,6 +1389,12 @@ class MirrorService:
             return
         cache = cache_path(maven_path)
         cache.parent.mkdir(parents=True, exist_ok=True)
+        if cache.is_dir():
+            # 无版本号的探测路径可能和真实目录同名（如 .../log4j-core），
+            # 不能把文件替换到目录上，否则 Windows 会抛 WinError 5。
+            self._log(f"[镜像] {maven_path} 与本地目录同名，按不存在处理")
+            handler._send_bytes(b"", 404)
+            return
         tmp = cache.with_suffix(cache.suffix + ".part")
         self._log(f"[镜像] 获取 {maven_path}")
         started = time.monotonic()
@@ -1463,7 +1475,12 @@ class MirrorService:
                 handler.close_connection = True
                 return
             if tmp.is_file() and tmp.stat().st_size > 0:
-                os.replace(tmp, cache)
+                try:
+                    os.replace(tmp, cache)
+                except OSError as exc:  # noqa: BLE001 - 内容已转发，缓存失败不影响本次构建
+                    tmp.unlink(missing_ok=True)
+                    self._log(f"[镜像] 缓存落地失败 {maven_path}：{exc}")
+                    return
             size = cache.stat().st_size if cache.is_file() else 0
             _health.ok(name, time.monotonic() - started, size)
             if size >= 1 << 20:
@@ -1668,6 +1685,12 @@ allprojects {{
     repositories.maven {{ name = 'DMAMojangMirror'; url = mojangMirror; allowInsecureProtocol = true }}
     repositories.maven {{ name = 'DMAMojang'; url = mojangUrl }}
 
+    // javac 默认只打印前 100 个错误，大工程续做时模型只能看到一小部分，
+    // 容易反复修同一批文件。放宽上限并把弃用警告压掉，日志聚焦真实错误。
+    tasks.withType(JavaCompile).configureEach {{
+        options.compilerArgs += ['-Xmaxerrs', '1000', '-Xlint:none']
+    }}
+
     // NeoFormRuntime downloads artifacts that are missing from its manifest with
     // its own HTTP client, using a hardcoded https://maven.neoforged.net base.
     // That client ignores Gradle repositories (and --offline), so a blocked host
@@ -1762,15 +1785,22 @@ def prepare_launch_env(
     down = candidates if force else unreachable_hosts(candidates)
     if not down:
         return None
+    # 镜像一旦启用，就把已知“可达但慢”的官方仓库也改写到本地代理，
+    # 否则 Gradle 会先直连 maven.minecraftforge.net 解析插件和依赖，
+    # 表现为几分钟没有任何输出。
+    active: list[str] = []
+    for host in (*down, *ALWAYS_MIRRORED):
+        if host and host not in active:
+            active.append(host)
     if log is not None:
         if force:
-            log("[镜像] 强制切换到本地镜像代理重试：" + "、".join(down))
+            log("[镜像] 强制切换到本地镜像代理重试：" + "、".join(active))
         else:
             log(
                 "[镜像] 官方仓库直连不通：" + "、".join(down) + "，自动切换本地镜像代理"
             )
     try:
-        return service(log, fresh_port=fresh_port).init_script(hosts=down)
+        return service(log, fresh_port=fresh_port).init_script(hosts=active)
     except Exception as exc:  # noqa: BLE001 - 代理不可用时退回官方源
         if log is not None:
             log(f"[镜像] 本地代理启动失败，继续直连官方仓库：{exc}")

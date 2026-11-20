@@ -15,6 +15,23 @@ COUNT_TYPES = {"minecraft:crafting_shaped", "minecraft:crafting_shapeless", "min
                "minecraft:stonecutting", "minecraft:smithing_transform", "minecraft:smithing_trim"}
 
 
+# 1.20.1 的 NoiseGeneratorSettings 用 MapCodec 解码，字段缺失会直接
+# IllegalStateException: Failed to parse ... 然后整个服务端起不来。
+NOISE_SETTINGS_KEYS = (
+    "sea_level",
+    "disable_mob_generation",
+    "aquifers_enabled",
+    "ore_veins_enabled",
+    "legacy_random_source",
+    "default_block",
+    "default_fluid",
+    "noise",
+    "noise_router",
+    "surface_rule",
+    "spawn_target",
+)
+
+
 def run(ctx: ProjectContext) -> Iterable[Finding]:
     rows: list[Finding] = []
     rows.extend(_syntax(ctx))
@@ -23,6 +40,33 @@ def run(ctx: ProjectContext) -> Iterable[Finding]:
     rows.extend(_tags(ctx))
     rows.extend(_predicates(ctx))
     rows.extend(_functions(ctx))
+    rows.extend(_worldgen_schema(ctx))
+    return rows
+
+
+def _worldgen_schema(ctx: ProjectContext) -> Iterable[Finding]:
+    rows: list[Finding] = []
+    seen: set[str] = set()
+    for base in ("src/main/resources", "src/generated/resources"):
+        for path in ctx.glob(f"{base}/data/**/worldgen/noise_settings/*.json"):
+            if not path.is_file():
+                continue
+            rel = ctx.rel(path)
+            if rel in seen:
+                continue
+            seen.add(rel)
+            data = ctx.load_json(path)
+            if not isinstance(data, dict):
+                continue
+            missing = [key for key in NOISE_SETTINGS_KEYS if key not in data]
+            if missing:
+                rows.append(finding(
+                    "P1-11",
+                    f"noise_settings 缺少必需字段：{', '.join(missing)}，服务端会 Failed to parse",
+                    path=rel, severity="error",
+                    suggestion="在 datagen 的 NoiseGeneratorSettings 里补齐这些字段，"
+                               "spawn_target 在 1.19.4+ 是必填项，不能省略。",
+                ))
     return rows
 
 

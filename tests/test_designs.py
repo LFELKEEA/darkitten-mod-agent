@@ -86,6 +86,19 @@ class DesignSessionTests(unittest.TestCase):
         self.assertEqual(item["id"], "D")
         self.assertTrue((session.dir / item["texture"]).is_file())
 
+    def test_update_texture_marks_edited_and_refreshes_preview(self) -> None:
+        session = self._session("item", "star_sword", "星光剑")
+        variant = session.variants[0]
+        source = session.dir / session.variants[1]["texture"]
+        item = session.update_texture(variant["id"], source)
+        self.assertTrue(item["edited"])
+        self.assertEqual(
+            (session.dir / variant["texture"]).read_bytes(),
+            (session.dir / variant["preview"]).read_bytes(),
+        )
+        loaded = designs.load_session(self.root, session.id)
+        self.assertTrue(loaded.variants[0]["edited"])
+
     def test_session_round_trips(self) -> None:
         session = self._session("entity", "ember_cat", "火焰猫")
         loaded = designs.load_session(self.root, session.id)

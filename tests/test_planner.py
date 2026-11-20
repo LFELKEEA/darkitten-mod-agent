@@ -16,6 +16,8 @@ class _Status:
 
 
 class _Worker:
+    _resume_workspace = AgentWorker._resume_workspace
+
     def __init__(self, text: str) -> None:
         self.user_text = text
         self.status = _Status()
@@ -75,6 +77,32 @@ class PlannerTest(unittest.TestCase):
         worker = _Worker("加一个物品")
         self.assertEqual(AgentWorker._large_plan_preflight(worker), "")
         self.assertEqual(worker.status.messages, [])
+
+    def test_agent_preflight_skips_continuation_rounds(self) -> None:
+        """续轮有历史时不要每轮重新规划，否则会冲掉正在修复的上下文。"""
+        worker = _Worker("海洋维度、潜水装备、潮汐机器、BOSS 与任务链")
+        worker.history = [{"role": "user", "content": "开始"}, {"role": "assistant", "content": "好"}]
+        self.assertEqual(AgentWorker._large_plan_preflight(worker), "")
+        self.assertEqual(worker.status.messages, [])
+
+    def test_agent_preflight_skips_existing_workspace(self) -> None:
+        """已有任务图的工程属于续做，首轮也不该重新规划和联网找参考。"""
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / ".dma").mkdir()
+            (root / ".dma" / "workflow.json").write_text("{}", encoding="utf-8")
+            worker = _Worker("海洋维度、潜水装备、潮汐机器、BOSS 与任务链")
+            worker.project = SimpleNamespace(
+                root=root,
+                meta=SimpleNamespace(
+                    loader="NeoForge", mc_version="1.21.1", mod_id="deepmod"
+                ),
+            )
+            self.assertEqual(AgentWorker._large_plan_preflight(worker), "")
+            self.assertEqual(worker.status.messages, [])
 
 
 if __name__ == "__main__":

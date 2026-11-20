@@ -116,6 +116,21 @@ def mask(text: str) -> str:
     return "".join(result)
 
 
+_COMMENT_ONLY_RE = re.compile(r"//[^\n]*|/\*.*?\*/", re.S)
+
+
+def mask_comments(text: str) -> str:
+    """只抹掉注释、保留字符串内容，偏移不变。
+
+    ``mask`` 会把字符串内容也清空，适合判断结构；但提取注册 ID、资源路径这类
+    字面量时必须保留原文，否则规则拿到的全是空格。
+    """
+    return _COMMENT_ONLY_RE.sub(
+        lambda m: "".join("\n" if ch == "\n" else " " for ch in m.group(0)),
+        text,
+    )
+
+
 def line_of(text: str, index: int) -> int:
     return text.count("\n", 0, max(0, index)) + 1
 
@@ -529,7 +544,10 @@ def iter_java_files(root: Path, *, skip_dirs: Iterable[str] = ()) -> Iterator[Pa
         relative = path.relative_to(root).as_posix()
         if any(part in skipped for part in relative.split("/")[:-1]):
             continue
-        if any(part in {"build", ".gradle", "out", "run", "target"} for part in relative.split("/")[:-1]):
+        if any(
+            part in {"build", ".gradle", "out", "run", "target", ".dma", ".mcdev"}
+            for part in relative.split("/")[:-1]
+        ):
             continue
         yield path
 

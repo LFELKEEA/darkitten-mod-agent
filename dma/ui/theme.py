@@ -73,6 +73,7 @@ QPushButton#Primary:hover {{ background: #9a8dff; }}
 QPushButton#Primary:disabled {{ background: #433d78; border-color: #433d78; color: #b9b3e8; }}
 QPushButton#Ghost {{ background: transparent; border: 1px solid {c['line']}; }}
 QPushButton#Ghost:hover {{ background: {c['card_soft']}; }}
+QPushButton#Ghost:checked {{ background: {c['card_soft']}; border-color: {c['accent']}; color: {c['accent']}; }}
 QPushButton#Danger {{ color: {c['danger']}; }}
 QPushButton#Danger:hover {{ background: #3a2028; }}
 QPushButton#Nav {{

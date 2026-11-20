@@ -165,7 +165,15 @@ TOOL_PROTOCOL = """【工程工具协议】
 - search_text: {"tool":"search_text","query":"关键字"}
 - edit_file 精确替换一处（推荐）: {"tool":"edit_file","path":"相对路径","old":"原文片段","new":"替换后的内容"}
 - write_file 新建或整体重写: {"tool":"write_file","path":"相对路径","content":"完整文件内容"}
+- texture_gen 生成方块/物品贴图（优先用它，不要手画点阵）: {"tool":"texture_gen","path":"src/main/resources/assets/<modid>/textures/block/twilight_stone.png","style":"stone","base":"#6f6a63","accent":"#3d3a36","size":16,"seed":7}
+  // 方块样式：stone/dirt/grass/grass_side/leaves/log/log_top/planks/bricks/ore/metal/crystal/fabric/mushroom_cap/mushroom_stem/portal/water/sand/snow/obsidian/glow/glass/flower/sapling/mushroom/lantern/panel
+  // 物品直接把物品名当 style：ironwood_sword / serpent_fang / lich_sigil / arcane_dust / scale_shard / spectral_cloth ...，会自动选轮廓、明暗与描边
+  // 必填 base（主色）与 accent（宝石/发光/纹样色）；同一套风格用固定 seed 保持可复现
+- entity_texture 按真实 UV 生成实体皮肤（不要画正面立绘）: {"tool":"entity_texture","path":"src/main/resources/assets/<modid>/textures/entity/hollow_stalker.png","layout":"humanoid","base":"#b9b3a1","accent":"#b53b3b","variant":"undead","seed":7}
+  // humanoid 使用原版 64x64 头/帽/身/臂/腿/外套 UV，自带眼睛、领口、腰带、袖口、靴子
+  // 自定义模型用 layout="boxes"，传 boxes:[{"part":"head","uv":[0,0],"size":[8,8,8]}, ...]，按原版立方体六面展开
 - pixel_art 生成像素纹理 PNG: {"tool":"pixel_art","path":"src/main/resources/assets/<modid>/textures/item/gem.png","palette":{".":"transparent","o":"#1b1b1f","a":"#7fd6ff"},"rows":["....","...."]}
+  // 只用于 logo/UI 小图标；方块、物品、实体皮肤请用 texture_gen / entity_texture
   // 可加 "scale":4（1-32 最近邻放大）与 "outline":"#222222"（给不透明像素描边）
 - texture_template 取内置 16x16 像素模板: {"tool":"texture_template","name":"sword"}
   // 可用模板：sword / pickaxe / axe / shovel / hoe / ingot / gem / dust / stick / block / torch / bowl
@@ -203,8 +211,10 @@ TOOL_PROTOCOL = """【工程工具协议】
   // 适用于带 .mcmod/state.json 与 mod-spec.json 的规格工程；普通手写工程继续用 build_project
 
 游戏运行与验证（Forge 1.20.1 首次调用会安装开发探针，可能要几分钟）：
-- mcdev_prepare 启动开发端: {"tool":"mcdev_prepare","kind":"both"}
+- mcdev_prepare 启动开发端: {"tool":"mcdev_prepare","kind":"both","background":true}
   // kind: server / client / both；both 会启动服务端，再启动客户端并自动连接 127.0.0.1:25566
+  // background 默认 true：客户端窗口完全不在桌面显示，也不抢焦点；隐藏后屏幕截图、UI 和操作照常可用
+  // 只验证服务端逻辑时用 kind=server，配合 mcdev_bot，全程不会出现任何游戏窗口
   // 只有 Forge 1.20.1 会等探针；其他加载器/版本启动后用 mcdev_run_dump 看日志
 - mcdev_launch_status 查看宿主管理的进程与端口: {"tool":"mcdev_launch_status"}
 - mcdev_stop 停止进程: {"tool":"mcdev_stop","side":"all"}
@@ -220,6 +230,31 @@ TOOL_PROTOCOL = """【工程工具协议】
   或直接给步骤 {"tool":"mcdev_scenario","steps":[{"type":"command","cmd":"time set day"},{"type":"assert","path":"ok","op":"eq","value":true}]}
 - mcdev_build 用 mcdev 包装执行 Gradle build: {"tool":"mcdev_build"}
 - mcdev_gametest 运行 GameTest 并返回汇总: {"tool":"mcdev_gametest"}
+
+后台实操玩家（不抢鼠标、不切焦点）：
+- 纯后台假玩家（先 mcdev_prepare kind=server，全程零窗口，默认创造模式）:
+  {"tool":"mcdev_bot","action":"spawn","name":"Dev","gamemode":"creative"}
+  {"tool":"mcdev_bot","action":"move","name":"Dev","mode":"walk","dx":3,"dz":0}
+  {"tool":"mcdev_bot","action":"place","name":"Dev","x":10,"y":64,"z":10,"face":"up","item":"minecraft:stone"}
+  {"tool":"mcdev_bot","action":"mine","name":"Dev","x":10,"y":65,"z":10}
+  {"tool":"mcdev_bot","action":"attack","name":"Dev","target":"zombie","radius":6}
+  // action: spawn/state/list/remove/look/move/teleport/walk/mine/break/place/use/give/attack/gamemode/command
+- game_bot_playtest 一键纯后台验证: {"tool":"game_bot_playtest","name":"Dev"}
+  // 出生即创造，走两步、放方块、挖掉、召唤并攻击僵尸，返回逐项证据
+- game_window 显示/隐藏客户端窗口: {"tool":"game_window","action":"status"}
+- 需要真实客户端画面时再 mcdev_prepare kind=both，然后：
+- game_playtest 一键真实跑图验证: {"tool":"game_playtest","seconds":2}
+  // 自动切创造、转头、前进/跳跃、放置并挖掉方块、召唤并攻击生物、使用物品、开背包、截图，
+  // 返回每一步的位置/方块/实体/血量证据。完成前必须跑一次；ok=false 就按失败项继续修。
+- mcdev_goto 走到坐标（自动转向/卡住跳）: {"tool":"mcdev_goto","x":120,"z":-35}
+- mcdev_move 移动: {"tool":"mcdev_move","side":"client","mode":"walk","keys":"forward","ms":1500}
+  // mode=walk/keys 真实按键，ms 后自动松开；也可 teleport/relative/stop
+- mcdev_look 转头: {"tool":"mcdev_look","side":"client","target":"twilight_grove:moss_crawler"}
+- mcdev_attack 攻击: {"tool":"mcdev_attack","side":"client","target":"twilight_grove:moss_crawler","radius":6}
+- mcdev_mine 挖掘: {"tool":"mcdev_mine","side":"client","x":10,"y":64,"z":10,"timeoutMs":4000}
+- mcdev_break 立即破坏: {"tool":"mcdev_break","side":"client","x":10,"y":64,"z":10}
+- mcdev_use_item 使用手持物品: {"tool":"mcdev_use_item","side":"client"}
+- mcdev_inventory 打开背包: {"tool":"mcdev_inventory","side":"client"}
 
 AI 游戏控制（Forge 1.20.1 开发客户端；先 mcdev_prepare kind=both 或 client）：
 - game_setup 换中文并新建存档（已在存档里则直接返回）:
@@ -337,14 +372,29 @@ AI 游戏控制（Forge 1.20.1 开发客户端；先 mcdev_prepare kind=both 或
 12. 新建生物实体、物品图标、方块外观时，先调用 design_studio generate 让用户挑方案：
     用户可以选一套、补描述重新生成、保留模型只改图案，或上传自己的 PNG / 模型。
     选定后按返回的 applied.written 继续接线；不要在用户没选之前用 pixel_art 私自定稿。
-    其余纹理、GUI 和程序化贴图用 pixel_art；3D 模型写 Minecraft 模型 JSON（elements / faces / display），
+    方块/物品贴图用 texture_gen（结构化配色与纹理，禁止用纯色块糊弄）；
+    生物皮肤必须用 entity_texture 生成真实 UV 图集，不要用正面立绘；
+    lint 的 P2-15 一旦报“纯色块 / 接近纯黑 / 颜色太少”，必须把那条贴图用
+    texture_gen 或 entity_texture 重新生成覆盖，不能解释成“设计如此”；
+    实体主色不要低于 #4a4a5a，否则进游戏就是一团黑影，模型细节全看不到；
+    entity_texture 用 64x64 humanoid，variant 里写材质词（bone / scale / moss /
+    fire / robe / wraith）会自动加骨骼、鳞片、斑点、袍边、灵纹；
+    帽子/外套/袖子/裤子这类外层只画帽檐、袖口、下摆、腰带，其余保持透明，
+    整块涂满再随机镂空就是之前“外层乱码色块”的根源；
+    像素风每个面只用 2~3 阶明暗，禁止给每个像素铺噪声（会糊成杂色）；
+    生成后用 vision_review 或 1x 预览检查“一眼能认出是什么”，认不出就换主色/加特征重画；
+    pixel_art 只用于 logo / GUI 小图标。3D 模型写 Minecraft 模型 JSON（elements / faces / display），
     不要声称能直接生成 .obj / .fbx。design_studio 的实体模型是 GeckoLib geo.json 起始模型。
 13. 写代码前先读目标文件；优先官方事件/API，必须用 Mixin 时按 mixin-safety 标注风险。
 14. 需要验证运行时行为时，不要只说“让用户自己进游戏试”：先 build_project，再 mcdev_prepare，
     然后按工程能力选择验证方式：
     - Forge 1.20.1：mcdev_status / mcdev_ui / mcdev_command / mcdev_scenario 取真实结果；
-      需要 AI 亲自进游戏点、走、打、看效果时，用 game_setup + game_control + game_observe +
-      game_test；截图后先看 review.ok / review.issues（黑屏、空场景、对比度）再决定改不改；
+      纯逻辑/交互验证优先 mcdev_prepare kind=server + mcdev_bot / game_bot_playtest：
+      服务端假玩家默认创造模式，全程零窗口，用返回的坐标/方块/血量证据确认角色真的被操作过；
+      需要看实际画面时才 mcdev_prepare kind=both（background 默认 true，窗口不显示在桌面），
+      用 game_setup + game_control + game_observe + game_test；截图后先看 review.ok / review.issues
+      （黑屏、空场景、对比度）再决定改不改；最后用 game_playtest 复核真实客户端输入链路。
+      任何一步 ok=false 就继续修，修完重跑。
     - 其他加载器/版本：mcdev_launch_status + mcdev_run_dump 检查启动日志，GameTest 用 mcdev_gametest。
 15. 探针只监听 127.0.0.1:39001（服务端）和 39002（客户端），请求头 X-Mcdev-Token: mcdev。
     只有 Forge 1.20.1 有探针；其他工程不要反复请求探针端口。连接失败时先用 mcdev_launch_status 看进程，

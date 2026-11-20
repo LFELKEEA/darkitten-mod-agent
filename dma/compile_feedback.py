@@ -26,6 +26,7 @@ MAX_ERRORS = 30
 # javac 的「找不到符号」在标准输出里把符号名放在后续的 symbol: 行。
 _SYMBOL_RE = re.compile(
     r"symbol\s*:\s*(?:class|method|variable|interface|enum|constructor)\s+([\w.]+)"
+    r"|符号\s*:\s*(?:类|方法|变量|接口|枚举|构造器)\s+([\w.]+)"
 )
 # 紧凑格式（某些 Gradle 版本 / 单行输出）与中文本地化兜底。
 _SYMBOL_INLINE_RE = re.compile(
@@ -38,7 +39,9 @@ def _extract_symbol_name(message: str, output: str) -> str | None:
     for pattern in (_SYMBOL_RE, _SYMBOL_INLINE_RE):
         m = pattern.search(output)
         if m:
-            return m.group(1).rsplit(".", 1)[-1]
+            found = next((g for g in m.groups() if g), None)
+            if found:
+                return found.rsplit(".", 1)[-1]
     # 中文「找不到符号」但符号在别处时，从消息里尽力取一个类名样子的词。
     if "找不到符号" in message or "cannot find symbol" in message:
         m = re.search(r"([A-Z][A-Za-z0-9_]{2,})", message)

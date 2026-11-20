@@ -117,6 +117,7 @@ public final class ClientProbeServer {
             server.createContext("/player/mine", ClientProbeServer::handlePlayerMine);
             server.createContext("/item/mainhand", ClientProbeServer::handleMainhandItem);
             server.createContext("/screenshot", ClientProbeServer::handleScreenshot);
+            server.createContext("/window", ClientProbeServer::handleWindow);
             server.createContext("/quit", ClientProbeServer::handleQuit);
             executor = Executors.newFixedThreadPool(2);
             server.setExecutor(executor);
@@ -188,6 +189,7 @@ public final class ClientProbeServer {
                 d.put("inWorld", mc.player != null && mc.level != null);
                 d.put("language", mc.options.languageCode);
                 d.put("languageSelected", mc.getLanguageManager().getSelected());
+                d.put("window", BackgroundWindow.status(mc));
                 d.put("dimension", mc.level == null ? null
                         : mc.level.dimension().location().toString());
                 if (mc.player != null) {
@@ -1749,15 +1751,55 @@ public final class ClientProbeServer {
                 return d;
             });
             java.nio.file.Path path = java.nio.file.Path.of((String) data.get("path"));
-            for (int i = 0; i < 40 && !java.nio.file.Files.isRegularFile(path); i++) {
+            // Screenshot.grab 是异步落盘的：只等到“文件存在”会读到 0 字节的半成品，
+            // 后续画面体检会直接失败。这里等到文件大小连续两次一致且非空再返回。
+            long lastSize = -1L;
+            for (int i = 0; i < 80; i++) {
+                if (java.nio.file.Files.isRegularFile(path)) {
+                    long size = java.nio.file.Files.size(path);
+                    if (size > 0L && size == lastSize) {
+                        break;
+                    }
+                    lastSize = size;
+                }
                 Thread.sleep(50);
             }
-            data.put("exists", java.nio.file.Files.isRegularFile(path));
-            data.put("size", java.nio.file.Files.isRegularFile(path)
-                    ? java.nio.file.Files.size(path) : 0L);
+            long finalSize = java.nio.file.Files.isRegularFile(path)
+                    ? java.nio.file.Files.size(path) : 0L;
+            data.put("exists", finalSize > 0L);
+            data.put("size", finalSize);
             ok(ex, data);
         } catch (Exception e) {
             error(ex, 500, "screenshot failed: " + e.getMessage());
+        }
+    }
+
+    private static void handleWindow(HttpExchange ex) throws IOException {
+        if (!authorized(ex)) {
+            return;
+        }
+        if (!"POST".equalsIgnoreCase(ex.getRequestMethod())) {
+            try {
+                ok(ex, onClient(() -> BackgroundWindow.status(Minecraft.getInstance())));
+            } catch (Exception e) {
+                error(ex, 500, "window query failed: " + e.getMessage());
+            }
+            return;
+        }
+        JsonObject body;
+        try {
+            body = jsonBody(ex);
+        } catch (Exception e) {
+            error(ex, 400, "invalid json: " + e.getMessage());
+            return;
+        }
+        final boolean visible = optBool(body, "visible", true);
+        final boolean focus = optBool(body, "focus", false);
+        try {
+            ok(ex, onClient(() -> BackgroundWindow.setVisible(
+                    Minecraft.getInstance(), visible, focus)));
+        } catch (Exception e) {
+            error(ex, 500, "window change failed: " + e.getMessage());
         }
     }
 

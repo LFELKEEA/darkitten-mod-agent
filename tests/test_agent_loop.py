@@ -648,6 +648,25 @@ class AgentLoopTests(TempDataCase):
         self.assertEqual(agent_mod._build_task_error("build"), "")
         self.assertEqual(agent_mod._build_task_error("runGameTestServer"), "")
 
+    def test_repeated_verification_gets_nudged(self) -> None:
+        """同一个校验工具重复执行 3 次后，必须提醒模型换下一步。"""
+        project = make_project(self)
+        worker = self.worker(project)
+        reply = '```tool\n{"tool":"validate_resources"}\n```'
+        seen: list[list[dict]] = []
+
+        def fake(ai, messages, **_kwargs):
+            seen.append(list(messages))
+            return reply if len(seen) <= 3 else "本轮结束。"
+
+        with mock.patch("dma.agent.ai.request_chat", side_effect=fake), \
+                mock.patch.object(worker, "_execute", return_value="校验通过"):
+            worker._loop()
+
+        joined = "\n".join(str(m.get("content") or "") for m in seen[-1])
+        self.assertIn("已经执行过多次", joined)
+        self.assertIn("validate_resources", joined)
+
 
 if __name__ == "__main__":
     unittest.main()

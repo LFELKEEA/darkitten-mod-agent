@@ -309,6 +309,14 @@ class SourceHealthTests(unittest.TestCase):
             ["stellar", "bmclapi"],
         )
         self.assertEqual(mirrors._pinned_sources("com/google/guava/guava.jar"), ())
+        # ForgeGradle 插件标记的 6.x 不在 Stellar 的元数据里，钉死会让
+        # build.gradle 的 [6.0,6.2) 直接解析失败。
+        self.assertEqual(
+            mirrors._pinned_sources(
+                "net/minecraftforge/gradle/net.minecraftforge.gradle.gradle.plugin/maven-metadata.xml"
+            ),
+            (),
+        )
 
     def test_missing_path_is_skipped_then_reset(self) -> None:
         health = mirrors._SourceHealth()
@@ -411,6 +419,43 @@ class RaceTests(TempDataCase):
 
 
 class MirrorServiceTests(TempDataCase):
+    def test_authoritative_race_returns_four_tuple_from_held(self) -> None:
+        """权威源确认缺失后采用挂起的普通源，返回结构必须和普通胜者一致。
+
+        回归：held 是队列里的 5 元组，直接当 winner 返回会让 stream() 解包
+        时报 “too many values to unpack (expected 4, got 5)”。
+        """
+        miss_server, miss_base = _serve(_RepoHandler, files={})
+        fast_server, fast_base = _serve(_RepoHandler, files={"m/a.jar": b"data"})
+        try:
+            winner, misses, _failures, _incomplete, _unresolved = mirrors._race(
+                [("fastheld", fast_base), ("missauth", miss_base)],
+                "m/a.jar",
+                mode="bytes",
+                timeout=2.0,
+                overall=3.0,
+                stagger=0.05,
+                required=("missauth",),
+                authoritative=True,
+            )
+            self.assertEqual(misses, 1)
+            self.assertIsNotNone(winner)
+            self.assertEqual(len(winner), 4)
+            self.assertEqual(winner[0], "fastheld")
+            self.assertEqual(winner[1], b"data")
+        finally:
+            for server in (miss_server, fast_server):
+                server.shutdown()
+                server.server_close()
+    def test_store_refuses_directory_collision(self) -> None:
+        service = mirrors.MirrorService()
+        path = "org/apache/logging/log4j/log4j-core"
+        target = mirrors.cache_path(path)
+        target.mkdir(parents=True, exist_ok=True)
+        with self.assertRaises(OSError):
+            service.store(path, b"data")
+        self.assertTrue(target.is_dir())
+
     def test_synthesized_module_sha1_matches_content(self) -> None:
         """合成模块的 .sha1 必须是新内容的哈希，否则 Gradle 会退回旧缓存。"""
         service = mirrors.MirrorService()
@@ -509,7 +554,22 @@ class MirrorServiceTests(TempDataCase):
             with mock.patch.object(mirrors, "service", return_value=fake):
                 script = mirrors.prepare_launch_env()
         self.assertEqual(script, Path("mirror.gradle"))
-        fake.init_script.assert_called_once_with(hosts=["maven.neoforged.net"])
+        # 可达但很慢的 Forge 仓库也要一并改写，否则构建会静默卡几分钟。
+        fake.init_script.assert_called_once_with(
+            hosts=["maven.neoforged.net", "maven.minecraftforge.net"]
+        )
+
+    def test_prepare_launch_env_always_mirrors_slow_forge(self) -> None:
+        fake = mock.Mock()
+        fake.init_script.return_value = Path("mirror.gradle")
+        with mock.patch.object(
+            mirrors, "unreachable_hosts", return_value=["maven.neoforged.net"]
+        ):
+            with mock.patch.object(mirrors, "service", return_value=fake):
+                mirrors.prepare_launch_env()
+        hosts = fake.init_script.call_args.kwargs["hosts"]
+        self.assertIn("maven.minecraftforge.net", hosts)
+        self.assertEqual(len(hosts), len(set(hosts)))
 
     def test_prepare_launch_env_always_probes_official_hosts(self) -> None:
         """NeoGradle 的仓库 URL 在插件里动态添加，构建脚本扫不到。
