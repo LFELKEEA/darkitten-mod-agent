@@ -466,7 +466,7 @@ class ChatPage(QWidget):
     # ------------------------------------------------------------------
     def _restore_project(self) -> None:
         saved = str(self.main.config.last_project or "").strip()
-        if saved and Path(saved).is_dir():
+        if saved and project_mod.looks_like_project(saved):
             try:
                 project = project_mod.load_project(Path(saved))
             except Exception:
@@ -474,10 +474,15 @@ class ChatPage(QWidget):
             if project is not None:
                 self._set_project(project, quiet=True)
                 return
+        if saved:
+            # 目录被删掉或被替换成普通目录时，清掉记录，避免每次启动都去加载它。
+            self.main.config.last_project = ""
+            self.main.save_config()
         self._show_empty()
 
     def _show_empty(self) -> None:
         self.project = None
+        self.history = []
         self.delete_btn.setEnabled(False)
         self.project_label.setText("尚未打开工程")
         self.project_meta.setText("先在右上角新建或打开一个模组工程。")
@@ -570,6 +575,9 @@ class ChatPage(QWidget):
 
     def open_project_path(self, path: str) -> None:
         """助手生成新工程后自动切换过去。"""
+        if not project_mod.looks_like_project(path):
+            self.main.status(f"这不是模组工程目录，已跳过：{path}")
+            return
         try:
             project = project_mod.load_project(Path(path))
         except Exception as exc:
@@ -585,6 +593,15 @@ class ChatPage(QWidget):
             str(self.main.config.project_root or Path.home()),
         )
         if not folder:
+            return
+        if not project_mod.looks_like_project(folder):
+            QMessageBox.warning(
+                self,
+                "不是模组工程",
+                "这个目录里没有工程标记文件（.dma/project.json、build.gradle "
+                "或模组描述文件），不能当作模组工程打开。\n\n"
+                "请选择新建工程时创建的目录，或包含 build.gradle 的工程根目录。",
+            )
             return
         try:
             project = project_mod.load_project(Path(folder))
@@ -657,15 +674,25 @@ class ChatPage(QWidget):
         rows = project_mod.recent_projects()
         if not rows:
             menu.addAction("暂无最近工程").setEnabled(False)
-        for item in rows[:12]:
+        shown = 0
+        for item in rows[:30]:
             root = str(item.get("root") or "")
-            if not root or not Path(root).is_dir():
+            # 记录可能是旧版本写下的普通目录，只有真正的工程才显示。
+            if not root or not project_mod.looks_like_project(root):
                 continue
             action = menu.addAction(str(item.get("label") or root))
             action.triggered.connect(lambda _=False, path=root: self._open_path(path))
+            shown += 1
+            if shown >= 12:
+                break
+        if shown == 0 and rows:
+            menu.addAction("暂无最近工程").setEnabled(False)
         menu.exec(self.recent_btn.mapToGlobal(self.recent_btn.rect().bottomLeft()))
 
     def _open_path(self, path: str) -> None:
+        if not project_mod.looks_like_project(path):
+            QMessageBox.warning(self, "不是模组工程", f"目录里没有工程标记文件：\n{path}")
+            return
         try:
             project = project_mod.load_project(Path(path))
         except Exception as exc:

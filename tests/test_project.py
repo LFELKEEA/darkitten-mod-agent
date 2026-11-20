@@ -323,6 +323,47 @@ class ProjectTests(TempDataCase):
         self.assertNotIn(str(first.root), roots)
         self.assertIn(str(second.root), roots)
 
+    def test_looks_like_project_requires_marker(self) -> None:
+        project = self.make()
+        self.assertTrue(project_mod.looks_like_project(project.root))
+
+        plain = self.tmp / "plain"
+        plain.mkdir()
+        (plain / "notes.txt").write_text("not a project", encoding="utf-8")
+        self.assertFalse(project_mod.looks_like_project(plain))
+        self.assertFalse(project_mod.looks_like_project(self.tmp / "missing"))
+        # 程序数据目录、_internal 这类目录不该被当成工程。
+        data = self.tmp / "data"
+        (data / "_internal").mkdir(parents=True)
+        self.assertFalse(project_mod.looks_like_project(data))
+        self.assertFalse(project_mod.looks_like_project(data / "_internal"))
+
+        # 只有 build.gradle 的目录也算工程根目录。
+        gradle_only = self.tmp / "gradle-only"
+        gradle_only.mkdir()
+        (gradle_only / "build.gradle").write_text("", encoding="utf-8")
+        self.assertTrue(project_mod.looks_like_project(gradle_only))
+
+    def test_prune_recent_projects_drops_stale_entries(self) -> None:
+        from dma import paths
+
+        project = self.make()
+        plain = self.tmp / "plain"
+        plain.mkdir()
+        items = project_mod.recent_projects() + [
+            {"root": str(self.tmp / "gone"), "label": "已删除"},
+            {"root": str(plain), "label": "普通目录"},
+        ]
+        paths.projects_path().write_text(
+            json.dumps(items, ensure_ascii=False), encoding="utf-8"
+        )
+        kept = project_mod.prune_recent_projects()
+        self.assertEqual([item["root"] for item in kept], [str(project.root)])
+        self.assertEqual(
+            [item["root"] for item in project_mod.recent_projects()],
+            [str(project.root)],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -506,17 +506,50 @@ class NewProjectDialog(QDialog):
         if folder:
             self.root.setText(folder)
 
+    @staticmethod
+    def _resolve_base(text: str) -> Path | None:
+        """把用户输入的根目录解析成绝对路径，并挡掉程序自己的目录。
+
+        以前输入「data」会按当前工作目录解析，结果工程被建到程序数据目录里，
+        下次启动又把整个 data 当成工程扫描，模型库还会混进这些假工程。
+        """
+        raw = (text or "").strip()
+        base = Path(raw).expanduser() if raw else paths.default_project_root()
+        if not base.is_absolute():
+            base = paths.default_project_root() / base
+        try:
+            base = base.resolve()
+        except OSError:
+            return None
+        data = paths.data_dir().resolve()
+        app = paths.app_dir().resolve()
+        if base == data or base == app:
+            return None
+        if base == app / "_internal" or (app / "_internal") in base.parents:
+            return None
+        return base
+
     def _accept(self) -> None:
         if not self.mod_id.text().strip():
             QMessageBox.warning(self, "缺少信息", "请填写 Mod ID。")
             return
+        base = self._resolve_base(self.root.text())
+        if base is None:
+            QMessageBox.warning(
+                self,
+                "目录不可用",
+                "不能把工程建在程序安装目录或程序数据目录本身。\n\n"
+                "请填写一个普通文件夹，或直接使用默认的 data/projects 目录。",
+            )
+            return
+        self.root.setText(str(base))
         loader = self.loader.currentText()
         fabric_api = (
             self._combo_value(self.fabric_api) if loader == "Fabric" else ""
         )
         try:
             project = create_project(
-                Path(self.root.text().strip() or str(paths.default_project_root())),
+                base,
                 name=self.name.text().strip(),
                 mod_id=self.mod_id.text().strip(),
                 mc_version=self._combo_value(self.mc_version),

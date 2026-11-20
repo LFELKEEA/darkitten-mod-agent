@@ -395,10 +395,7 @@ class ModLibraryPage(QWidget):
             self._refresh_project_combo()
             return
         self.root = root
-        self._meta = {}
-        self._entries = []
-        self._by_id = {}
-        self._entries = []
+        self._reset_library()
         self._refresh_project_combo()
         if root is None:
             self.project_label.setText("尚未打开工程")
@@ -409,6 +406,24 @@ class ModLibraryPage(QWidget):
 
     def refresh(self) -> None:
         self._reload()
+
+    def _reset_library(self) -> None:
+        """切换或关闭工程时清空列表，避免显示上一个工程的条目。"""
+        self._meta = {}
+        self._entries = []
+        self._by_id = {}
+        self._item_by_id = {}
+        self._entry = None
+        if hasattr(self, "list"):
+            self.list.blockSignals(True)
+            self.list.clear()
+            self.list.blockSignals(False)
+        if hasattr(self, "count_label"):
+            self.count_label.setText("0 个")
+        if hasattr(self, "_kind_buttons"):
+            for key, button in self._kind_buttons.items():
+                label = "全部" if key == "all" else _KIND_LABEL[key]
+                button.setText(f"{label} 0")
 
     def _refresh_project_combo(self) -> None:
         if not hasattr(self, "project_combo"):
@@ -422,7 +437,8 @@ class ModLibraryPage(QWidget):
             except (OSError, ValueError):
                 return
             key = str(path)
-            if key in seen or not path.is_dir():
+            # 只列出真正的模组工程，普通目录不能混进下拉列表。
+            if key in seen or not project_mod.looks_like_project(path):
                 return
             seen.add(key)
             rows.append((key, str(label or path.name)))
@@ -464,6 +480,14 @@ class ModLibraryPage(QWidget):
         if not folder:
             self._refresh_project_combo()
             return
+        if not project_mod.looks_like_project(folder):
+            QMessageBox.warning(
+                self,
+                "不是模组工程",
+                "这个目录里没有工程标记文件，模型库不会扫描它。",
+            )
+            self._refresh_project_combo()
+            return
         self._set_library_root(Path(folder))
 
     def _set_library_root(self, root: Path) -> None:
@@ -475,13 +499,15 @@ class ModLibraryPage(QWidget):
             self.status_label.setText(f"工程目录不存在：{target}")
             self._refresh_project_combo()
             return
+        if not project_mod.looks_like_project(target):
+            self.status_label.setText(f"目录不是模组工程：{target}")
+            self._refresh_project_combo()
+            return
         if target == self.root:
             self._refresh_project_combo()
             return
         self.root = target
-        self._meta = {}
-        self._entries = []
-        self._by_id = {}
+        self._reset_library()
         self.project_label.setText(f"工程：{target}")
         self._refresh_project_combo()
         self._reload()
@@ -560,6 +586,7 @@ class ModLibraryPage(QWidget):
 
     def _reload(self, select_id: str | None = None) -> None:
         if self.root is None:
+            self._reset_library()
             self._show_empty("先打开一个模组工程，模型库会自动扫描其中的内容。")
             return
         current = select_id
@@ -569,8 +596,7 @@ class ModLibraryPage(QWidget):
         try:
             data = modcatalog.load(self.root)
         except Exception as exc:  # noqa: BLE001 - 扫描失败要在界面里说明
-            self._entries = []
-            self._by_id = {}
+            self._reset_library()
             self._refresh_list()
             self._show_empty(f"扫描失败：{exc}")
             self.status_label.setText(f"扫描失败：{exc}")

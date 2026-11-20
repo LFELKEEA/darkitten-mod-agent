@@ -581,28 +581,25 @@ def write_bytes(root: Path, relative: str, data: bytes) -> Path:
     return target
 
 
-def remember_project(project: Project) -> None:
+def _write_recent(items: list[dict[str, Any]]) -> None:
     path = paths.projects_path()
-    items: list[dict[str, Any]] = []
-    if path.is_file():
-        try:
-            data = json.loads(path.read_text(encoding="utf-8-sig"))
-            if isinstance(data, list):
-                items = [item for item in data if isinstance(item, dict)]
-        except (OSError, ValueError):
-            items = []
-    entry = {
-        "root": str(project.root),
-        "label": project.label(),
-        "updated_at": _now(),
-    }
-    items = [item for item in items if item.get("root") != entry["root"]]
-    items.insert(0, entry)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         json.dumps(items[:30], ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
+
+
+def remember_project(project: Project) -> None:
+    items = recent_projects()
+    entry = {
+        "root": str(project.root),
+        "label": project.label(),
+        "updated_at": _now(),
+    }
+    items = [item for item in items if _norm_path(item.get("root")) != _norm_path(entry["root"])]
+    items.insert(0, entry)
+    _write_recent(items)
 
 
 def recent_projects() -> list[dict[str, Any]]:
@@ -616,27 +613,61 @@ def recent_projects() -> list[dict[str, Any]]:
     return [item for item in data if isinstance(item, dict)] if isinstance(data, list) else []
 
 
+# 能说明「这个目录确实是一个模组工程」的标记文件。
+# 只用来过滤最近工程和打开入口，不参与 load_project 的宽松加载。
+PROJECT_MARKERS = (
+    f"{META_DIR}/{META_FILE}",
+    "build.gradle",
+    "build.gradle.kts",
+    "src/main/resources/fabric.mod.json",
+    "src/main/resources/META-INF/mods.toml",
+    "src/main/resources/META-INF/neoforge.mods.toml",
+)
+
+
+def looks_like_project(root: str | Path) -> bool:
+    """目录里至少有一个模组工程标记才算是可打开的工程。
+
+    程序数据目录、`_internal` 这类目录也可能有 src/resources 结构，
+    但它们不该出现在「最近工程」里，更不该被模型库当成工程扫描。
+    """
+    try:
+        base = Path(str(root or "")).expanduser()
+    except (OSError, ValueError):
+        return False
+    if not base.is_dir():
+        return False
+    for relative in PROJECT_MARKERS:
+        try:
+            if (base / relative).exists():
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def prune_recent_projects() -> list[dict[str, Any]]:
+    """移除已不存在或不再是模组工程的最近记录。"""
+    items = recent_projects()
+    keep = []
+    for item in items:
+        value = str(item.get("root") or "").strip()
+        if value and looks_like_project(value):
+            keep.append(item)
+    if len(keep) != len(items):
+        _write_recent(keep)
+    return keep
+
+
 def forget_project(root: Path) -> None:
     """把工程从「最近」列表里移除。"""
-    path = paths.projects_path()
-    if not path.is_file():
-        return
-    try:
-        data = json.loads(path.read_text(encoding="utf-8-sig"))
-    except (OSError, ValueError):
-        return
-    if not isinstance(data, list):
-        return
     target = _norm_path(root)
     items = [
         item
-        for item in data
-        if not (isinstance(item, dict) and _norm_path(item.get("root")) == target)
+        for item in recent_projects()
+        if _norm_path(item.get("root")) != target
     ]
-    path.write_text(
-        json.dumps(items[:30], ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
+    _write_recent(items)
 
 
 def _norm_path(value: Any) -> str:

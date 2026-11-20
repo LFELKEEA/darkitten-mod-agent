@@ -146,21 +146,45 @@ def _lang_map(root: Path, modid: str) -> dict[str, str]:
     return result
 
 
+JAVA_SOURCE_ROOTS = (
+    "src/main/java",
+    "src/client/java",
+    "src/common/java",
+    "common/src/main/java",
+    "fabric/src/main/java",
+    "forge/src/main/java",
+    "quilt/src/main/java",
+    "neoforge/src/main/java",
+)
+
+
 def _java_files(root: Path, limit: int = 4000) -> list[Path]:
+    """只扫描模组工程的标准源码目录。
+
+    以前从工程根目录递归，一旦目录选错（例如把程序 data 目录当成工程），
+    Gradle 缓存里的几十万个文件会让扫描卡上一两分钟。源码就在这些目录里，
+    没有必要从根目录往下翻。
+    """
     base = Path(root)
     if not base.is_dir():
         return []
     result: list[Path] = []
-    try:
-        for path in base.rglob("*.java"):
-            parts = {part.lower() for part in path.parts}
-            if parts & {"build", "out", ".gradle", "run", "runs"}:
-                continue
-            result.append(path)
-            if len(result) >= limit:
-                break
-    except OSError:
-        return result
+    seen: set[Path] = set()
+    for relative in JAVA_SOURCE_ROOTS:
+        folder = base / relative
+        if not folder.is_dir():
+            continue
+        try:
+            for path in folder.rglob("*.java"):
+                key = path.resolve()
+                if key in seen:
+                    continue
+                seen.add(key)
+                result.append(path)
+                if len(result) >= limit:
+                    return result
+        except OSError:
+            continue
     return result
 
 

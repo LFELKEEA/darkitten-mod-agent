@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
 from .. import catalog as catalog_mod
 from .. import config as config_mod
 from .. import mcdev, paths, shortcut, updater
+from .. import project as project_mod
 from ..connectors import ConnectorStore
 from ..knowledge import KnowledgeStore
 from ..memory import MemoryStore
@@ -90,14 +91,31 @@ class MainWindow(QMainWindow):
             self.setWindowIcon(QIcon(str(icon_path)))
         self.resize(self.config.window_width, self.config.window_height)
         self.setMinimumSize(1080, 720)
+        # 上次删掉或手动移走的工程不该继续留在「最近」里。
+        project_mod.prune_recent_projects()
         self._build()
         self.active_project = self.chat_page.project
-        self.build_page.sync_project(self.active_project)
-        self.modlib_page.set_project(self.active_project)
         self.project_changed.connect(self._track_project)
         QTimer.singleShot(800, self._offer_shortcut)
         QTimer.singleShot(2200, self._check_update_startup)
         QTimer.singleShot(5000, self._start_catalog_sync)
+
+    def start_initial_sync(self) -> None:
+        """窗口显示后再同步工程，避免首次启动时白屏等扫描。"""
+        self.active_project = self.chat_page.project
+        self.build_page.sync_project(self.active_project)
+        self.modlib_page.set_project(self.active_project)
+
+    def activate_from_second_launch(self) -> None:
+        """第二次启动时把已经运行的窗口叫到前面。"""
+        if self.isMinimized():
+            self.showNormal()
+        elif not self.isVisible():
+            self.show()
+        self.setWindowState(self.windowState() | Qt.WindowActive)
+        self.raise_()
+        self.activateWindow()
+        QApplication.alert(self, 1500)
 
     # ------------------------------------------------------------------
     def _build(self) -> None:

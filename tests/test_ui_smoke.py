@@ -392,6 +392,24 @@ class UiSmokeTests(TempDataCase):
         finally:
             dialog.close()
 
+    def test_new_project_dialog_resolves_relative_roots(self) -> None:
+        from dma import paths
+        from dma.ui.widgets import NewProjectDialog
+
+        dialog = NewProjectDialog(None, root=str(self.tmp / "projects"))
+        try:
+            self.assertIsNone(dialog._resolve_base(str(paths.data_dir())))
+            self.assertIsNone(dialog._resolve_base(str(paths.app_dir())))
+            self.assertIsNone(
+                dialog._resolve_base(str(paths.app_dir() / "_internal"))
+            )
+            resolved = dialog._resolve_base("relative_mods")
+            self.assertEqual(
+                resolved, (paths.default_project_root() / "relative_mods").resolve()
+            )
+        finally:
+            dialog.close()
+
     def test_pending_panel_shows_auto_written_files(self) -> None:
         from dma.agent import PendingFile
         from dma.ui import theme

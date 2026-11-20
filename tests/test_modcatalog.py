@@ -375,6 +375,16 @@ class ModCatalogTests(TempDataCase):
         self.assertIn("Y 0 ~ 256", dimension_fields["维度大小"])
         self.assertIn("永久夜晚", dimension_fields["天空模样"])
 
+    def test_java_scan_skips_cache_directories(self) -> None:
+        cache = self.root / "data" / "gradle" / "caches"
+        cache.mkdir(parents=True)
+        (cache / "Injected.java").write_text("class Injected {}", encoding="utf-8")
+
+        files = modcatalog._java_files(self.root)
+        names = {path.name for path in files}
+        self.assertIn("ModEntities.java", names)
+        self.assertNotIn("Injected.java", names)
+
     def test_scan_geo_and_bbmodel(self) -> None:
         _write_model_extras(self.root)
         data = modcatalog.scan(self.root)
@@ -596,6 +606,26 @@ class ModLibraryPageTests(TempDataCase):
                 page.project_combo.currentData(), str(second.resolve())
             )
             self.assertTrue(page._entries)
+        finally:
+            page.deleteLater()
+            self.app.processEvents()
+
+    def test_clearing_project_clears_previous_entries(self) -> None:
+        from dma.ui.mod_library_page import ModLibraryPage
+
+        page = ModLibraryPage(_FakeMain())
+        try:
+            page.set_project(SimpleNamespace(root=self.root))
+            self.assertGreater(page.list.count(), 0)
+            self.assertTrue(page._entries)
+
+            page.set_project(None)
+            self.assertEqual(page.list.count(), 0)
+            self.assertEqual(page._entries, [])
+            self.assertEqual(page._by_id, {})
+            self.assertEqual(page.count_label.text(), "0 个")
+            self.assertIsNone(page._entry)
+            self.assertEqual(page.project_combo.count(), 1)
         finally:
             page.deleteLater()
             self.app.processEvents()
