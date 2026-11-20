@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
 from .. import mcdev
 from .. import project as project_mod
 from .. import sessions
+from ..mcdev.game import running_client_port
 from ..agent import (
     AgentWorker,
     PendingFile,
@@ -34,6 +35,7 @@ from ..agent import (
 )
 from ..prompt import initial_project_request, requirement_form_text
 from .design_dialog import DesignPickerDialog
+from .game_view import GameViewWindow
 from .widgets import ChatView, NewProjectDialog, TextPreviewDialog, card, tiny
 from .workbench_panel import ArtifactPanel, RunPanel
 
@@ -125,6 +127,8 @@ class ChatPage(QWidget):
         self.run_panel.prepare_requested.connect(self._start_mcdev)
         self.run_panel.stop_requested.connect(self._stop_mcdev)
         self.run_panel.refresh_requested.connect(self._refresh_run_status)
+        self.run_panel.view_requested.connect(self._open_game_view)
+        self._game_view: GameViewWindow | None = None
         self.side_tabs.addTab(self.run_panel, "运行")
 
         files_tab = QWidget()
@@ -350,6 +354,27 @@ class ChatPage(QWidget):
         except Exception:
             payload = {"processes": []}
         self.run_panel.update_status(payload)
+
+    def _open_game_view(self) -> None:
+        if self.project is None:
+            QMessageBox.information(self, "还没有工程", "请先新建或打开一个工程。")
+            return
+        try:
+            payload = mcdev.shared().launch_status()
+        except Exception:
+            payload = {"processes": []}
+        port = running_client_port(payload)
+        if port is None:
+            QMessageBox.information(
+                self,
+                "客户端未运行",
+                "后台客户端还没启动。先点“启动双端”或“仅客户端”，"
+                "等探针就绪后再打开游戏画面。",
+            )
+            return
+        if self._game_view is None:
+            self._game_view = GameViewWindow(self)
+        self._game_view.show_for(self.project.root, port)
 
     def _append_run_log(self, text: str) -> None:
         self.run_panel.append_log(text)

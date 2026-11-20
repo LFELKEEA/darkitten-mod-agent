@@ -16,6 +16,7 @@ import re
 import tempfile
 import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -223,6 +224,72 @@ def state(*, radius: int = 8, port: int | None = None) -> dict:
 
 def window_status(*, port: int | None = None) -> dict:
     return _data("/window", port=port)
+
+
+def running_client_port(status: dict | None) -> int | None:
+    """从 launch_status 的结果里取正在运行的客户端探针端口。"""
+    for item in (status or {}).get("processes", []) or []:
+        if item.get("kind") == "client" and item.get("running"):
+            port = item.get("port")
+            try:
+                return int(port) if port else None
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+@dataclass(frozen=True)
+class Frame:
+    """探针返回的一帧画面：PNG 字节 + 视角/界面元数据。"""
+
+    png: bytes
+    width: int
+    height: int
+    gui_width: int
+    gui_height: int
+    yaw: float
+    pitch: float
+    in_world: bool
+    screen: str
+    language: str
+
+
+def frame(*, port: int | None = None, timeout: float = 5.0) -> Frame:
+    """抓一帧实时画面，不落盘。用于界面上的画面窗口。"""
+
+    try:
+        body, headers = probe.probe_bytes(
+            "client", "/frame", port=port, timeout=timeout
+        )
+    except probe.ProbeError as exc:
+        raise GameError(str(exc)) from exc
+    if not body:
+        raise GameError("探针返回了空画面。")
+
+    def as_int(name: str, default: int = 0) -> int:
+        try:
+            return int(headers.get(name, ""))
+        except ValueError:
+            return default
+
+    def as_float(name: str, default: float = 0.0) -> float:
+        try:
+            return float(headers.get(name, ""))
+        except ValueError:
+            return default
+
+    return Frame(
+        png=body,
+        width=as_int("x-mcdev-width"),
+        height=as_int("x-mcdev-height"),
+        gui_width=as_int("x-mcdev-gui-width"),
+        gui_height=as_int("x-mcdev-gui-height"),
+        yaw=as_float("x-mcdev-yaw"),
+        pitch=as_float("x-mcdev-pitch"),
+        in_world=headers.get("x-mcdev-in-world", "").strip().lower() == "true",
+        screen=headers.get("x-mcdev-screen", ""),
+        language=headers.get("x-mcdev-language", ""),
+    )
 
 
 def set_window_visible(
@@ -719,6 +786,22 @@ def spawn(
             "并且没有处于 peaceful 难度。"
         )
     return result
+
+
+def click(
+    x: int, y: int, *, button: int = 0, port: int | None = None
+) -> dict:
+    """按界面坐标点击；坐标是 GUI 缩放后的坐标（与 /frame 的 Gui-Width 一致）。"""
+    return _data(
+        "/ui/click",
+        method="POST",
+        payload={"x": int(x), "y": int(y), "button": int(button)},
+        port=port,
+    )
+
+
+def hover(x: int, y: int, *, port: int | None = None) -> dict:
+    return _data(f"/ui/hover?x={int(x)}&y={int(y)}", port=port)
 
 
 def click_text(

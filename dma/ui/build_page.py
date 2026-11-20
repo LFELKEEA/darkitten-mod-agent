@@ -19,6 +19,8 @@ from PySide6.QtWidgets import (
 )
 
 from .. import mcdev, project as project_mod
+from ..mcdev.game import running_client_port
+from .game_view import GameViewWindow
 from .widgets import card, tiny
 from .workbench_panel import ArtifactPanel, RunPanel
 
@@ -129,6 +131,8 @@ class BuildPage(QWidget):
         self.run_panel.prepare_requested.connect(self._start_mcdev)
         self.run_panel.stop_requested.connect(self._stop_mcdev)
         self.run_panel.refresh_requested.connect(self._refresh_status)
+        self.run_panel.view_requested.connect(self._open_game_view)
+        self._game_view: GameViewWindow | None = None
         run_layout.addWidget(self.run_panel)
         body.addWidget(run_card, 1)
 
@@ -322,6 +326,27 @@ class BuildPage(QWidget):
         self.run_panel.update_status(payload)
         if not self._run_busy:
             self.run_panel.set_busy(False, "")
+
+    def _open_game_view(self) -> None:
+        if self.project is None:
+            QMessageBox.information(self, "还没有工程", "请先新建或打开一个工程。")
+            return
+        try:
+            payload = mcdev.shared().launch_status()
+        except Exception:
+            payload = {"processes": []}
+        port = running_client_port(payload)
+        if port is None:
+            QMessageBox.information(
+                self,
+                "客户端未运行",
+                "后台客户端还没启动。先点“启动双端”或“仅客户端”，"
+                "等探针就绪后再打开游戏画面。",
+            )
+            return
+        if self._game_view is None:
+            self._game_view = GameViewWindow(self)
+        self._game_view.show_for(self.project.root, port)
 
     def is_busy(self) -> bool:
         """Gradle 任务或开发端进程是否还占用着当前工程。

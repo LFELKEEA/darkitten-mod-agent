@@ -337,6 +337,12 @@ AI 游戏控制（Forge 1.20.1 开发客户端；先 mcdev_prepare kind=both 或
 - mod_reference 自动参考成熟模组:
   {"tool":"mod_reference","action":"auto","query":"自定义村民交易和对话界面","loader":"forge","mc":"1.20.1","max_mods":2}
   // 会自动搜索 Modrinth -> 下载 -> 反编译 -> 返回片段；也可用 search / prepare / snippets / status
+- online_assets 搜索/下载社区模型、皮肤与资源包:
+  {"tool":"online_assets","action":"search","provider":"littleskin","query":"猫","limit":8}
+  {"tool":"online_assets","action":"download","provider":"ysm","id":"Uncategorized/Lex_Ninjia.ysm"}
+  // action: sources / search / download；provider: modrinth / littleskin / littleskin_cape /
+  // ysm / blockbench / mcmodels / planetminecraft；链接型来源只给浏览器入口
+  // 制作模组时可参考造型、贴图与资源包结构，使用前确认原作者许可
 - large_mod_plan 拆大型模组阶段:
   {"tool":"large_mod_plan","idea":"海洋维度、潜水装备、潮汐机器、BOSS 与任务链","loader":"neoforge","mc":"1.21.1","scope":"large"}
   // scope: small / medium / large / epic；输出 8+ 阶段、包结构、所需工具与规模门槛

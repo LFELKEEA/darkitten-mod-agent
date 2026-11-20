@@ -65,7 +65,7 @@ class RuleCatalogTests(unittest.TestCase):
 class ToolSchemaTests(unittest.TestCase):
     def test_tool_definitions_are_unique(self) -> None:
         names = [item["function"]["name"] for item in TOOL_DEFINITIONS]
-        self.assertEqual(len(names), 115)
+        self.assertEqual(len(names), 116)
         self.assertEqual(len(names), len(set(names)))
 
     def test_texture_and_player_tools_are_exposed(self) -> None:

@@ -15,6 +15,7 @@ from PySide6.QtCore import QObject, Signal
 
 from . import (
     ai,
+    artresources,
     arttools,
     compile_feedback,
     connectors,
@@ -153,6 +154,7 @@ KERNEL_TOOLS = {
 CENTER_TOOLS = {
     "catalog_sync", "catalog_query", "catalog_download",
     "mod_search", "mod_download", "mod_decompile", "mod_reference",
+    "online_assets",
     "dev_docs", "api_lookup", "resource_ensure", "large_mod_plan",
     "version_facts", "arch_ref", "multiversion_plan",
     "launcher_versions", "launcher_downloads", "launcher_vanilla",
@@ -2768,6 +2770,59 @@ class AgentWorker(QObject):
                 f"索引：{result.get('index')}\n"
                 "只读参考，不要把这些源码复制进当前工程。"
             )[:MAX_TOOL_RESULT]
+        if name == "online_assets":
+            action = str(args.get("action") or "search").strip().lower()
+            provider_id = str(args.get("provider") or "").strip()
+            if action == "sources":
+                lines = ["在线资源来源："]
+                for item in artresources.providers():
+                    mode = "浏览器浏览" if item.get("kind") == "link" else "可搜索/下载"
+                    lines.append(
+                        f"- {item['name']}（{item['id']}，{mode}）："
+                        f"{item.get('description') or ''}\n  {item.get('homepage') or ''}"
+                    )
+                return "\n".join(lines)[:MAX_TOOL_RESULT]
+            if action == "search":
+                query = str(args.get("query") or "").strip()
+                limit = max(1, min(_arg_int(args, "limit", 12), 60))
+                if provider_id:
+                    items = artresources.search(provider_id, query, limit=limit)
+                else:
+                    items = artresources.search_all(query, limit=min(limit, 8))
+                text = artresources.format_results(items, limit=limit)
+                if not provider_id:
+                    text += "\n\n提示：指定 provider 可以获得单一来源的更多结果。"
+                return text[:MAX_TOOL_RESULT]
+            if action == "download":
+                item_id = str(args.get("id") or "").strip()
+                if not provider_id or not item_id:
+                    return "online_assets download 需要 provider 和 id。"
+                info = artresources.provider(provider_id)
+                if str(info.get("kind")) == "link":
+                    url = artresources.browse_url(
+                        provider_id, str(args.get("query") or "")
+                    )
+                    return (
+                        f"{info['name']} 没有直接下载接口，请在浏览器打开：\n{url}"
+                    )
+                relative = str(args.get("dest") or "").strip()
+                if self.project is not None:
+                    try:
+                        dest = project_mod.safe_path(
+                            self.project.root,
+                            relative or f"reference/assets/{provider_id}",
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        return f"下载目录不合法：{exc}"
+                else:
+                    dest = paths.data_dir() / "artresources" / "downloads" / provider_id
+                path = artresources.download_item(provider_id, item_id, dest)
+                return (
+                    f"已下载：{path}\n"
+                    "第三方资源只用于本地参考或导入当前工程，请遵守原作者许可证，"
+                    "不要重新打包分发。"
+                )[:MAX_TOOL_RESULT]
+            return "online_assets 的 action 只支持 sources / search / download。"
         if name == "large_mod_plan":
             meta = getattr(self.project, "meta", None)
             idea = str(args.get("idea") or self.user_text or "").strip()

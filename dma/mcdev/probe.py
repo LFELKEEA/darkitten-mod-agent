@@ -77,6 +77,40 @@ def probe_json(
     return value if isinstance(value, dict) else {"data": value}
 
 
+def probe_bytes(
+    side: str,
+    path: str,
+    *,
+    method: str = "GET",
+    payload: object | None = None,
+    port: int | None = None,
+    timeout: float = 15.0,
+) -> tuple[bytes, dict[str, str]]:
+    """二进制端点（例如 /frame 的 PNG）用这个：返回原始字节和响应头。"""
+    actual = probe_port(side, port)
+    url = f"http://127.0.0.1:{actual}{path}"
+    data = None
+    headers = {"X-Mcdev-Token": TOKEN}
+    if payload is not None:
+        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    request = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        with _OPENER.open(request, timeout=timeout) as response:
+            body = response.read()
+            meta = {str(k).lower(): str(v) for k, v in response.headers.items()}
+            return body, meta
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        raise ProbeError(
+            f"probe {side}:{actual} {path} -> HTTP {exc.code}: {body[:2000]}"
+        ) from exc
+    except Exception as exc:  # noqa: BLE001 - 网络层异常统一转成可读错误
+        raise ProbeError(
+            f"probe {side}:{actual} {path} 连接失败：{exc}"
+        ) from exc
+
+
 def probe_status_once(kind: str, port: int | None = None, timeout: float = 2.0) -> bool:
     actual = probe_port(kind, port)
     try:

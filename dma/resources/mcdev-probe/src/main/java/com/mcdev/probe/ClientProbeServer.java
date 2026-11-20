@@ -3,6 +3,7 @@ package com.mcdev.probe;
 import com.google.gson.Gson;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
+import com.mojang.blaze3d.pipeline.RenderTarget;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import net.minecraft.client.KeyMapping;
@@ -49,7 +50,11 @@ import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.Vec3;
 import net.minecraftforge.registries.ForgeRegistries;
 import org.lwjgl.glfw.GLFW;
+import org.lwjgl.opengl.GL11;
 
+import java.awt.image.BufferedImage;
+import java.io.ByteArrayOutputStream;
+import java.nio.ByteBuffer;
 import java.util.Comparator;
 import java.util.function.Function;
 
@@ -69,6 +74,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.Callable;
+import javax.imageio.ImageIO;
 
 /**
  * Client-side probe: UI tree, mouse clicks, screenshots.
@@ -117,6 +123,7 @@ public final class ClientProbeServer {
             server.createContext("/player/mine", ClientProbeServer::handlePlayerMine);
             server.createContext("/item/mainhand", ClientProbeServer::handleMainhandItem);
             server.createContext("/screenshot", ClientProbeServer::handleScreenshot);
+            server.createContext("/frame", ClientProbeServer::handleFrame);
             server.createContext("/window", ClientProbeServer::handleWindow);
             server.createContext("/quit", ClientProbeServer::handleQuit);
             executor = Executors.newFixedThreadPool(2);
@@ -1772,6 +1779,137 @@ public final class ClientProbeServer {
         } catch (Exception e) {
             error(ex, 500, "screenshot failed: " + e.getMessage());
         }
+    }
+
+    /**
+     * 实时画面：直接从主渲染目标读像素，在内存里编码成 PNG 返回。
+     * 不落盘，供桌面端以每秒数帧的频率轮询；玩家视角/界面信息放在响应头里，
+     * 方便前端把鼠标点击换算成游戏界面坐标。
+     */
+    private static void handleFrame(HttpExchange ex) throws IOException {
+        if (!authorized(ex)) {
+            return;
+        }
+        try {
+            FrameCapture capture = onClient(ClientProbeServer::captureFrame);
+            byte[] png = encodePng(capture);
+            ex.getResponseHeaders().set("Content-Type", "image/png");
+            ex.getResponseHeaders().set("Cache-Control", "no-store");
+            ex.getResponseHeaders().set("X-Mcdev-Width", Integer.toString(capture.width));
+            ex.getResponseHeaders().set("X-Mcdev-Height", Integer.toString(capture.height));
+            ex.getResponseHeaders().set("X-Mcdev-Gui-Width", Integer.toString(capture.guiWidth));
+            ex.getResponseHeaders().set("X-Mcdev-Gui-Height", Integer.toString(capture.guiHeight));
+            ex.getResponseHeaders().set("X-Mcdev-Yaw", Float.toString(capture.yaw));
+            ex.getResponseHeaders().set("X-Mcdev-Pitch", Float.toString(capture.pitch));
+            ex.getResponseHeaders().set("X-Mcdev-In-World", Boolean.toString(capture.inWorld));
+            ex.getResponseHeaders().set("X-Mcdev-Screen", capture.screen);
+            ex.getResponseHeaders().set("X-Mcdev-Language", capture.language);
+            ex.sendResponseHeaders(200, png.length);
+            try (OutputStream os = ex.getResponseBody()) {
+                os.write(png);
+            }
+        } catch (Exception e) {
+            error(ex, 500, "frame failed: " + e.getMessage());
+        }
+    }
+
+    private static final class FrameCapture {
+        final byte[] rgba;
+        final int width;
+        final int height;
+        final int guiWidth;
+        final int guiHeight;
+        final float yaw;
+        final float pitch;
+        final boolean inWorld;
+        final String screen;
+        final String language;
+
+        FrameCapture(
+                byte[] rgba,
+                int width,
+                int height,
+                int guiWidth,
+                int guiHeight,
+                float yaw,
+                float pitch,
+                boolean inWorld,
+                String screen,
+                String language) {
+            this.rgba = rgba;
+            this.width = width;
+            this.height = height;
+            this.guiWidth = guiWidth;
+            this.guiHeight = guiHeight;
+            this.yaw = yaw;
+            this.pitch = pitch;
+            this.inWorld = inWorld;
+            this.screen = screen;
+            this.language = language;
+        }
+    }
+
+    private static final Object FRAME_BUFFER_LOCK = new Object();
+    private static ByteBuffer frameBuffer;
+
+    private static FrameCapture captureFrame() {
+        Minecraft mc = Minecraft.getInstance();
+        RenderTarget target = mc.getMainRenderTarget();
+        int width = Math.max(1, target.width);
+        int height = Math.max(1, target.height);
+        int need = width * height * 4;
+        byte[] rgba = new byte[need];
+        synchronized (FRAME_BUFFER_LOCK) {
+            if (frameBuffer == null || frameBuffer.capacity() < need) {
+                frameBuffer = ByteBuffer.allocateDirect(need);
+            }
+            frameBuffer.clear();
+            target.bindWrite(true);
+            try {
+                GL11.glPixelStorei(GL11.GL_PACK_ALIGNMENT, 1);
+                GL11.glReadPixels(
+                        0, 0, width, height,
+                        GL11.GL_RGBA, GL11.GL_UNSIGNED_BYTE, frameBuffer);
+            } finally {
+                target.unbindWrite();
+            }
+            frameBuffer.position(0);
+            frameBuffer.get(rgba, 0, need);
+        }
+        LocalPlayer player = mc.player;
+        boolean inWorld = player != null && mc.level != null;
+        return new FrameCapture(
+                rgba,
+                width,
+                height,
+                mc.getWindow().getGuiScaledWidth(),
+                mc.getWindow().getGuiScaledHeight(),
+                player == null ? 0.0F : player.getYRot(),
+                player == null ? 0.0F : player.getXRot(),
+                inWorld,
+                mc.screen == null ? "" : mc.screen.getClass().getName(),
+                mc.options.languageCode);
+    }
+
+    private static byte[] encodePng(FrameCapture capture) throws IOException {
+        BufferedImage image = new BufferedImage(
+                capture.width, capture.height, BufferedImage.TYPE_INT_RGB);
+        int[] row = new int[capture.width];
+        int offset = 0;
+        // glReadPixels 的原点在左下角，写图时按行倒序翻回来。
+        for (int y = capture.height - 1; y >= 0; y--) {
+            for (int x = 0; x < capture.width; x++) {
+                int r = capture.rgba[offset] & 0xFF;
+                int g = capture.rgba[offset + 1] & 0xFF;
+                int b = capture.rgba[offset + 2] & 0xFF;
+                offset += 4;
+                row[x] = (r << 16) | (g << 8) | b;
+            }
+            image.setRGB(0, y, capture.width, 1, row, 0, capture.width);
+        }
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        ImageIO.write(image, "png", out);
+        return out.toByteArray();
     }
 
     private static void handleWindow(HttpExchange ex) throws IOException {

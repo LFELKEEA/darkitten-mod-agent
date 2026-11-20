@@ -19,6 +19,7 @@ class RunPanel(QWidget):
     prepare_requested = Signal(str)
     stop_requested = Signal(str)
     refresh_requested = Signal()
+    view_requested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -66,10 +67,17 @@ class RunPanel(QWidget):
         self.stop_btn = QPushButton("停止全部")
         self.stop_btn.setObjectName("Danger")
         self.stop_btn.clicked.connect(lambda: self.stop_requested.emit("all"))
+        self.view_btn = QPushButton("游戏画面")
+        self.view_btn.setObjectName("Ghost")
+        self.view_btn.setToolTip(
+            "打开后台客户端的实时画面；可以随时关闭，勾选“操控画面”后能直接操作。"
+        )
+        self.view_btn.clicked.connect(self.view_requested)
         self.refresh_btn = QPushButton("刷新状态")
         self.refresh_btn.setObjectName("Ghost")
         self.refresh_btn.clicked.connect(self.refresh_requested)
         row2.addWidget(self.stop_btn)
+        row2.addWidget(self.view_btn)
         row2.addWidget(self.refresh_btn, 1)
         layout.addLayout(row2)
 
@@ -86,6 +94,7 @@ class RunPanel(QWidget):
 
     def set_probe_support(self, supported: bool) -> None:
         self._probe_support = supported
+        self.view_btn.setEnabled(supported)
         if supported:
             self.hint.setText(
                 "启动的是真实开发端。Forge 1.20.1 首次运行会先编译并安装开发探针，可能要几分钟。"

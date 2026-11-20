@@ -12,6 +12,7 @@ from unittest import mock
 from dma import mcdev
 from dma.mcdev import cards, game, gameplay, gradle as mcdev_gradle, process as mcdev_process
 from dma.mcdev import scenario, server_files
+from dma.mcdev import templates as mcdev_templates
 
 from .base import TempDataCase
 
@@ -220,6 +221,103 @@ class ProbeClientTests(unittest.TestCase):
     def test_probe_reports_connection_error(self) -> None:
         with self.assertRaises(mcdev.ProbeError):
             mcdev.probe.probe_json("client", "/status", port=1, timeout=0.5)
+
+
+class LiveFrameTests(unittest.TestCase):
+    """实时画面：/frame 直接返回 PNG 字节，视角与界面信息放在响应头里。"""
+
+    def setUp(self) -> None:
+        payload = b"\x89PNG\r\n\x1a\n" + b"frame-bytes"
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):  # noqa: N802
+                if self.path.split("?")[0] != "/frame":
+                    self.send_response(404)
+                    self.end_headers()
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", "image/png")
+                self.send_header("X-Mcdev-Width", "854")
+                self.send_header("X-Mcdev-Height", "480")
+                self.send_header("X-Mcdev-Gui-Width", "427")
+                self.send_header("X-Mcdev-Gui-Height", "240")
+                self.send_header("X-Mcdev-Yaw", "12.5")
+                self.send_header("X-Mcdev-Pitch", "-30.25")
+                self.send_header("X-Mcdev-In-World", "true")
+                self.send_header(
+                    "X-Mcdev-Screen", "net.minecraft.client.gui.screens.TitleScreen"
+                )
+                self.send_header("X-Mcdev-Language", "zh_cn")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def log_message(self, *args):  # noqa: D401 - 测试里不打印访问日志
+                return
+
+        self.payload = payload
+        self.server = HTTPServer(("127.0.0.1", 0), Handler)
+        self.port = self.server.server_address[1]
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+
+    def tearDown(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=2)
+
+    def test_probe_bytes_keeps_raw_body_and_headers(self) -> None:
+        body, headers = mcdev.probe.probe_bytes("client", "/frame", port=self.port)
+        self.assertEqual(body, self.payload)
+        self.assertEqual(headers["content-type"], "image/png")
+        self.assertEqual(headers["x-mcdev-width"], "854")
+
+    def test_frame_parses_metadata(self) -> None:
+        item = game.frame(port=self.port)
+        self.assertEqual(item.png, self.payload)
+        self.assertEqual((item.width, item.height), (854, 480))
+        self.assertEqual((item.gui_width, item.gui_height), (427, 240))
+        self.assertAlmostEqual(item.yaw, 12.5)
+        self.assertAlmostEqual(item.pitch, -30.25)
+        self.assertTrue(item.in_world)
+        self.assertTrue(item.screen.endswith("TitleScreen"))
+        self.assertEqual(item.language, "zh_cn")
+
+    def test_running_client_port_prefers_live_client(self) -> None:
+        status = {
+            "processes": [
+                {"kind": "server", "running": True, "port": 39001},
+                {"kind": "client", "running": True, "port": 39002},
+            ]
+        }
+        self.assertEqual(game.running_client_port(status), 39002)
+        self.assertIsNone(
+            game.running_client_port(
+                {"processes": [{"kind": "client", "running": False, "port": 39002}]}
+            )
+        )
+        self.assertIsNone(game.running_client_port(None))
+
+
+class ProbeCacheTests(TempDataCase):
+    """探针源码改动后，旧缓存 jar 必须失效，否则新端点不会生效。"""
+
+    def test_source_fingerprint_gates_cached_probe(self) -> None:
+        cache = mcdev_templates._probe_cache()
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        cache.write_bytes(b"old-probe")
+        # 没有指纹戳：旧缓存不可信。
+        self.assertIsNone(mcdev_templates.find_probe_jar(None))
+        fingerprint = mcdev_templates.probe_fingerprint()
+        self.assertTrue(fingerprint)
+        cache.with_name(cache.name + ".sha256").write_text(
+            "stale-fingerprint\n", encoding="utf-8"
+        )
+        self.assertIsNone(mcdev_templates.find_probe_jar(None))
+        cache.with_name(cache.name + ".sha256").write_text(
+            fingerprint + "\n", encoding="utf-8"
+        )
+        self.assertEqual(mcdev_templates.find_probe_jar(None), cache)
 
 
 class LaunchCancelTests(unittest.TestCase):

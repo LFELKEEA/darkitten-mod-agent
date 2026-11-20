@@ -22,15 +22,14 @@ BUILD = ROOT / "build"
 APP_DIST = DIST / "DarkittenModAgent"
 ZIP_NAME = f"DarkittenModAgent-{APP_VERSION}.zip"
 NOTES = [
-    "后台客户端改用 Windows 独立桌面：CreateDesktopW 建桌面，自写 CreateProcessW 传 lpDesktop，游戏从创建第一个窗口起就不在用户桌面出现。",
-    "后台启动追加 --no-daemon，避免复用用户桌面的 Gradle daemon；停止时 CloseDesktop 释放桌面句柄。整轮 16933 次窗口采样可见窗口为 0，此前 23-56ms 的闪现已消除。",
-    "默认创造模式：server.properties 强制创造，假玩家与客户端探针默认创造；后台冒烟 6/6 通过（出生、行走 2.0 格、放置、挖掘、僵尸伤害 20.0 → 19.81）。",
-    "新增 game_bot_playtest / game_playtest / game_window 三个工具，可在完全不开客户端的情况下验证人物操作，也可查询或隐藏客户端窗口；工具总数 115。",
-    "新增模组模型库：统一扫描实体、方块、物品、群系、维度，展示 3D 模型、贴图与描述；用户的描述、自定义字段、替换模型和贴图保存在 .dma/mod_library.json，不覆盖扫描结果。",
-    "新增手动模型编辑器：支持 Blockbench .bbmodel、GeckoLib/Bedrock .geo.json 与 Java 模型 JSON，可改立方体位置、尺寸、UV 并写回原文件。",
-    "新增手动绘图页：像素画布 + UV 图集 + 3D 预览，铅笔、橡皮、油漆桶、取色、直线、画笔大小、撤销/重做与色板；可点模型面反查 UV 上色。",
-    "实体绘图带原版 64x64 人形 UV 分区提示，方块提供等距三面预览；绘图与模型编辑都不依赖第三方绘图库。",
-    "回归测试覆盖模型库扫描与持久化、模型编辑器、绘图工具、后台隐藏桌面启动与假玩家冒烟；全量 594 项测试通过。",
+    "模型库改为按工程分类：顶部工程下拉框只在已打开过的工程之间切换，模型、贴图、自定义描述随工程各自的 .dma/mod_library.json 保存，互不串味。",
+    "新增在线资源库：LittleSkin 皮肤/披风、Future YSM 社区模型、Modrinth 资源包可以直接搜索、预览并下载到工程 reference/assets 下；Blockbench 社区画廊、MCModels、Planet Minecraft 提供浏览器入口。",
+    "在线资源接入 Agent：新增 online_assets 工具，可列来源、按关键词搜索、按 ID 下载；AI 制作模组时能参考社区造型、贴图与资源包结构，工具总数 116。",
+    "新增开发端实时画面窗口：可随时打开、暂停、保存截图；勾选操控后把鼠标与键盘转发到隐藏桌面上的客户端，游戏本身仍然完全无窗口。",
+    "画面通过本地探针的 /frame 端点读取，不落盘；后台客户端继续跑在独立隐藏桌面，不抢占用户鼠标与焦点。",
+    "默认创造模式：server.properties 强制创造，假玩家与客户端探针默认创造；后台冒烟全部通过（出生、行走、放置、挖掘、僵尸伤害）。",
+    "手动模型编辑器支持 Blockbench .bbmodel、GeckoLib/Bedrock .geo.json 与 Java 模型 JSON；手动绘图页支持像素画布、UV 图集与 3D 预览。",
+    "回归测试覆盖模型库按工程持久化、在线资源搜索与下载、Agent online_assets 分发、后台隐藏桌面启动与假玩家冒烟；全量 614 项测试通过。",
     "继续保持在线优先：JDK、Gradle、版本目录、MDK、sources 与参考模组全部按需从官方源或国内镜像拉取，发行包不内置这些内容。",
 ]
 
@@ -41,6 +40,27 @@ def sha256(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+RESOURCE_SKIP_DIRS = (".gradle", "build", "out", "bin", ".git", "__pycache__", "run")
+
+
+def stage_resources(target: Path) -> Path:
+    """复制 dma/resources 时剔除 Gradle 生成目录。
+
+    探针源码目录一旦在本地编译过，就会留下 build/ 与 .gradle/，
+    其中的锁文件可能正被系统占用，直接打进包里既会让 PyInstaller
+    复制失败，也会白白增大安装包。
+    """
+    source = ROOT / "dma" / "resources"
+    if target.exists():
+        shutil.rmtree(target, ignore_errors=True)
+    shutil.copytree(
+        source,
+        target,
+        ignore=shutil.ignore_patterns(*RESOURCE_SKIP_DIRS),
+    )
+    return target
 
 
 def run_pyinstaller() -> None:
@@ -57,6 +77,8 @@ def run_pyinstaller() -> None:
         json.dumps({"version": APP_VERSION}, ensure_ascii=False) + "\n",
         encoding="utf-8",
     )
+    staged = Path(holder.name) / "resources"
+    stage_resources(staged)
     try:
         command = [
             sys.executable,
@@ -73,7 +95,7 @@ def run_pyinstaller() -> None:
             "--add-data",
             f"{ROOT / 'assets'}{os.pathsep}assets",
             "--add-data",
-            f"{ROOT / 'dma' / 'resources'}{os.pathsep}dma/resources",
+            f"{staged}{os.pathsep}dma/resources",
             "--add-data",
             f"{version_file}{os.pathsep}.",
             "--collect-submodules",

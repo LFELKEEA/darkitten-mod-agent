@@ -565,6 +565,69 @@ class ModLibraryPageTests(TempDataCase):
         self.root = self.tmp / "testmod"
         write_project(self.root)
 
+    def test_project_combo_switches_library_only(self) -> None:
+        from types import SimpleNamespace as NS
+
+        from dma import project as project_mod
+        from dma.ui.mod_library_page import ModLibraryPage
+
+        second = self.tmp / "second"
+        write_project(second)
+        project_mod.remember_project(NS(root=self.root, label=lambda: "工程一"))
+        project_mod.remember_project(NS(root=second, label=lambda: "工程二"))
+
+        page = ModLibraryPage(_FakeMain())
+        try:
+            page.set_project(NS(root=self.root))
+            labels = [
+                page.project_combo.itemText(index)
+                for index in range(page.project_combo.count())
+            ]
+            # 当前工程优先显示工程自身的名字，其余来自最近列表。
+            self.assertIn("试验模组", labels)
+            self.assertIn("工程二", labels)
+            self.assertIn("打开其他工程…", labels)
+            self.assertEqual(
+                page.project_combo.currentData(), str(self.root.resolve())
+            )
+            page._set_library_root(second)
+            self.assertEqual(page.root, second.resolve())
+            self.assertEqual(
+                page.project_combo.currentData(), str(second.resolve())
+            )
+            self.assertTrue(page._entries)
+        finally:
+            page.deleteLater()
+            self.app.processEvents()
+
+    def test_apply_online_skin_sets_texture(self) -> None:
+        from dma.ui.mod_library_page import ModLibraryPage
+
+        page = ModLibraryPage(_FakeMain())
+        try:
+            page.set_project(SimpleNamespace(root=self.root))
+            entry = next(
+                item
+                for item in modcatalog.load(self.root)["entries"]
+                if item["id"] == "entity:test_mob"
+            )
+            source = self.tmp / "online.png"
+            source.write_bytes(_PNG)
+            message = page._apply_online_asset(
+                entry, source, {"kind": "skin", "title": "在线皮肤"}
+            )
+            self.assertIn("贴图", message)
+            updated = next(
+                item
+                for item in modcatalog.load(self.root)["entries"]
+                if item["id"] == "entity:test_mob"
+            )
+            self.assertTrue(updated["texture"].endswith("/test_mob.png"))
+            self.assertTrue((self.root / updated["texture"]).is_file())
+        finally:
+            page.deleteLater()
+            self.app.processEvents()
+
     def test_page_creates_starter_model_when_missing(self) -> None:
         from unittest.mock import patch
 

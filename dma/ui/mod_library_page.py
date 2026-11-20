@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import random
 import re
+import shutil
 from pathlib import Path
 
 from PySide6.QtCore import QBuffer, QIODevice, QRectF, QSize, Qt, QUrl
@@ -48,6 +49,7 @@ from PySide6.QtWidgets import (
 from .. import designs, modcatalog
 from .. import project as project_mod
 from .design_dialog import DesignPickerDialog
+from .resource_browser import ResourceBrowserDialog
 from .model_editor import (
     ModelEditorDialog,
     create_starter_model,
@@ -291,6 +293,28 @@ class ModLibraryPage(QWidget):
         top.addWidget(self.refresh_btn, 0, Qt.AlignTop)
         top.addWidget(self.folder_btn, 0, Qt.AlignTop)
         head.addLayout(top)
+        project_row = QHBoxLayout()
+        project_row.setSpacing(6)
+        project_row.addWidget(tiny("工程"))
+        self.project_combo = SelectComboBox()
+        self.project_combo.setMinimumWidth(280)
+        self.project_combo.setToolTip("按工程查看和编辑；切换只影响模型库，不改对话页工程。")
+        self.project_combo.currentIndexChanged.connect(self._on_project_combo)
+        project_row.addWidget(self.project_combo)
+        self.browse_project_btn = QPushButton("打开其他工程…")
+        self.browse_project_btn.setObjectName("Ghost")
+        self.browse_project_btn.clicked.connect(self._browse_project)
+        project_row.addWidget(self.browse_project_btn)
+        project_row.addStretch(1)
+        self.online_btn = QPushButton("在线模型 / 皮肤")
+        self.online_btn.setObjectName("Ghost")
+        self.online_btn.setToolTip(
+            "搜索 Modrinth 资源包、LittleSkin 皮肤/披风、YSM 模型；"
+            "可以预览并下载到工程。"
+        )
+        self.online_btn.clicked.connect(lambda: self._open_online())
+        project_row.addWidget(self.online_btn)
+        head.addLayout(project_row)
         self.project_label = tiny("尚未打开工程")
         head.addWidget(self.project_label)
         outer.addWidget(header)
@@ -366,10 +390,16 @@ class ModLibraryPage(QWidget):
 
     # ------------------------------------------------------------------
     def set_project(self, project) -> None:
-        root = Path(project.root) if project is not None else None
+        root = Path(project.root).resolve() if project is not None else None
         if root == self.root:
+            self._refresh_project_combo()
             return
         self.root = root
+        self._meta = {}
+        self._entries = []
+        self._by_id = {}
+        self._entries = []
+        self._refresh_project_combo()
         if root is None:
             self.project_label.setText("尚未打开工程")
             self._show_empty("先打开一个模组工程，模型库会自动扫描其中的内容。")
@@ -380,11 +410,145 @@ class ModLibraryPage(QWidget):
     def refresh(self) -> None:
         self._reload()
 
+    def _refresh_project_combo(self) -> None:
+        if not hasattr(self, "project_combo"):
+            return
+        rows: list[tuple[str, str]] = []
+        seen: set[str] = set()
+
+        def add(path_value: str, label: str) -> None:
+            try:
+                path = Path(str(path_value or "")).expanduser().resolve()
+            except (OSError, ValueError):
+                return
+            key = str(path)
+            if key in seen or not path.is_dir():
+                return
+            seen.add(key)
+            rows.append((key, str(label or path.name)))
+
+        if self.root is not None:
+            name = str(self._meta.get("name") or "").strip()
+            add(str(self.root), name or self.root.name)
+        for item in project_mod.recent_projects():
+            root_value = str(item.get("root") or "")
+            if not root_value:
+                continue
+            label = str(item.get("label") or Path(root_value).name)
+            add(root_value, label)
+        current = -1
+        self.project_combo.blockSignals(True)
+        self.project_combo.clear()
+        for index, (path_value, label) in enumerate(rows):
+            self.project_combo.addItem(label, path_value)
+            if self.root is not None and Path(path_value) == self.root:
+                current = index
+        self.project_combo.addItem("打开其他工程…", "__browse__")
+        if current >= 0:
+            self.project_combo.setCurrentIndex(current)
+        elif rows:
+            self.project_combo.setCurrentIndex(0)
+        self.project_combo.blockSignals(False)
+
+    def _on_project_combo(self, _index: int) -> None:
+        value = str(self.project_combo.currentData() or "")
+        if value == "__browse__":
+            self._browse_project()
+            return
+        if value:
+            self._set_library_root(Path(value))
+
+    def _browse_project(self) -> None:
+        start = str(self.root.parent) if self.root is not None else str(Path.home())
+        folder = QFileDialog.getExistingDirectory(self, "选择模组工程", start)
+        if not folder:
+            self._refresh_project_combo()
+            return
+        self._set_library_root(Path(folder))
+
+    def _set_library_root(self, root: Path) -> None:
+        try:
+            target = Path(root).expanduser().resolve()
+        except (OSError, ValueError):
+            return
+        if not target.is_dir():
+            self.status_label.setText(f"工程目录不存在：{target}")
+            self._refresh_project_combo()
+            return
+        if target == self.root:
+            self._refresh_project_combo()
+            return
+        self.root = target
+        self._meta = {}
+        self._entries = []
+        self._by_id = {}
+        self.project_label.setText(f"工程：{target}")
+        self._refresh_project_combo()
+        self._reload()
+        self.status_label.setText(f"已切换到工程：{target}")
+
     def _open_folder(self) -> None:
         if self.root is None:
             self.status_label.setText("还没有打开工程。")
             return
         self.main.open_folder(self.root)
+
+    # ------------------------------------------------------------------
+    def _open_online(self, entry: dict | None = None) -> None:
+        if self.root is None:
+            QMessageBox.information(
+                self, "还没有工程", "先打开一个模组工程，在线资源会下载到它的 reference 目录。"
+            )
+            return
+        callback = None
+        if entry is not None and entry.get("kind") in {"entity", "block", "item"}:
+            callback = lambda path, row: self._apply_online_asset(entry, path, row)
+        dialog = ResourceBrowserDialog(
+            self,
+            project_root=self.root,
+            apply_callback=callback,
+            provider="littleskin",
+        )
+        dialog.exec()
+
+    def _apply_online_asset(
+        self, entry: dict, path: Path, row: dict
+    ) -> str:
+        if self.root is None:
+            return f"已下载到 {path}"
+        kind = str(row.get("kind") or "")
+        name = str(row.get("title") or path.stem)
+        if kind in {"skin", "cape"}:
+            image = QImage(str(path))
+            if image.isNull():
+                return f"已下载到 {path}，但这个文件不是可读的图片。"
+            relative = self._asset_relative(entry, Path("online.png"), texture=True)
+            buffer = QBuffer()
+            buffer.open(QIODevice.WriteOnly)
+            if not image.save(buffer, "PNG"):
+                return f"已下载到 {path}，但无法转换成 PNG。"
+            try:
+                project_mod.write_bytes(self.root, relative, bytes(buffer.data()))
+                modcatalog.save_entry(
+                    self.root, str(entry["id"]), texture=relative
+                )
+            except Exception as exc:  # noqa: BLE001
+                return f"已下载到 {path}，但写入工程失败：{exc}"
+            entry["texture"] = relative
+            self._reload(select_id=str(entry["id"]))
+            return f"已把「{name}」应用为「{entry.get('title') or entry.get('key')}」的贴图：{relative}"
+        # .ysm / .zip 这类外部模型先放到工程参考目录，不直接塞进 src。
+        try:
+            relative = Path(".dma") / "downloads" / str(row.get("provider") or "online") / path.name
+            target = project_mod.safe_path(self.root, relative.as_posix())
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(path, target)
+        except Exception as exc:  # noqa: BLE001
+            return f"已下载到 {path}，但写入工程失败：{exc}"
+        return (
+            f"模型已放到 {relative.as_posix()}。"
+            "YSM 模型需要放进 config/ysm/models/ 使用；资源包请解压后参考模型和贴图。"
+        )
 
     # ------------------------------------------------------------------
     def _set_kind(self, kind: str) -> None:
@@ -424,6 +588,7 @@ class ModLibraryPage(QWidget):
         extra = " · ".join(bit for bit in (name, modid) if bit)
         self.project_label.setText(f"{extra} · {self.root}")
         self._refresh_list(current)
+        self._refresh_project_combo()
         self.status_label.setText(
             f"已扫描 {len(self._entries)} 个条目："
             + "、".join(
@@ -770,6 +935,12 @@ class ModLibraryPage(QWidget):
         open_model_btn.setObjectName("Ghost")
         open_model_btn.setToolTip("用系统关联的程序（例如 Blockbench）打开当前模型文件。")
         open_model_btn.clicked.connect(lambda: self._open_model(entry))
+        online_btn = QPushButton("从在线资源获取")
+        online_btn.setObjectName("Ghost")
+        online_btn.setToolTip(
+            "搜索 LittleSkin、Modrinth、YSM 等来源；皮肤可直接用作当前条目的贴图。"
+        )
+        online_btn.clicked.connect(lambda: self._open_online(entry))
 
         if entry.get("kind") in {"biome", "dimension"}:
             model_btn.setEnabled(False)
@@ -778,6 +949,7 @@ class ModLibraryPage(QWidget):
             edit_model_btn.setEnabled(False)
             regen_btn.setEnabled(False)
             open_model_btn.setEnabled(False)
+            online_btn.setEnabled(False)
             hint = "群系 / 维度没有可绘制的模型，天空外观由 worldgen 的颜色和数据决定。"
         else:
             hint = ""
@@ -798,8 +970,9 @@ class ModLibraryPage(QWidget):
         actions.addWidget(texture_btn, 1, 0)
         actions.addWidget(regen_btn, 1, 1, 1, 2)
         actions.addWidget(logic_btn, 1, 3)
-        actions.addWidget(delete_btn, 2, 0)
-        actions.addWidget(open_model_btn, 2, 1, 1, 3)
+        actions.addWidget(online_btn, 2, 0)
+        actions.addWidget(delete_btn, 2, 1)
+        actions.addWidget(open_model_btn, 2, 2, 1, 2)
         self.detail_layout.addLayout(actions)
         if hint:
             self.detail_layout.addWidget(tiny(hint))
@@ -1276,12 +1449,28 @@ class ModLibraryPage(QWidget):
             return
         if self.root is not None:
             try:
-                chat_root = Path(chat.project.root).resolve()
+                chat_root = Path(chat.project.root).resolve() if chat.project else None
             except Exception:  # noqa: BLE001
                 chat_root = None
-            if chat_root is not None and chat_root != self.root.resolve():
-                self.status_label.setText("对话页的工程和模型库不一致，请先切换回当前工程。")
-                return
+            if chat_root != self.root.resolve():
+                if getattr(chat, "_worker", None) is not None:
+                    self.status_label.setText(
+                        "Agent 正在运行另一个工程，等这一轮结束再切换。"
+                    )
+                    return
+                try:
+                    chat.open_project_path(str(self.root))
+                    chat_root = (
+                        Path(chat.project.root).resolve() if chat.project else None
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    self.status_label.setText(f"切换对话页工程失败：{exc}")
+                    return
+                if chat_root != self.root.resolve():
+                    self.status_label.setText(
+                        "对话页的工程和模型库不一致，请先在对话页打开当前工程。"
+                    )
+                    return
         meta = getattr(chat.project, "meta", None)
         missing = meta.missing() if meta is not None and hasattr(meta, "missing") else []
         if missing:

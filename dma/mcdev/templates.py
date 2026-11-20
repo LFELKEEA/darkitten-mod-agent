@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import shutil
@@ -416,7 +417,63 @@ def _probe_cache() -> Path:
     return paths.data_dir() / "cache" / PROBE_JAR_NAME
 
 
+def _probe_source() -> Path:
+    return resources_dir() / "mcdev-probe"
+
+
+PROBE_SKIP_DIRS = {".gradle", "build", "out", "bin", ".git", "run"}
+
+
+def probe_fingerprint() -> str:
+    """探针源码指纹：源码一改，旧缓存必须重编，不能继续沿用旧端点。
+
+    只统计源码与构建脚本，忽略 Gradle 的 build/.gradle 等生成目录：
+    这些目录既不该影响缓存判定，编译期间还可能被别的进程锁住。
+    """
+    source = _probe_source()
+    if not source.is_dir():
+        return ""
+    digest = hashlib.sha256()
+    files = []
+    for item in source.rglob("*"):
+        if not item.is_file():
+            continue
+        parts = item.relative_to(source).parts
+        if any(part in PROBE_SKIP_DIRS for part in parts[:-1]):
+            continue
+        files.append(item)
+    for item in sorted(files):
+        digest.update(item.relative_to(source).as_posix().encode("utf-8"))
+        try:
+            digest.update(hashlib.sha256(item.read_bytes()).digest())
+        except OSError:
+            # 文件被占用或临时不可读时只记路径，不让整次判定抛异常。
+            digest.update(b"<unreadable>")
+    return digest.hexdigest()
+
+
+def _probe_stamp() -> Path:
+    return _probe_cache().with_name(PROBE_JAR_NAME + ".sha256")
+
+
+def _probe_cache_matches() -> bool:
+    stamp = _probe_stamp()
+    if not stamp.is_file():
+        return False
+    try:
+        saved = stamp.read_text(encoding="utf-8").strip()
+    except OSError:
+        return False
+    return bool(saved) and saved == probe_fingerprint()
+
+
 def find_probe_jar(project_root: str | Path | None = None) -> Path | None:
+    fingerprint = probe_fingerprint()
+    if not fingerprint:
+        bundled = resources_dir() / PROBE_JAR_NAME
+        return bundled if bundled.is_file() else None
+    if not _probe_cache_matches():
+        return None
     candidates: list[Path] = [_probe_cache(), resources_dir() / PROBE_JAR_NAME]
     if project_root is not None:
         libs = Path(str(project_root)).expanduser() / ".mcdev" / "probe" / "build" / "libs"
@@ -436,14 +493,24 @@ def build_probe(
 ) -> Path:
     """在工程 .mcdev/probe 下编译内置探针源码，返回 dev jar。"""
     root = Path(str(project_root)).expanduser()
-    source = resources_dir() / "mcdev-probe"
+    source = _probe_source()
     if not source.is_dir():
         raise FileNotFoundError(
             "没有内置探针 JAR，也没有探针源码。请把 mcdev-probe-dev.jar 放到 "
             f"{resources_dir()}。"
         )
+    fingerprint = probe_fingerprint()
     target = root / ".mcdev" / "probe"
-    if not (target / "build.gradle").is_file():
+    source_stamp = target / ".probe-source.sha256"
+    try:
+        current_stamp = (
+            source_stamp.read_text(encoding="utf-8").strip()
+            if source_stamp.is_file()
+            else ""
+        )
+    except OSError:
+        current_stamp = ""
+    if not (target / "build.gradle").is_file() or current_stamp != fingerprint:
         target.mkdir(parents=True, exist_ok=True)
         for item in source.rglob("*"):
             if item.is_dir():
@@ -454,6 +521,10 @@ def build_probe(
             shutil.copy2(item, dest)
         try:
             (target / "gradlew").chmod(0o755)
+        except OSError:
+            pass
+        try:
+            source_stamp.write_text(fingerprint + "\n", encoding="utf-8")
         except OSError:
             pass
     if log:
@@ -476,4 +547,9 @@ def build_probe(
             break
         except OSError:
             continue
+    try:
+        _probe_stamp().parent.mkdir(parents=True, exist_ok=True)
+        _probe_stamp().write_text(fingerprint + "\n", encoding="utf-8")
+    except OSError:
+        pass
     return jars[-1]

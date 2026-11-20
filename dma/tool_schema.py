@@ -465,6 +465,21 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
          "max_mods": {"type": "integer", "description": "auto 最多准备几个模组，默认 2"},
          "force": {"type": "boolean", "description": "忽略已反编译缓存，重新下载"}},
         ["action"]),
+    _fn("online_assets",
+        "在线模型/皮肤/资源包：列出社区来源、搜索可预览条目、按需下载到工程。"
+        "来源含 Modrinth 资源包、LittleSkin 皮肤/披风、YSM 社区模型；"
+        "Blockbench / MCModels / Planet Minecraft 只提供浏览器入口。"
+        "制作模组时可参考造型、贴图与资源包结构，使用前确认原作者许可。",
+        {"action": {"type": "string", "enum": ["sources", "search", "download"]},
+         "provider": {"type": "string",
+            "enum": ["modrinth", "littleskin", "littleskin_cape", "ysm",
+                     "blockbench", "mcmodels", "planetminecraft"]},
+         "query": _TEXT,
+         "id": {"type": "string", "description": "download 时的条目 ID（搜索结果里的 id）"},
+         "limit": {"type": "integer", "description": "搜索结果数量，默认 12，最大 60"},
+         "dest": {"type": "string",
+            "description": "可选下载子目录（工程内相对路径），默认 reference/assets/<provider>"}},
+        ["action"]),
     _fn("dev_docs", "在线开发资料：查官方文档入口；按需下载目标加载器 sources.jar 并检索 API/类/方法；"
         "源码搜不到时自动退到 GitHub 代码搜索",
         {"action": {"type": "string", "enum": ["lookup", "sources", "status", "official"]},
