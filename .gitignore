@@ -6,6 +6,7 @@ dist/
 .testdata*/
 .smoke.py
 .smoke_data*/
+.smoke*/
 data/
 *.log
 .pytest_cache/
