@@ -628,14 +628,28 @@ PROJECT_MARKERS = (
 def looks_like_project(root: str | Path) -> bool:
     """目录里至少有一个模组工程标记才算是可打开的工程。
 
-    程序数据目录、`_internal` 这类目录也可能有 src/resources 结构，
+    程序数据目录、安装目录和 `_internal` 也可能带 src/resources 结构，
     但它们不该出现在「最近工程」里，更不该被模型库当成工程扫描。
+    默认工程目录 `data/projects/<名字>` 仍然允许。
     """
     try:
         base = Path(str(root or "")).expanduser()
     except (OSError, ValueError):
         return False
     if not base.is_dir():
+        return False
+    try:
+        resolved = base.resolve()
+    except OSError:
+        resolved = base
+    try:
+        data_root = paths.data_dir().resolve()
+    except OSError:
+        data_root = None
+    app_root = paths.app_dir()
+    if resolved in (app_root, data_root, app_root / "_internal"):
+        return False
+    if resolved.is_relative_to(app_root / "_internal"):
         return False
     for relative in PROJECT_MARKERS:
         try:

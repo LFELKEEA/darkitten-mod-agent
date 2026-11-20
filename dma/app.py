@@ -38,8 +38,8 @@ def _activate_running_instance(timeout_ms: int = 400) -> bool:
     return True
 
 
-def _wait_for_running_instance(timeout_ms: int = 3000) -> bool:
-    """对方可能还在启动中，给它一点时间把激活服务监听起来。"""
+def _wait_for_running_instance(timeout_ms: int = 8000) -> bool:
+    """对方可能还在启动中，给它足够时间把激活服务监听起来。"""
     deadline = time.monotonic() + timeout_ms / 1000
     while True:
         if _activate_running_instance(300):
@@ -89,12 +89,6 @@ def _install_excepthook() -> None:
 
 
 def run() -> int:
-    # Gradle 和镜像代理统一使用程序目录下的缓存，不往 C 盘用户目录里放。
-    os.environ.setdefault("GRADLE_USER_HOME", str(paths.gradle_home()))
-    temp = str(paths.temp_dir())
-    for name in ("TEMP", "TMP", "TMPDIR"):
-        os.environ[name] = temp
-
     QApplication.setApplicationName(APP_NAME)
     QApplication.setApplicationDisplayName(APP_NAME_CN)
     QApplication.setOrganizationName(APP_AUTHOR)
@@ -108,6 +102,23 @@ def run() -> int:
     if icon_path.is_file():
         app.setWindowIcon(QIcon(str(icon_path)))
 
+    # Gradle 和镜像代理统一使用程序目录下的缓存，不往 C 盘用户目录里放。
+    # 数据目录不可写时以前会直接抛 PermissionError，窗口都出不来；现在先给用户一句能看懂的话。
+    try:
+        os.environ.setdefault("GRADLE_USER_HOME", str(paths.gradle_home()))
+        temp = str(paths.temp_dir())
+    except OSError as exc:
+        QMessageBox.critical(
+            None,
+            APP_NAME_CN,
+            "程序无法创建数据目录，启动已中止。\n\n"
+            f"{exc}\n\n"
+            "可以把程序移到 D 盘等有写入权限的位置，或在安全软件里允许它写入磁盘后重试。",
+        )
+        return 1
+    for name in ("TEMP", "TMP", "TMPDIR"):
+        os.environ[name] = temp
+
     # 先叫醒已运行的实例，而不是弹一句「已经在运行」就退出。
     if _activate_running_instance():
         return 0
@@ -117,17 +128,18 @@ def run() -> int:
     # 只有确认持锁进程已经退出时，下面才移除残留锁。
     lock.setStaleLockTime(0)
     if not lock.tryLock(150):
-        if _wait_for_running_instance():
-            return 0
-        # 等了 3 秒仍没有实例响应：多半是上次崩溃留下的锁，确认进程已退出再清理。
+        # 上次崩溃留下的锁：Qt 只在持锁进程确实不在时才允许移除，可以立即接管。
         if not (lock.removeStaleLockFile() and lock.tryLock(150)):
-            QMessageBox.information(
-                None,
-                APP_NAME_CN,
-                "恶魔小猫工坊已经在运行了，但没能把窗口叫到前面。"
-                "请在任务栏里找到它，或结束残留进程后重试。",
-            )
-            return 0
+            # 持锁进程还活着：等它把激活服务准备好，然后把窗口叫到前面。
+            if not _wait_for_running_instance():
+                if not (lock.removeStaleLockFile() and lock.tryLock(150)):
+                    QMessageBox.information(
+                        None,
+                        APP_NAME_CN,
+                        "恶魔小猫工坊已经在运行了，但没能把窗口叫到前面。"
+                        "请在任务栏里找到它，或结束残留进程后重试。",
+                    )
+                    return 0
 
     _install_excepthook()
 

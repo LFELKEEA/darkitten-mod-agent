@@ -2,7 +2,13 @@
 
 只写 Minecraft Java 模组的桌面 Agent。界面用 PySide6，内置对话工作台、技能、连接器、知识库与反编译能力。模组开发闭环来自 [yan-mc/minecraft-mod-dev](https://github.com/yan-mc/minecraft-mod-dev)：真实开发端启动、回环 HTTP 探针、场景卡片断言和 GameTest。
 
-当前版本：`3.6.1`
+当前版本：`3.6.2`
+
+## 3.6.2 数据目录不可写也不影响启动
+
+- **启动兜底**：`data`、`gradle`、`temp` 建不出来时，自动依次尝试程序目录、`%LOCALAPPDATA%`、用户目录和临时目录；全部不可写才弹中文提示，不再直接抛 `PermissionError`。
+- **残留锁立即接管**：先用 Qt 判断持锁进程是否还活着，进程已退出就直接接管 `app.lock`；确实有实例在运行时才等待激活，上限 8 秒。
+- **假工程排除**：安装目录、数据目录本身和 `_internal` 一律不算工程，即使带有 `build.gradle` 或 `.dma/project.json` 也不会被最近工程或模型库收进来；`data/projects/<名字>` 不受影响。
 
 ## 3.6.1 启动更快，第二次双击直接叫醒窗口
 

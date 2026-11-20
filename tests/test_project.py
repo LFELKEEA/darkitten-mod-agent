@@ -344,6 +344,28 @@ class ProjectTests(TempDataCase):
         (gradle_only / "build.gradle").write_text("", encoding="utf-8")
         self.assertTrue(project_mod.looks_like_project(gradle_only))
 
+    def test_looks_like_project_rejects_app_and_data_roots(self) -> None:
+        from unittest import mock
+
+        from dma import paths
+
+        data = paths.data_dir()
+        (data / "build.gradle").write_text("", encoding="utf-8")
+        self.assertFalse(project_mod.looks_like_project(data))
+        # 默认工程目录 data/projects 下的正常工程不受影响。
+        nested = data / "projects" / "demo"
+        nested.mkdir(parents=True)
+        (nested / "build.gradle").write_text("", encoding="utf-8")
+        self.assertTrue(project_mod.looks_like_project(nested))
+
+        app = self.tmp / "app"
+        (app / "_internal").mkdir(parents=True)
+        (app / "build.gradle").write_text("", encoding="utf-8")
+        (app / "_internal" / "build.gradle").write_text("", encoding="utf-8")
+        with mock.patch.object(paths, "app_dir", return_value=app):
+            self.assertFalse(project_mod.looks_like_project(app))
+            self.assertFalse(project_mod.looks_like_project(app / "_internal"))
+
     def test_prune_recent_projects_drops_stale_entries(self) -> None:
         from dma import paths
 

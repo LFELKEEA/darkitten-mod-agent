@@ -2,9 +2,13 @@ from __future__ import annotations
 
 import os
 import sys
+import tempfile
 from pathlib import Path
 
 APP_ID = "DarkittenModAgent"
+
+# 按 DMA_DATA_DIR 的取值缓存结果：测试会为每个用例切换到新的临时目录。
+_DATA_DIR_CACHE: dict[str, Path] = {}
 
 
 def app_dir() -> Path:
@@ -19,11 +23,56 @@ def resource_dir() -> Path:
     return assets if assets.is_dir() else app_dir() / "assets"
 
 
+def _ensure_writable(path: Path) -> Path | None:
+    """建目录并真写一个探针文件，确认不是「能 mkdir 但写不进去」。"""
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        probe = path / ".dma-write-test"
+        with probe.open("wb") as handle:
+            handle.write(b"ok")
+        probe.unlink()
+    except OSError:
+        return None
+    try:
+        return path.resolve()
+    except OSError:
+        return path
+
+
+def _data_dir_candidates(override: str) -> list[Path]:
+    items: list[Path] = []
+    if override:
+        items.append(Path(override).expanduser())
+    items.append(app_dir() / "data")
+    local = os.environ.get("LOCALAPPDATA", "").strip()
+    if local:
+        items.append(Path(local) / APP_ID)
+    items.append(Path.home() / APP_ID)
+    items.append(Path(tempfile.gettempdir()) / APP_ID)
+    return items
+
+
 def data_dir() -> Path:
+    """返回可写入的数据目录。
+
+    某些安全软件会阻止未签名的程序往某个盘写文件，用户的安装目录也可能在只读盘上。
+    以前这里直接 mkdir，失败就抛 PermissionError，整个程序连窗口都出不来。
+    现在依次尝试「显式指定目录 → 程序目录/data → %LOCALAPPDATA% → 用户目录 → 临时目录」，
+    只要有一个能写就继续启动；全部失败才抛错，由界面给出明确提示。
+    """
     override = os.environ.get("DMA_DATA_DIR", "").strip()
-    path = Path(override).expanduser() if override else app_dir() / "data"
-    path.mkdir(parents=True, exist_ok=True)
-    return path
+    cached = _DATA_DIR_CACHE.get(override)
+    if cached is not None:
+        return cached
+    for candidate in _data_dir_candidates(override):
+        chosen = _ensure_writable(candidate)
+        if chosen is not None:
+            _DATA_DIR_CACHE[override] = chosen
+            return chosen
+    raise OSError(
+        "找不到可写入的程序数据目录。请把程序放到有写入权限的位置，"
+        "或在安全软件里允许它写入磁盘后重试。"
+    )
 
 
 def tools_dir() -> Path:

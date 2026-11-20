@@ -22,6 +22,9 @@ BUILD = ROOT / "build"
 APP_DIST = DIST / "DarkittenModAgent"
 ZIP_NAME = f"DarkittenModAgent-{APP_VERSION}.zip"
 NOTES = [
+    "数据目录兜底：程序目录、%LOCALAPPDATA%、用户目录或临时目录任意一处可写就能启动，不再因为 data/gradle 创建失败直接抛出 PermissionError；全部不可写时给出中文提示。",
+    "残留锁立即接管：先用 Qt 判断持锁进程是否存活，进程已退出就直接清理 app.lock；真有实例在运行才等待激活，上限 8 秒。",
+    "安装目录、数据目录本身和 _internal 不再被当成工程，即使含有 build.gradle 或 .dma/project.json；data/projects 下的正常工程不受影响。",
     "第二次启动直接叫醒已运行的窗口：改用本地激活服务，不再弹「已经在运行」后退出；确认持锁进程已退出后会自动清理上次崩溃留下的 app.lock。",
     "首次启动先出窗口：工程扫描和模型库同步推迟到首帧绘制之后，源码只扫 src/main/java 等标准目录，不再翻 Gradle 缓存导致长时间白屏。",
     "工程校验更严格：最近工程、打开入口和模型库下拉框只接受带 .dma/project.json、build.gradle 等标记的真正工程；相对路径统一落在 data/projects。",
@@ -33,7 +36,7 @@ NOTES = [
     "画面通过本地探针的 /frame 端点读取，不落盘；后台客户端继续跑在独立隐藏桌面，不抢占用户鼠标与焦点。",
     "默认创造模式：server.properties 强制创造，假玩家与客户端探针默认创造；后台冒烟全部通过（出生、行走、放置、挖掘、僵尸伤害）。",
     "手动模型编辑器支持 Blockbench .bbmodel、GeckoLib/Bedrock .geo.json 与 Java 模型 JSON；手动绘图页支持像素画布、UV 图集与 3D 预览。",
-    "回归测试覆盖单实例启动、工程标记校验、最近记录清理、源码扫描范围、模型库清空、在线资源搜索与下载；全量 619 项测试通过。",
+    "回归测试覆盖单实例启动、数据目录回退、工程标记校验、最近记录清理、源码扫描范围、模型库清空、在线资源搜索与下载；全量 621 项测试通过。",
     "继续保持在线优先：JDK、Gradle、版本目录、MDK、sources 与参考模组全部按需从官方源或国内镜像拉取，发行包不内置这些内容。",
 ]
 
