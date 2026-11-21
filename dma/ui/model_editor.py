@@ -16,7 +16,6 @@ from typing import Any
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QImage, QPainter, QPen
 from PySide6.QtWidgets import (
-    QCheckBox,
     QDialog,
     QDoubleSpinBox,
     QFormLayout,
@@ -54,6 +53,7 @@ class EditableCube:
     node: dict | None = None
     bone: dict | None = None
     base_uv: tuple[int, int] = (0, 0)
+    visible: bool = True
 
 
 @dataclass
@@ -483,8 +483,21 @@ class ModelEditorDialog(QDialog):
         head.addWidget(title)
         head.addWidget(tiny(FORMAT_LABELS[self._doc.fmt]))
         head.addStretch(1)
-        self.back_box = QCheckBox("查看背面")
-        head.addWidget(self.back_box)
+        for label, key in (
+            ("3/4", "default"),
+            ("正面", "front"),
+            ("侧面", "side"),
+            ("顶面", "top"),
+        ):
+            button = QPushButton(label)
+            button.setObjectName("Ghost")
+            button.setToolTip("切换视角预设；也可以直接在左边拖动旋转")
+            button.clicked.connect(lambda _=False, k=key: self.view.set_view(k))
+            head.addWidget(button)
+        self.reset_view_btn = QPushButton("重置视角")
+        self.reset_view_btn.setObjectName("Ghost")
+        self.reset_view_btn.clicked.connect(lambda: self.view.reset_view())
+        head.addWidget(self.reset_view_btn)
         layout.addLayout(head)
 
         body = QHBoxLayout()
@@ -498,7 +511,6 @@ class ModelEditorDialog(QDialog):
         self.view.set_boxes([cube.box for cube in self._cubes])
         self.view.set_select_mode(True)
         self.view.boxSelected.connect(self._select_index)
-        self.back_box.toggled.connect(self.view.set_back_view)
         body.addWidget(self.view, 1)
 
         panel = QWidget()
@@ -510,9 +522,24 @@ class ModelEditorDialog(QDialog):
 
         self.list = QListWidget()
         self.list.setMinimumHeight(150)
+        self.list.setToolTip("勾选＝在 3D 视图里显示这个立方体")
         self.list.currentRowChanged.connect(self._select_index)
-        panel_layout.addWidget(QLabel("立方体"))
+        self.list.itemChanged.connect(self._item_visibility_changed)
+        panel_layout.addWidget(QLabel("部件（勾选＝显示）"))
         panel_layout.addWidget(self.list, 1)
+
+        view_row = QHBoxLayout()
+        self.solo_btn = QPushButton("只看选中")
+        self.solo_btn.setObjectName("Ghost")
+        self.solo_btn.setToolTip("只显示当前选中的立方体，方便检查内部结构")
+        self.solo_btn.clicked.connect(self._solo_selected)
+        self.show_all_btn = QPushButton("全部显示")
+        self.show_all_btn.setObjectName("Ghost")
+        self.show_all_btn.clicked.connect(self._show_all)
+        view_row.addWidget(self.solo_btn)
+        view_row.addWidget(self.show_all_btn)
+        view_row.addStretch(1)
+        panel_layout.addLayout(view_row)
 
         tools = QHBoxLayout()
         self.add_btn = QPushButton("添加")
@@ -583,7 +610,8 @@ class ModelEditorDialog(QDialog):
         info_layout = QVBoxLayout(info)
         info_layout.setContentsMargins(0, 0, 0, 0)
         hints = [
-            "点击左侧 3D 视图里的立方体可以选中它。",
+            "点击 3D 视图里的立方体可以选中它；空白处拖动旋转，中键或右键拖动平移，滚轮缩放。",
+            "列表里的勾选框控制部件显隐；“只看选中”可以单独检查一个立方体。",
             "坐标单位是像素：16 = 1 格；位置指立方体最小角。",
             "修改 U/V 会同步移动贴图上的面；逐面 UV 模型会整体平移。",
         ]
@@ -632,14 +660,21 @@ class ModelEditorDialog(QDialog):
         return holder
 
     # -- 列表和字段 ------------------------------------------------------
+    def _item_text(self, index: int) -> str:
+        cube = self._cubes[index]
+        box = cube.box
+        text = f"{index + 1}. {box.name}  ({box.w:g} × {box.h:g} × {box.d:g})"
+        if not cube.visible:
+            text += "  · 已隐藏"
+        return text
+
     def _refresh_list(self, select: int) -> None:
         self._syncing = True
         self.list.clear()
         for index, cube in enumerate(self._cubes):
-            box = cube.box
-            item = QListWidgetItem(
-                f"{index + 1}. {box.name}  ({box.w:g} × {box.h:g} × {box.d:g})"
-            )
+            item = QListWidgetItem(self._item_text(index))
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Checked if cube.visible else Qt.Unchecked)
             self.list.addItem(item)
         if self._cubes:
             select = max(0, min(len(self._cubes) - 1, select))
@@ -648,7 +683,52 @@ class ModelEditorDialog(QDialog):
         self.list.setCurrentRow(select)
         self._syncing = False
         self.view.set_boxes([cube.box for cube in self._cubes])
+        self._apply_visibility()
         self._select_index(select)
+
+    def _apply_visibility(self) -> None:
+        hidden = {index for index, cube in enumerate(self._cubes) if not cube.visible}
+        self.view.set_hidden_indices(hidden)
+
+    def _sync_visibility_checks(self) -> None:
+        self._syncing = True
+        for index, cube in enumerate(self._cubes):
+            item = self.list.item(index)
+            if item is None:
+                continue
+            item.setCheckState(Qt.Checked if cube.visible else Qt.Unchecked)
+            item.setText(self._item_text(index))
+        self._syncing = False
+
+    def _item_visibility_changed(self, item: QListWidgetItem) -> None:
+        if self._syncing:
+            return
+        index = self.list.row(item)
+        if not (0 <= index < len(self._cubes)):
+            return
+        visible = item.checkState() == Qt.Checked
+        cube = self._cubes[index]
+        if cube.visible == visible:
+            return
+        cube.visible = visible
+        self._syncing = True
+        item.setText(self._item_text(index))
+        self._syncing = False
+        self._apply_visibility()
+
+    def _solo_selected(self) -> None:
+        if self._current < 0:
+            return
+        for index, cube in enumerate(self._cubes):
+            cube.visible = index == self._current
+        self._sync_visibility_checks()
+        self._apply_visibility()
+
+    def _show_all(self) -> None:
+        for cube in self._cubes:
+            cube.visible = True
+        self._sync_visibility_checks()
+        self._apply_visibility()
 
     def _select_index(self, index: int) -> None:
         if self._syncing:
@@ -705,10 +785,7 @@ class ModelEditorDialog(QDialog):
         box.uv = (self.u_spin.value(), self.v_spin.value())
         item = self.list.item(self._current)
         if item is not None:
-            item.setText(
-                f"{self._current + 1}. {box.name}  "
-                f"({box.w:g} × {box.h:g} × {box.d:g})"
-            )
+            item.setText(self._item_text(self._current))
         self.view.set_boxes([item.box for item in self._cubes])
         self.view.set_selected_box(self._current)
 
@@ -745,6 +822,7 @@ class ModelEditorDialog(QDialog):
             None,
             source.bone,
             box.uv,
+            source.visible,
         )
         self._cubes.insert(self._current + 1, cube)
         self._refresh_list(self._current + 1)
@@ -772,6 +850,8 @@ class ModelEditorDialog(QDialog):
         has_selection = 0 <= self._current < len(self._cubes)
         self.copy_btn.setEnabled(has_selection)
         self.delete_btn.setEnabled(has_selection)
+        self.solo_btn.setEnabled(has_selection)
+        self.show_all_btn.setEnabled(bool(self._cubes))
         self.up_btn.setEnabled(has_selection and self._current > 0)
         self.down_btn.setEnabled(
             has_selection and self._current < len(self._cubes) - 1

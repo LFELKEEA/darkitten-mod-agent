@@ -82,14 +82,17 @@ def _checked(*args: str, timeout: int = 300) -> str:
 
 
 def _resolve_args() -> list[str]:
-    """Pin github.com to a reachable IP when local DNS is poisoned."""
+    """Pin github.com to a reachable IP when the direct connection fails.
+
+    Campus networks here sometimes resolve github.com to a black hole or
+    a 57.155.x address, so trusting getaddrinfo alone is not enough:
+    probe the real 443 port first, then try the known-good IPs.
+    """
     try:
-        infos = socket.getaddrinfo("github.com", 443, socket.AF_INET)
-        addresses = {info[4][0] for info in infos}
+        with socket.create_connection(("github.com", 443), timeout=4):
+            return []
     except OSError:
-        addresses = set()
-    if addresses and not any(item.startswith("57.155.") for item in addresses):
-        return []
+        pass
     for address in FALLBACK_IPS:
         try:
             with socket.create_connection((address, 443), timeout=4):

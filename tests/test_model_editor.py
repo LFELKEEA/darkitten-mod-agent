@@ -212,6 +212,55 @@ class ModelEditorDialogTests(TempDataCase):
         self.assertEqual(saved["elements"][0]["from"], [3.5, 0.0, 0.0])
         self.assertEqual(saved["elements"][0]["to"], [13.5, 8.0, 8.0])
 
+    def test_dialog_isolates_parts_and_orbit_camera(self) -> None:
+        from PySide6.QtCore import Qt
+
+        from dma.ui.model_editor import ModelEditorDialog
+
+        root = self.tmp / "proj"
+        relative = "src/main/resources/assets/demo/geo/prop.bbmodel"
+        write_bbmodel(root / relative, cubes=3)
+        dialog = ModelEditorDialog(root, relative)
+        try:
+            dialog.view.resize(400, 400)
+            dialog.view._compute_layout()
+            dialog.view._render_faces()
+            full = len(dialog.view._faces)
+            self.assertGreater(full, 0)
+
+            # 取消勾选后该立方体不再参与渲染。
+            dialog.list.item(1).setCheckState(Qt.Unchecked)
+            self.assertFalse(dialog._cubes[1].visible)
+            dialog.view._render_faces()
+            self.assertLess(len(dialog.view._faces), full)
+
+            # “只看选中”只保留当前部件。
+            dialog._select_index(2)
+            dialog._solo_selected()
+            self.assertEqual(
+                [cube.visible for cube in dialog._cubes], [False, False, True]
+            )
+            dialog.view._render_faces()
+            self.assertTrue(dialog.view._faces)
+            self.assertTrue(
+                all(face["index"] == 2 for face in dialog.view._faces)
+            )
+
+            dialog._show_all()
+            self.assertTrue(all(cube.visible for cube in dialog._cubes))
+
+            # 预设视角和自由旋转都会改变投影。
+            dialog.view.set_view("front")
+            self.assertEqual(dialog.view.view_angles(), (0.0, 0.0))
+            before = dialog.view._project(8.0, 8.0, 8.0)
+            dialog.view.set_camera(120, -40)
+            self.assertEqual(dialog.view.view_angles(), (120.0, -40.0))
+            after = dialog.view._project(8.0, 8.0, 8.0)
+            self.assertNotEqual(before, after)
+        finally:
+            dialog.deleteLater()
+            self.app.processEvents()
+
     def test_view_marks_selected_box(self) -> None:
         from PySide6.QtGui import QImage
 

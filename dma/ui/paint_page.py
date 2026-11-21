@@ -660,8 +660,25 @@ class PixelCanvas(QWidget):
 # ---------------------------------------------------------------------------
 # 3D 预览
 # ---------------------------------------------------------------------------
+_FACE_NORMALS = {
+    "top": (0.0, 1.0, 0.0),
+    "bottom": (0.0, -1.0, 0.0),
+    "front": (0.0, 0.0, 1.0),
+    "back": (0.0, 0.0, -1.0),
+    "right": (1.0, 0.0, 0.0),
+    "left": (-1.0, 0.0, 0.0),
+}
+_FACE_ORDER = ("top", "bottom", "front", "back", "right", "left")
+
+
 class ModelView(QWidget):
-    """等距投影预览；支持在模型面上直接绘制。"""
+    """自由旋转的 3D 预览，操作方式对齐 Blockbench。
+
+    - 左键在空白处拖动：旋转视角；中键或右键拖动：平移；滚轮以光标为中心缩放。
+    - 按面做背面剔除 + 深度排序，任意角度都能看清模型的前后关系。
+    - 可以按立方体隐藏部件，单独查看/绘制某一层（例如只显示身体）。
+    - 原来在模型面上直接绘制、右键取色、Shift 填面的能力保持不变。
+    """
 
     pixelPaint = Signal(int, int, QRect, bool)  # atlas x, y, face uv rect, erase
     pixelPick = Signal(int, int)
@@ -669,6 +686,10 @@ class ModelView(QWidget):
     boxFill = Signal(object, bool)
     strokeEnd = Signal()
     boxSelected = Signal(int)
+    viewChanged = Signal()
+
+    DEFAULT_YAW = -32.0
+    DEFAULT_PITCH = 22.0
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -676,16 +697,27 @@ class ModelView(QWidget):
         self._boxes: list[Box] = list(HUMANOID_BOXES)
         self._kind = "entity"
         self._back = False
+        self._yaw = self.DEFAULT_YAW
+        self._pitch = self.DEFAULT_PITCH
+        self._zoom = 1.0
+        self._pan = QPointF(0.0, 0.0)
+        self._fit_scale = 6.0
         self._scale = 6.0
         self._center = QPointF(0, 0)
+        self._proj_center = (0.0, 0.0)
         self._faces: list[dict] = []
         self._hover_face: dict | None = None
         self._hover_uv: tuple[int, int] | None = None
         self._drawing = False
         self._hide_overlay = False
+        self._hidden: set[int] = set()
         self._select_mode = False
         self._selected_box = -1
-        self._hint = "直接点模型面即可上色 · 右键取色"
+        self._drag = ""
+        self._press = QPointF()
+        self._last = QPointF()
+        self._moved = False
+        self._hint = "左键拖动旋转 · 中键平移 · 滚轮缩放 · 点模型面即可上色"
         self.setMouseTracking(True)
         self.setMinimumSize(220, 260)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
@@ -697,15 +729,16 @@ class ModelView(QWidget):
     def set_kind(self, kind: str) -> None:
         self._kind = kind
         if self._select_mode:
-            self._hint = "点击立方体即可选中 · 在右侧修改位置、尺寸和 UV"
+            self._hint = "左键点选立方体 · 空白拖动旋转 · 中键平移 · 滚轮缩放"
         else:
             self._hint = (
                 "直接点图标即可上色 · 右键取色"
                 if kind == "item"
-                else "直接点模型面即可上色 · 右键取色"
+                else "左键拖动旋转 · 中键平移 · 滚轮缩放 · 点面即可上色"
             )
         if kind == "entity":
             self._boxes = list(HUMANOID_BOXES)
+            self._hidden.clear()
         self.update()
 
     def set_hint(self, text: str) -> None:
@@ -718,11 +751,11 @@ class ModelView(QWidget):
         self._select_mode = bool(enabled)
         if self._select_mode:
             self._selected_box = -1
-            self._hint = "点击立方体即可选中 · 在右侧修改位置、尺寸和 UV"
+            self._hint = "左键点选立方体 · 空白拖动旋转 · 中键平移 · 滚轮缩放"
         elif self._kind == "item":
             self._hint = "直接点图标即可上色 · 右键取色"
         else:
-            self._hint = "直接点模型面即可上色 · 右键取色"
+            self._hint = "左键拖动旋转 · 中键平移 · 滚轮缩放 · 点面即可上色"
         self.update()
 
     def set_selected_box(self, index: int) -> None:
@@ -738,6 +771,8 @@ class ModelView(QWidget):
 
     def set_boxes(self, boxes: list[Box]) -> None:
         self._boxes = list(boxes)
+        # 换模型后旧的隐藏下标没有意义了。
+        self._hidden = {index for index in self._hidden if index < len(self._boxes)}
         self.update()
 
     def set_back_view(self, back: bool) -> None:
@@ -751,41 +786,143 @@ class ModelView(QWidget):
     def back_view(self) -> bool:
         return self._back
 
+    # -- 相机 ------------------------------------------------------------
+    def set_camera(self, yaw: float | None = None, pitch: float | None = None) -> None:
+        """设置视角角度；yaw 绕竖轴，pitch 为俯视角度。"""
+        if yaw is not None:
+            self._yaw = float(yaw) % 360.0
+        if pitch is not None:
+            self._pitch = max(-89.0, min(89.0, float(pitch)))
+        self.update()
+        self.viewChanged.emit()
+
+    def set_view(self, name: str) -> None:
+        """预设视角：blockbench 风格的 3/4 视角，以及正/侧/顶视图。"""
+        presets = {
+            "default": (self.DEFAULT_YAW, self.DEFAULT_PITCH),
+            "front": (0.0, 0.0),
+            "back": (180.0, 0.0),
+            "side": (-90.0, 0.0),
+            "top": (0.0, 89.0),
+        }
+        if name in presets:
+            # 预设视角是绝对角度，先清掉旧的「背面」标记，避免叠加 180°。
+            self._back = False
+        yaw, pitch = presets.get(str(name), presets["default"])
+        self.set_camera(yaw, pitch)
+
+    def view_angles(self) -> tuple[float, float]:
+        return self._yaw, self._pitch
+
+    def reset_view(self) -> None:
+        self._back = False
+        self._yaw = self.DEFAULT_YAW
+        self._pitch = self.DEFAULT_PITCH
+        self._zoom = 1.0
+        self._pan = QPointF(0.0, 0.0)
+        self.update()
+        self.viewChanged.emit()
+
+    # -- 部件显隐 --------------------------------------------------------
+    def set_hidden_indices(self, indices: Iterable[int]) -> None:
+        self._hidden = {
+            int(index) for index in indices if 0 <= int(index) < len(self._boxes)
+        }
+        self.update()
+
+    def set_box_visible(self, index: int, visible: bool) -> None:
+        index = int(index)
+        if visible:
+            self._hidden.discard(index)
+        elif 0 <= index < len(self._boxes):
+            self._hidden.add(index)
+        self.update()
+
+    def hidden_indices(self) -> set[int]:
+        return set(self._hidden)
+
+    def set_solo(self, index: int) -> None:
+        """只看某一个立方体；index < 0 时恢复全部。"""
+        index = int(index)
+        if 0 <= index < len(self._boxes):
+            self._hidden = {
+                item for item in range(len(self._boxes)) if item != index
+            }
+        else:
+            self._hidden.clear()
+        self.update()
+
     def fit(self) -> None:
+        self._zoom = 1.0
+        self._pan = QPointF(0.0, 0.0)
         self.update()
 
     # -- 投影 ------------------------------------------------------------
+    def _camera(self) -> tuple[float, float]:
+        """返回 (yaw, pitch) 弧度；「看背面」相当于绕竖轴再转 180°。"""
+        yaw = self._yaw + (180.0 if self._back else 0.0)
+        return math.radians(yaw), math.radians(self._pitch)
+
+    def _camera_point(self, x: float, y: float, z: float) -> tuple[float, float, float]:
+        """世界坐标 → 相机坐标：x 向右，y 向上，z 越大越靠近观察者。"""
+        yaw, pitch = self._camera()
+        ca, sa = math.cos(yaw), math.sin(yaw)
+        ce, se = math.cos(pitch), math.sin(pitch)
+        x1 = x * ca + z * sa
+        z1 = -x * sa + z * ca
+        y2 = y * ce - z1 * se
+        z2 = y * se + z1 * ce
+        return x1, y2, z2
+
     def _project(self, x: float, y: float, z: float) -> QPointF:
-        iso_x = (x - z) * math.cos(math.radians(30))
-        iso_y = (x + z) * 0.5 - y
+        camera_x, camera_y, _depth = self._camera_point(x, y, z)
         return QPointF(
-            self._center.x() + iso_x * self._scale,
-            self._center.y() + iso_y * self._scale,
+            self._center.x() + camera_x * self._scale,
+            self._center.y() - camera_y * self._scale,
         )
 
-    def _compute_layout(self) -> None:
-        boxes = self._boxes
+    def _scene_boxes(self) -> list[Box]:
         if self._kind == "block":
-            boxes = [Box("方块", (0, 0, 0), (16, 16, 16), (0, 0))]
-        cos30 = math.cos(math.radians(30))
-        xs: list[float] = []
-        ys: list[float] = []
-        for box in boxes:
-            for px in (box.x, box.x + box.w):
-                for py in (box.y, box.y + box.h):
-                    for pz in (box.z, box.z + box.d):
-                        xs.append((px - pz) * cos30)
-                        ys.append((px + pz) * 0.5 - py)
-        if not xs:
-            xs, ys = [0.0], [0.0]
-        span_x = max(1.0, max(xs) - min(xs))
-        span_y = max(1.0, max(ys) - min(ys))
-        avail_w = max(60, self.width() - 24)
-        avail_h = max(60, self.height() - 24)
-        self._scale = max(1.0, min(avail_w / span_x, avail_h / span_y) * 0.92)
+            return [Box("方块", (0, 0, 0), (16, 16, 16), (0, 0))]
+        return self._boxes
+
+    def _compute_layout(self) -> None:
+        boxes = self._scene_boxes()
+        # 只看某个部件时按它重新取景，单独检查一层不会被缩成一个小点。
+        visible = [
+            box for index, box in enumerate(boxes) if index not in self._hidden
+        ]
+        if self._kind != "block" and self._hide_overlay:
+            visible = [box for box in visible if not _is_overlay(box.name)]
+        if visible:
+            boxes = visible
+        if boxes:
+            x_low = min(box.x for box in boxes)
+            x_high = max(box.x + box.w for box in boxes)
+            y_low = min(box.y for box in boxes)
+            y_high = max(box.y + box.h for box in boxes)
+            z_low = min(box.z for box in boxes)
+            z_high = max(box.z + box.d for box in boxes)
+            center = (
+                (x_low + x_high) / 2,
+                (y_low + y_high) / 2,
+                (z_low + z_high) / 2,
+            )
+            extent = max(x_high - x_low, y_high - y_low, z_high - z_low, 1.0)
+        else:
+            center = (0.0, 0.0, 0.0)
+            extent = 16.0
+        avail = max(60.0, min(self.width() - 26, self.height() - 26))
+        # 用包围盒的最长边定缩放，旋转时不跟着放大缩小；隐藏部件也不跳。
+        self._fit_scale = max(0.5, avail / (extent * 1.28))
+        self._scale = self._fit_scale * self._zoom
+        camera_x, camera_y, _depth = self._camera_point(*center)
+        self._proj_center = (camera_x, camera_y)
+        base_x = self.width() / 2 + self._pan.x()
+        base_y = self.height() / 2 + self._pan.y() - 6.0
         self._center = QPointF(
-            self.width() / 2 - (min(xs) + max(xs)) / 2 * self._scale,
-            self.height() / 2 - (min(ys) + max(ys)) / 2 * self._scale,
+            base_x - camera_x * self._scale,
+            base_y + camera_y * self._scale,
         )
 
     # -- 面 --------------------------------------------------------------
@@ -805,102 +942,80 @@ class ModelView(QWidget):
             rects.update(box.faces)
         return rects
 
-    def _box_faces(self, box: Box) -> list[tuple[dict, list[QPointF]]]:
-        rects = self._face_rects(box)
+    def _box_quads(
+        self, box: Box
+    ) -> dict[str, tuple[tuple[float, float, float], ...]]:
+        """六个面的世界坐标顶点，按贴图的「左上、右上、右下、左下」排。"""
         x0, y0, z0 = box.x, box.y, box.z
         x1, y1, z1 = x0 + box.w, y0 + box.h, z0 + box.d
-        top = [
-            self._project(x0, y1, z0),
-            self._project(x1, y1, z0),
-            self._project(x0, y1, z1),
-        ]
-        if self._kind == "block":
-            # 方块纹理不使用图集布局，六个面都取整张 16x16。
-            face_rect = QRect(0, 0, 16, 16)
-        else:
-            face_rect = None
-        # 每个四边形按“贴图左上、右上、左下”顺序给出，保证 UV 不会被上下翻转。
-        if self._back:
-            front_name = "back"
-            side_name = "left"
-            front = [
-                self._project(x1, y1, z0),
-                self._project(x0, y1, z0),
-                self._project(x1, y0, z0),
-            ]
-            side = [
-                self._project(x0, y1, z0),
-                self._project(x0, y1, z1),
-                self._project(x0, y0, z0),
-            ]
-        else:
-            front_name = "front"
-            side_name = "right"
-            front = [
-                self._project(x0, y1, z1),
-                self._project(x1, y1, z1),
-                self._project(x0, y0, z1),
-            ]
-            side = [
-                self._project(x1, y1, z1),
-                self._project(x1, y1, z0),
-                self._project(x1, y0, z1),
-            ]
-        top_rect = face_rect or rects["top"]
-        front_rect = face_rect or rects[front_name]
-        side_rect = face_rect or rects[side_name]
-        return [
-            ({"box": box, "name": "top", "rect": top_rect}, top),
-            ({"box": box, "name": side_name, "rect": side_rect}, side),
-            ({"box": box, "name": front_name, "rect": front_rect}, front),
-        ]
+        return {
+            "top": ((x0, y1, z0), (x1, y1, z0), (x1, y1, z1), (x0, y1, z1)),
+            "bottom": ((x0, y0, z1), (x1, y0, z1), (x1, y0, z0), (x0, y0, z0)),
+            "front": ((x0, y1, z1), (x1, y1, z1), (x1, y0, z1), (x0, y0, z1)),
+            "back": ((x1, y1, z0), (x0, y1, z0), (x0, y0, z0), (x1, y0, z0)),
+            "right": ((x1, y1, z1), (x1, y1, z0), (x1, y0, z0), (x1, y0, z1)),
+            "left": ((x0, y1, z0), (x0, y1, z1), (x0, y0, z1), (x0, y0, z0)),
+        }
 
     def _face_transform(self, quad: list[QPointF], rect: QRect) -> QTransform:
         p0 = quad[0]
         ux = (quad[1].x() - p0.x()) / max(1, rect.width())
         uy = (quad[1].y() - p0.y()) / max(1, rect.width())
-        vx = (quad[2].x() - p0.x()) / max(1, rect.height())
-        vy = (quad[2].y() - p0.y()) / max(1, rect.height())
+        vx = (quad[3].x() - p0.x()) / max(1, rect.height())
+        vy = (quad[3].y() - p0.y()) / max(1, rect.height())
         return QTransform(ux, uy, vx, vy, p0.x(), p0.y())
+
+    def _face_visible(self, name: str) -> bool:
+        normal = _FACE_NORMALS[name]
+        yaw, pitch = self._camera()
+        ca, sa = math.cos(yaw), math.sin(yaw)
+        ce, se = math.cos(pitch), math.sin(pitch)
+        nx, ny, nz = normal
+        x1 = nx * ca + nz * sa
+        z1 = -nx * sa + nz * ca
+        z2 = ny * se + z1 * ce
+        return z2 > 1e-6
 
     def _render_faces(self) -> None:
         self._faces = []
         if self._image is None:
             return
-        boxes = self._boxes
-        if self._kind == "block":
-            boxes = [Box("方块", (0, 0, 0), (16, 16, 16), (0, 0))]
-        elif self._hide_overlay:
-            boxes = [box for box in boxes if not _is_overlay(box.name)]
-        sign = -1.0 if self._back else 1.0
+        full_face = QRect(0, 0, self._image.width(), self._image.height())
+        boxes = self._scene_boxes()
         collected: list[tuple] = []
         for box_index, box in enumerate(boxes):
-            cx, cy, cz = box.x + box.w / 2, box.y + box.h / 2, box.z + box.d / 2
-            overlay_rank = 1 if _is_overlay(box.name) else 0
-            for face_order, (meta, quad) in enumerate(self._box_faces(box)):
-                name = meta["name"]
-                if name == "top":
-                    depth = sign * (cx + cz) + (box.y + box.h)
-                elif name == "front":
-                    depth = sign * (cx + box.z + box.d) + cy
-                elif name == "back":
-                    depth = sign * (cx + box.z) + cy
-                elif name == "right":
-                    depth = sign * (box.x + box.w + cz) + cy
-                else:
-                    depth = sign * (box.x + cz) + cy
+            if box_index in self._hidden:
+                continue
+            if self._kind != "block" and self._hide_overlay and _is_overlay(box.name):
+                continue
+            rects = self._face_rects(box)
+            quads = self._box_quads(box)
+            for face_order, name in enumerate(_FACE_ORDER):
+                if not self._face_visible(name):
+                    continue
+                rect = full_face if self._kind == "block" else rects.get(name)
+                if rect is None or rect.width() <= 0 or rect.height() <= 0:
+                    continue
+                corners = quads[name]
+                depth = sum(
+                    self._camera_point(*corner)[2] for corner in corners
+                ) / 4.0
+                quad = [self._project(*corner) for corner in corners]
                 collected.append(
-                    (depth, overlay_rank, box_index, face_order, meta, quad)
+                    (depth, face_order, box_index, name, rect, quad)
                 )
-        # 远面先画、近面后画；外层与基础层同深度时，外层最后覆盖。
-        collected.sort(key=lambda item: item[:4])
-        for _depth, _rank, _index, _order, meta, quad in collected:
+        # 远面先画、近面后画；同一深度时基础层先画，外层（帽子/外套）覆盖在上面。
+        collected.sort(key=lambda item: item[:3])
+        for _depth, _order, index, name, rect, quad in collected:
             self._faces.append(
                 {
-                    **meta,
-                    "index": _index,
+                    "box": boxes[index],
+                    "name": name,
+                    "rect": rect,
                     "quad": quad,
-                    "transform": self._face_transform(quad, meta["rect"]),
+                    "transform": self._face_transform(quad, rect),
+                    "index": index,
+                    "depth": _depth,
                 }
             )
 
@@ -1024,7 +1139,15 @@ class ModelView(QWidget):
                 return face, rect.x() + int(local.x()), rect.y() + int(local.y())
         return None
 
+    def _ensure_faces(self) -> None:
+        if not self._faces and self._image is not None:
+            self._compute_layout()
+            self._render_faces()
+
     def mousePressEvent(self, event) -> None:  # noqa: N802
+        self._press = event.position()
+        self._last = event.position()
+        self._moved = False
         if self._kind == "item":
             point = self._item_pixel(event.position())
             if point is None:
@@ -1047,28 +1170,26 @@ class ModelView(QWidget):
                 False,
             )
             return
-        if self._select_mode:
-            if event.button() != Qt.LeftButton:
-                return
-            if not self._faces:
-                self._compute_layout()
-                self._render_faces()
-            hit = self._hit(event.position())
-            if hit is not None:
-                index = int(hit[0].get("index", -1))
-                if index >= 0:
-                    self.set_selected_box(index)
-                    self.boxSelected.emit(index)
-            return
-        hit = self._hit(event.position())
-        if hit is None:
-            return
-        face, ux, uy = hit
-        if event.button() == Qt.RightButton:
-            self.pixelPick.emit(ux, uy)
+        if event.button() in (Qt.MiddleButton, Qt.RightButton):
+            # 右键轻点仍然取色，拖起来就是平移，和 Blockbench 的中键一致。
+            self._drag = "pan"
+            self.setCursor(Qt.ClosedHandCursor)
             return
         if event.button() != Qt.LeftButton:
             return
+        self._ensure_faces()
+        hit = self._hit(event.position())
+        if hit is None:
+            self._drag = "orbit"
+            self.setCursor(Qt.ClosedHandCursor)
+            return
+        if self._select_mode:
+            index = int(hit[0].get("index", -1))
+            if index >= 0:
+                self.set_selected_box(index)
+                self.boxSelected.emit(index)
+            return
+        face, ux, uy = hit
         if event.modifiers() & Qt.ShiftModifier:
             if event.modifiers() & Qt.ControlModifier:
                 rects = list(self._face_rects(face["box"]).values())
@@ -1080,6 +1201,24 @@ class ModelView(QWidget):
         self.pixelPaint.emit(ux, uy, QRect(face["rect"]), False)
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        if self._drag:
+            delta = event.position() - self._last
+            if not self._moved and (
+                event.position() - self._press
+            ).manhattanLength() > 3:
+                self._moved = True
+            if self._drag == "orbit":
+                # 拖动方向跟着模型走：往右拖模型往右转，往下拖看到更多顶面。
+                self._yaw = (self._yaw + delta.x() * 0.55) % 360.0
+                self._pitch = max(
+                    -89.0, min(89.0, self._pitch + delta.y() * 0.45)
+                )
+            else:
+                self._pan = self._pan + delta
+            self._last = event.position()
+            self.update()
+            self.viewChanged.emit()
+            return
         if self._kind == "item":
             point = self._item_pixel(event.position())
             self._hover_uv = point
@@ -1092,6 +1231,7 @@ class ModelView(QWidget):
                 )
             self.update()
             return
+        self._ensure_faces()
         hit = self._hit(event.position())
         if hit is None:
             changed = self._hover_face is not None
@@ -1111,6 +1251,23 @@ class ModelView(QWidget):
         if event.button() == Qt.LeftButton and self._drawing:
             self._drawing = False
             self.strokeEnd.emit()
+        if self._drag:
+            if event.button() == Qt.RightButton and not self._moved:
+                if self._kind == "item":
+                    point = self._item_pixel(event.position())
+                    if point is not None:
+                        self.pixelPick.emit(*point)
+                elif not self._select_mode:
+                    self._ensure_faces()
+                    hit = self._hit(event.position())
+                    if hit is not None:
+                        self.pixelPick.emit(hit[1], hit[2])
+            self._drag = ""
+            self._moved = False
+            self.setCursor(Qt.ArrowCursor)
+            self.update()
+            return
+        super().mouseReleaseEvent(event)
 
     def leaveEvent(self, event) -> None:  # noqa: N802
         self._hover_face = None
@@ -1119,9 +1276,25 @@ class ModelView(QWidget):
         super().leaveEvent(event)
 
     def wheelEvent(self, event) -> None:  # noqa: N802
+        if self._kind == "item":
+            super().wheelEvent(event)
+            return
         step = 1 if event.angleDelta().y() > 0 else -1
-        self._scale = max(1.0, min(30.0, self._scale * (1.12 if step > 0 else 0.89)))
+        factor = 1.14 if step > 0 else 1 / 1.14
+        self._compute_layout()
+        old_scale = max(0.001, self._scale)
+        self._zoom = max(0.15, min(14.0, self._zoom * factor))
+        new_scale = self._fit_scale * self._zoom
+        point = event.position()
+        base = QPointF(self.width() / 2, self.height() / 2 - 6.0)
+        # 以光标为中心缩放：光标下的模型点保持不动。
+        self._pan = (point - base) - (point - base - self._pan) * (
+            new_scale / old_scale
+        )
+        self._compute_layout()
         self.update()
+        self.viewChanged.emit()
+        event.accept()
 
 
 # ---------------------------------------------------------------------------
@@ -1261,7 +1434,8 @@ class PaintPage(QWidget):
         box.addWidget(
             tiny(
                 "像 Blockbench 的 Paint 模式：左边画 UV/像素图，右边是模型或方块预览，"
-                "可以直接点模型面落笔。加载 .geo.json / .bbmodel / Java 模型会自动识别类型，"
+                "可以直接点模型面落笔。3D 预览支持拖动旋转、中键平移、滚轮缩放，"
+                "也能按部件单独显示某一层。加载 .geo.json / .bbmodel / Java 模型会自动识别类型，"
                 "多贴图模型会先让你选一张。画完保存回 PNG，Agent 会继续用它。"
             )
         )
@@ -1396,6 +1570,19 @@ class PaintPage(QWidget):
         preview_title = QLabel("预览")
         preview_title.setObjectName("H2")
         right_layout.addWidget(preview_title)
+
+        parts_row = QHBoxLayout()
+        parts_row.setSpacing(6)
+        parts_row.addWidget(QLabel("部件"))
+        self.parts_combo = QComboBox()
+        self.parts_combo.addItem("全部显示", -1)
+        self.parts_combo.setToolTip(
+            "只显示某个部件，方便绘制被外层挡住的区域；选「全部显示」恢复。"
+        )
+        self.parts_combo.currentIndexChanged.connect(self._apply_part_filter)
+        parts_row.addWidget(self.parts_combo, 1)
+        right_layout.addLayout(parts_row)
+
         self.preview = ModelView()
         self.preview.pixelPaint.connect(self._paint_from_model)
         self.preview.pixelPick.connect(self._pick_from_model)
@@ -1418,15 +1605,26 @@ class PaintPage(QWidget):
         self.back_btn.setCheckable(True)
         self.back_btn.clicked.connect(self._toggle_back)
         preview_tools.addWidget(self.back_btn)
+        preview_tools.addStretch(1)
+        right_layout.addLayout(preview_tools)
+
+        model_tools = QHBoxLayout()
+        model_tools.setSpacing(6)
         self.model_btn = QPushButton("加载模型…")
         self.model_btn.setObjectName("Ghost")
         self.model_btn.clicked.connect(self._load_model)
-        preview_tools.addWidget(self.model_btn)
+        model_tools.addWidget(self.model_btn)
         self.fit_btn = QPushButton("适配")
         self.fit_btn.setObjectName("Ghost")
         self.fit_btn.clicked.connect(self._fit_all)
-        preview_tools.addWidget(self.fit_btn)
-        right_layout.addLayout(preview_tools)
+        model_tools.addWidget(self.fit_btn)
+        self.reset_view_btn = QPushButton("重置视角")
+        self.reset_view_btn.setObjectName("Ghost")
+        self.reset_view_btn.setToolTip("回到 Blockbench 风格的 3/4 视角")
+        self.reset_view_btn.clicked.connect(self.preview.reset_view)
+        model_tools.addWidget(self.reset_view_btn)
+        model_tools.addStretch(1)
+        right_layout.addLayout(model_tools)
 
         self.kind_hint = tiny("物品图标：16×16，透明背景，4~8 色。")
         right_layout.addWidget(self.kind_hint)
@@ -1440,8 +1638,8 @@ class PaintPage(QWidget):
         self.cursor_label = tiny("坐标 -")
         self.size_label = tiny("16×16")
         self.hint_label = tiny(
-            "左键画，Shift+左键填整面，Ctrl+Shift+左键填整个立方体，右键取色，滚轮缩放；"
-            "P/E/G/I/L 切换工具。"
+            "左键画，Shift+左键填整面，Ctrl+Shift+左键填整个立方体，右键取色；"
+            "空白拖动旋转，中键平移，滚轮缩放；P/E/G/I/L 切换工具。"
         )
         status.addWidget(self.cursor_label)
         status.addWidget(self.size_label)
@@ -1474,6 +1672,7 @@ class PaintPage(QWidget):
         self.preview.set_kind(kind)
         self.preview.set_boxes(HUMANOID_BOXES if kind == "entity" else [])
         self.preview.set_image(self.canvas.image())
+        self._refresh_parts()
         self._apply_guides()
         self.size_label.setText(f"{image.width()}×{image.height()}")
         self.file_label.setText("尚未保存到文件")
@@ -1766,6 +1965,34 @@ class PaintPage(QWidget):
         self.preview.set_back_view(self.back_btn.isChecked())
         self.back_btn.setText("看正面" if self.back_btn.isChecked() else "看背面")
 
+    def _refresh_parts(self) -> None:
+        """把当前模型的立方体填进「部件」下拉框。"""
+        current = self.parts_combo.currentData()
+        self._syncing = True
+        self.parts_combo.clear()
+        self.parts_combo.addItem("全部显示", -1)
+        for index, box in enumerate(self.preview._boxes):
+            self.parts_combo.addItem(f"{index + 1}. {box.name}", index)
+        target = 0
+        for position in range(self.parts_combo.count()):
+            if self.parts_combo.itemData(position) == current:
+                target = position
+                break
+        self.parts_combo.setCurrentIndex(target)
+        self._syncing = False
+        self.parts_combo.setEnabled(bool(self.preview._boxes))
+        self._apply_part_filter()
+
+    def _apply_part_filter(self, *_args) -> None:
+        if self._syncing:
+            return
+        value = self.parts_combo.currentData()
+        index = int(value) if value is not None else -1
+        if 0 <= index < len(self.preview._boxes):
+            self.preview.set_solo(index)
+        else:
+            self.preview.set_hidden_indices(set())
+
     def _fit_all(self) -> None:
         self.canvas.fit()
         self.preview.fit()
@@ -1829,6 +2056,7 @@ class PaintPage(QWidget):
         self._model_path = path
         self.preview.set_kind(kind)
         self.preview.set_boxes(boxes)
+        self._refresh_parts()
         self._kind = kind
         self.back_btn.setEnabled(True)
         self._apply_guides()
@@ -1867,6 +2095,7 @@ class PaintPage(QWidget):
                         kind = model_kind(path)
                         self.preview.set_kind(kind)
                         self.preview.set_boxes(boxes)
+                        self._refresh_parts()
                         self._kind = kind
                         self._model_path = path
                         self.back_btn.setEnabled(True)
@@ -1884,6 +2113,7 @@ class PaintPage(QWidget):
             if kind == "entity":
                 self.preview.set_boxes(HUMANOID_BOXES)
             self.preview.set_image(self.canvas.image())
+            self._refresh_parts()
             self.back_btn.setEnabled(kind in {"entity", "block", "custom"})
             self._apply_guides()
             self._apply_mirror()

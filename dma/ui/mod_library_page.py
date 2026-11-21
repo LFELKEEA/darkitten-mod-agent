@@ -1078,7 +1078,7 @@ class ModLibraryPage(QWidget):
         self._preview = view
         layout.addWidget(view, 1)
         row = QHBoxLayout()
-        row.addWidget(tiny("等距 3D 预览；模型缺失时用默认骨架，不影响贴图编辑。"))
+        row.addWidget(tiny("3D 预览；模型缺失时用默认骨架，不影响贴图编辑。"))
         row.addStretch(1)
         flip = QCheckBox("查看背面")
         flip.toggled.connect(view.set_back_view)
