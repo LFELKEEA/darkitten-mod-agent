@@ -15,7 +15,7 @@ from .base import TempDataCase
 class ProjectRootTests(TempDataCase):
     def test_default_project_root_inside_data_dir(self) -> None:
         root = paths.default_project_root()
-        self.assertEqual(root, self.tmp / "data" / "projects")
+        self.assertEqual(root, (self.tmp / "data" / "projects").resolve())
         self.assertTrue(root.is_dir())
 
     def test_data_dir_falls_back_when_override_is_unwritable(self) -> None:
@@ -35,7 +35,10 @@ class ProjectRootTests(TempDataCase):
 
     def test_empty_config_uses_new_default(self) -> None:
         config = Config().normalized()
-        self.assertEqual(Path(config.project_root), self.tmp / "data" / "projects")
+        self.assertEqual(
+            Path(config.project_root),
+            (self.tmp / "data" / "projects").resolve(),
+        )
 
     def test_legacy_default_is_migrated(self) -> None:
         target = self.tmp / "data" / "config.json"
@@ -45,7 +48,10 @@ class ProjectRootTests(TempDataCase):
             json.dumps({"project_root": legacy}, ensure_ascii=False), encoding="utf-8"
         )
         config = load_config(target)
-        self.assertEqual(Path(config.project_root), self.tmp / "data" / "projects")
+        self.assertEqual(
+            Path(config.project_root),
+            (self.tmp / "data" / "projects").resolve(),
+        )
 
     def test_custom_project_root_is_kept(self) -> None:
         custom = self.tmp / "my-projects"

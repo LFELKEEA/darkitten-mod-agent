@@ -646,7 +646,10 @@ def looks_like_project(root: str | Path) -> bool:
         data_root = paths.data_dir().resolve()
     except OSError:
         data_root = None
-    app_root = paths.app_dir()
+    try:
+        app_root = paths.app_dir().resolve()
+    except OSError:
+        app_root = paths.app_dir()
     if resolved in (app_root, data_root, app_root / "_internal"):
         return False
     if resolved.is_relative_to(app_root / "_internal"):
