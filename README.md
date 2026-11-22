@@ -2,7 +2,7 @@
 
 只写 Minecraft Java 模组的桌面 Agent。它不是“生成一段代码就结束”的聊天框：读工程、改代码、补资源、跑 Gradle、启动开发端、读取游戏状态并做断言，最后把可用的 JAR 交出来。
 
-界面用 PySide6，支持 Fabric、Forge、NeoForge、Architectury。当前版本 `3.6.3`；逐版本改动见 [CHANGELOG.md](CHANGELOG.md)。
+界面用 PySide6，支持 Fabric、Forge、NeoForge、Architectury。当前版本 `3.7.0`；逐版本改动见 [CHANGELOG.md](CHANGELOG.md)。
 
 ## 它适合谁
 
@@ -32,6 +32,7 @@
 
 ## 3.6.x 的关键变化
 
+- **3.7.0**：知识库可直接同步启动器学习库里的反编译源码。
 - **3.6.3**：3D 预览自由旋转、正确遮挡、按部件显示。
 - **3.6.0**：模型库按工程归档，接入 Modrinth 资源包、LittleSkin 皮肤与 YSM 社区模型，开发端画面可在应用内实时查看。
 - **3.5.0**：开发端改到隐藏桌面，整轮测试不再在用户桌面闪窗。

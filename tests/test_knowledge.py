@@ -361,6 +361,84 @@ class KnowledgeStoreTests(TempDataCase):
                 root, "../outside", files, jar_name="a.jar"
             )
 
+    def test_import_launcher_learn_sources(self) -> None:
+        root = self.tmp / "learn" / "src" / "examplemod" / "1.20.1"
+        (root / "com" / "example").mkdir(parents=True)
+        source = root / "com" / "example" / "ExampleMod.java"
+        source.write_text(
+            "package com.example;\n\npublic class ExampleMod {\n"
+            "    void onInitializeClient() {}\n}\n",
+            encoding="utf-8",
+        )
+        index = root / "INDEX.md"
+        index.write_text("# ExampleMod\n\n入口类 ExampleMod。", encoding="utf-8")
+        store = self.store()
+        result = store.import_launcher_learn(
+            [{"title": "ExampleMod", "index": str(index), "source_dir": str(root)}]
+        )
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["projects"], 1)
+        self.assertEqual(result["imported"], 2)
+        self.assertEqual(result["skipped"], 0)
+        self.assertEqual(result["errors"], [])
+        self.assertGreater(result["bytes"], 0)
+        names = {item["name"] for item in store.list_documents()}
+        self.assertIn("ExampleMod · INDEX.md", names)
+        self.assertIn("ExampleMod · com/example/ExampleMod.java", names)
+        hits = store.search("onInitializeClient")
+        self.assertTrue(hits)
+        self.assertEqual(hits[0]["kind"], "java")
+
+    def test_import_launcher_learn_resync_updates_same_documents(self) -> None:
+        root = self.tmp / "learn" / "examplemod"
+        root.mkdir(parents=True)
+        source = root / "ExampleMod.java"
+        source.write_text("class ExampleMod { int version = 1; }", encoding="utf-8")
+        entry = {"title": "ExampleMod", "source_dir": str(root)}
+        store = self.store()
+        store.import_launcher_learn([entry])
+        first = store.list_documents()
+        self.assertEqual(len(first), 1)
+        source.write_text("class ExampleMod { int version = 2; }", encoding="utf-8")
+        second = store.import_launcher_learn([entry])
+        self.assertEqual(second["imported"], 1)
+        documents = store.list_documents()
+        self.assertEqual(len(documents), 1)
+        self.assertEqual(documents[0]["id"], first[0]["id"])
+        self.assertIn("version = 2", store.get_document(documents[0]["id"])["text"])
+
+    def test_import_launcher_learn_uses_project_scope(self) -> None:
+        root = self.tmp / "learn" / "examplemod"
+        root.mkdir(parents=True)
+        (root / "ExampleMod.java").write_text(
+            "class ExampleMod { void onInitialize() {} }", encoding="utf-8"
+        )
+        store = self.store()
+        result = store.import_launcher_learn(
+            [{"title": "ExampleMod", "source_dir": str(root)}],
+            project="C:/mods/demo",
+        )
+        self.assertEqual(result["imported"], 1)
+        self.assertTrue(store.search("onInitialize", project="C:/mods/demo"))
+        self.assertEqual(store.search("onInitialize", project="C:/mods/other"), [])
+
+    def test_import_launcher_learn_missing_paths_are_noop(self) -> None:
+        store = self.store()
+        result = store.import_launcher_learn(
+            [
+                {
+                    "title": "Missing",
+                    "index": str(self.tmp / "missing" / "INDEX.md"),
+                    "source_dir": str(self.tmp / "missing" / "src"),
+                }
+            ]
+        )
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["imported"], 0)
+        self.assertEqual(result["skipped"], 0)
+        self.assertEqual(result["errors"], [])
+        self.assertEqual(store.list_documents(), [])
+
     def test_rejects_binary_and_missing(self) -> None:
         binary = self.tmp / "image.bin"
         binary.write_bytes(b"\x00\x01\x02")

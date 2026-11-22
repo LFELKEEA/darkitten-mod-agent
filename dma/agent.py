@@ -158,7 +158,7 @@ CENTER_TOOLS = {
     "dev_docs", "api_lookup", "resource_ensure", "large_mod_plan",
     "version_facts", "arch_ref", "multiversion_plan",
     "launcher_versions", "launcher_downloads", "launcher_vanilla",
-    "launcher_launch", "launcher_status",
+    "launcher_launch", "launcher_status", "launcher_learn",
 }
 
 
@@ -3030,6 +3030,68 @@ class AgentWorker(QObject):
             bridge = launcher_bridge.LauncherBridge()
             result = bridge.launch(version)
             return json.dumps(result, ensure_ascii=False)
+        if name == "launcher_learn":
+            bridge = launcher_bridge.LauncherBridge()
+            try:
+                entries = bridge.learned()
+            except Exception as exc:  # noqa: BLE001
+                return f"读取启动器学习库失败：{exc}"
+            if not entries:
+                return (
+                    "启动器学习库是空的。先在启动器的「联机 / 模组学习」里"
+                    "反编译一个模组，再重新调用。"
+                )
+            action = str(args.get("action") or "list").strip().lower()
+            if action == "list":
+                lines = ["启动器学习库："]
+                for item in entries[:40]:
+                    title = item.get("title") or item.get("slug") or "未命名"
+                    files = int(item.get("files") or 0)
+                    line = f"- {title}（{files} 个源码文件）"
+                    source_dir = str(item.get("source_dir") or "")
+                    if source_dir:
+                        line += f"\n  源码：{source_dir}"
+                    lines.append(line)
+                lines.append(
+                    "\n要让这些源码进入可检索的知识库，"
+                    '调用 {"tool":"launcher_learn","action":"import"}。'
+                )
+                return "\n".join(lines)[:MAX_TOOL_RESULT]
+            if self.knowledge is None:
+                return "知识库不可用。"
+            needle = str(args.get("project") or "").strip().lower()
+            selected = entries
+            if needle:
+                selected = [
+                    item
+                    for item in entries
+                    if needle
+                    in " ".join(
+                        str(item.get(key) or "")
+                        for key in ("title", "slug", "project", "jar", "source_dir")
+                    ).lower()
+                ]
+                if not selected:
+                    return f"启动器学习库里没有匹配「{needle}」的项目。"
+            scope = ""
+            if str(args.get("scope") or "all").lower() == "project" and self.project:
+                scope = str(self.project.root)
+            result = self.knowledge.import_launcher_learn(
+                selected,
+                project=scope,
+                progress=lambda message: self._center_progress(50, message),
+            )
+            text = (
+                f"已从启动器学习库导入 {result.get('imported', 0)} 个源码文件"
+                f"（{int(result.get('bytes') or 0) / 1024 / 1024:.1f} MB），"
+                f"跳过 {result.get('skipped', 0)} 个。\n"
+                "现在可以用 search_knowledge 按类名、方法名或功能关键词检索，"
+                "再用 read_knowledge 按文件名打开对应源码。"
+            )
+            errors = list(result.get("errors") or [])
+            if errors:
+                text += "\n部分失败：" + "；".join(errors[:4])
+            return text[:MAX_TOOL_RESULT]
         return "未知工具：" + name
 
     # ------------------------------------------------------------------

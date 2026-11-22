@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .. import launcher_bridge
 from .. import project as project_mod
 from .. import toolchain
 from ..knowledge import (
@@ -64,6 +65,12 @@ class KnowledgePage(QWidget):
         self.import_btn = QPushButton("导入文件")
         self.import_btn.setObjectName("Primary")
         self.import_btn.clicked.connect(self.import_files)
+        self.learn_btn = QPushButton("同步启动器学习库")
+        self.learn_btn.setToolTip(
+            "读取启动器「学习库」里已经反编译好的模组源码，导入知识库；"
+            "同步后可直接用 search_knowledge / read_knowledge 查类和方法。"
+        )
+        self.learn_btn.clicked.connect(self.import_launcher_learn)
         self.decompile_btn = QPushButton("反编译到工程")
         self.decompile_btn.setToolTip(
             "把选中的 JAR（或另选一个 JAR）反编译成 .java，写到工程内的参考资料目录；"
@@ -78,6 +85,7 @@ class KnowledgePage(QWidget):
         self.refresh_btn.clicked.connect(self.refresh)
         for button in (
             self.import_btn,
+            self.learn_btn,
             self.decompile_btn,
             self.delete_btn,
             self.refresh_btn,
@@ -264,6 +272,77 @@ class KnowledgePage(QWidget):
             )
         elif not imported and not progress.wasCanceled():
             self.main.status("没有导入任何文件")
+
+    def import_launcher_learn(self) -> None:
+        project = self._project()
+        if self.import_scope.isChecked() and project is None:
+            QMessageBox.information(
+                self,
+                "还没有工程",
+                "勾选了「导入到当前工程」，请先打开一个工程。",
+            )
+            return
+        try:
+            entries = launcher_bridge.LauncherBridge().learned()
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(
+                self,
+                "读取启动器学习库失败",
+                f"请确认启动器已经运行，并且至少反编译过一个模组。\n\n{exc}",
+            )
+            return
+        if not entries:
+            QMessageBox.information(
+                self,
+                "学习库是空的",
+                "启动器学习库里还没有记录。\n\n"
+                "先在「开发中心 → 模组学习」里搜索一个模组并点「反编译学习」，"
+                "完成后再回来同步。",
+            )
+            return
+        scope = self._project_key() if self.import_scope.isChecked() else ""
+        progress = QProgressDialog(
+            f"正在读取启动器学习库（{len(entries)} 个项目）…",
+            "",
+            0,
+            0,
+            self,
+        )
+        progress.setWindowTitle("同步启动器学习库")
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setCancelButton(None)
+        progress.show()
+        QApplication.processEvents()
+
+        def report(message: str) -> None:
+            progress.setLabelText(message)
+            QApplication.processEvents()
+
+        try:
+            result = self.store.import_launcher_learn(
+                entries, project=scope, progress=report
+            )
+        except Exception as exc:  # noqa: BLE001
+            progress.close()
+            QMessageBox.critical(self, "同步失败", str(exc))
+            return
+        progress.close()
+        self.refresh()
+        errors = list(result.get("errors") or [])
+        detail = (
+            f"项目：{result.get('projects', 0)} 个\n"
+            f"导入/更新：{result.get('imported', 0)} 个文件\n"
+            f"大小：{int(result.get('bytes') or 0) / 1024 / 1024:.1f} MB"
+        )
+        if result.get("skipped"):
+            detail += f"\n跳过：{result.get('skipped')} 个（超过单次上限）"
+        if errors:
+            detail += "\n\n部分文件失败：\n" + "\n".join(errors[:6])
+        QMessageBox.information(self, "同步完成", detail)
+        self.main.status(
+            f"已同步启动器学习库：{result.get('imported', 0)} 个文件进入知识库"
+        )
 
     def decompile_to_project(self) -> None:
         project = self._project()

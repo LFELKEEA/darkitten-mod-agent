@@ -533,6 +533,11 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
         ["version"]),
     _fn("launcher_launch", "请求启动器启动指定实例", {"version": _TEXT}, ["version"]),
     _fn("launcher_status", "查看启动器联动状态"),
+    _fn("launcher_learn",
+        "读取启动器学习库，或把已反编译的模组源码同步进知识库",
+        {"action": {"type": "string", "enum": ["list", "import"]},
+         "project": _TEXT,
+         "scope": {"type": "string", "enum": ["all", "project"]}}),
 ]
 
 

@@ -1429,6 +1429,104 @@ class KnowledgeStore:
             size=size,
         )
 
+    def import_launcher_learn(
+        self,
+        entries: Iterable[dict[str, Any]],
+        *,
+        project: str = "",
+        max_files: int = 2000,
+        max_bytes: int = 24 * 1024 * 1024,
+        progress: Progress | None = None,
+    ) -> dict[str, Any]:
+        """把启动器学习库里的反编译源码导入知识库。
+
+        启动器学习库的结构由启动器维护：每一项包含 title/slug、source_dir、
+        index 和 jar。优先导入已经反编译好的 .java 与 INDEX.md；没有源码时
+        退回导入 JAR。重复同步会按来源路径更新，不会产生重复文档。
+        """
+        items = [entry for entry in entries if isinstance(entry, dict)]
+        total = len(items)
+        imported = 0
+        skipped = 0
+        bytes_used = 0
+        errors: list[str] = []
+        for position, entry in enumerate(items, start=1):
+            title = str(
+                entry.get("title")
+                or entry.get("slug")
+                or entry.get("project")
+                or "未命名模组"
+            ).strip()
+            if progress is not None:
+                progress(f"正在导入 {title}（{position}/{total}）…")
+            index_path = Path(str(entry.get("index") or ""))
+            source_dir = Path(str(entry.get("source_dir") or ""))
+            jar_path = Path(str(entry.get("jar") or ""))
+
+            if index_path.is_file():
+                try:
+                    index_text = _decode(index_path.read_bytes())
+                    self.add_text(
+                        f"{title} · INDEX.md",
+                        index_text,
+                        project=project,
+                        source=str(index_path),
+                        kind="md",
+                        size=index_path.stat().st_size,
+                    )
+                    imported += 1
+                except Exception as exc:  # noqa: BLE001 - 单个索引失败不影响其他文件
+                    if len(errors) < 12:
+                        errors.append(f"{title}/INDEX.md：{exc}")
+
+            try:
+                sources = sorted(source_dir.rglob("*.java"))
+            except OSError:
+                sources = []
+            if not sources and jar_path.is_file():
+                try:
+                    self.add_file(jar_path, project=project)
+                    imported += 1
+                    bytes_used += jar_path.stat().st_size
+                except Exception as exc:  # noqa: BLE001
+                    if len(errors) < 12:
+                        errors.append(f"{title}/{jar_path.name}：{exc}")
+                continue
+
+            for source in sources:
+                if imported >= max_files or bytes_used >= max_bytes:
+                    skipped += 1
+                    continue
+                try:
+                    size = source.stat().st_size
+                    if bytes_used + size > max_bytes:
+                        skipped += 1
+                        continue
+                    text = _decode(source.read_bytes())
+                    relative = source.relative_to(source_dir).as_posix()
+                    self.add_text(
+                        f"{title} · {relative}",
+                        text,
+                        project=project,
+                        source=str(source),
+                        kind="java",
+                        size=size,
+                    )
+                    imported += 1
+                    bytes_used += size
+                except Exception as exc:  # noqa: BLE001
+                    skipped += 1
+                    if len(errors) < 12:
+                        errors.append(f"{title}/{source.name}：{exc}")
+        return {
+            "ok": True,
+            "projects": total,
+            "imported": imported,
+            "skipped": skipped,
+            "bytes": bytes_used,
+            "errors": errors,
+        }
+
     def add_text(
         self,
         name: str,

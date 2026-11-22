@@ -305,6 +305,8 @@ AI 游戏控制（Forge 1.20.1 开发客户端；先 mcdev_prepare kind=both 或
 - remember: {"tool":"remember","content":"值得长期记住的工程决定或踩坑"}
 - recall: {"tool":"recall","query":"关键字"}
 - search_knowledge: {"tool":"search_knowledge","query":"关键字"}
+- launcher_learn 查看启动器学习库: {"tool":"launcher_learn","action":"list"}
+- launcher_learn 把启动器已反编译的模组源码同步进知识库: {"tool":"launcher_learn","action":"import"}
 - read_knowledge: {"tool":"read_knowledge","id":1}
 - read_knowledge 按关键词找条目: {"tool":"read_knowledge","id":1,"query":"类名或功能"}
 - read_knowledge 读源码全文: {"tool":"read_knowledge","id":1,"file":"SomeClass.java"}
