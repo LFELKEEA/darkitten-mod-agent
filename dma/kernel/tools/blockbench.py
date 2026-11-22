@@ -390,6 +390,20 @@ def export_java_model(
             element.pop("rotation", None)
         else:
             element["rotation"] = rotation
+        # Java UVs are 0..16 and the game multiplies them by texture_size/16.
+        # Writing pixel coordinates straight into a 32/64px model made every
+        # face sample the wrong region (or outside the atlas).
+        sx = 16.0 / max(1, int(size[0]))
+        sy = 16.0 / max(1, int(size[1]))
+        for face in element.get("faces", {}).values():
+            rect = face.get("uv") if isinstance(face, dict) else None
+            if isinstance(rect, list) and len(rect) >= 4:
+                face["uv"] = [
+                    round(float(rect[0]) * sx, 4),
+                    round(float(rect[1]) * sy, 4),
+                    round(float(rect[2]) * sx, 4),
+                    round(float(rect[3]) * sy, 4),
+                ]
         elements.append(element)
     return {
         "credit": model.author or "Darkitten Mod Agent",
@@ -406,6 +420,53 @@ def export_java_model(
     }
 
 
+def export_geo_model(
+    model: BlockbenchModel,
+    *,
+    identifier: str,
+    texture_size: tuple[int, int] | None = None,
+) -> dict[str, Any]:
+    """Convert the cuboid model into a GeckoLib ``.geo.json`` geometry.
+
+    Exporting a modded entity as a Java *block* model (the old behaviour)
+    produced a file the game never loads: entity models live under ``geo/``
+    and need ``minecraft:geometry`` + bones.
+    """
+    width, height = (texture_size or model.texture_size)
+    bones = []
+    for item in model.cubes:
+        bones.append(
+            {
+                "name": item.name,
+                "pivot": [round(float(value), 4) for value in item.from_],
+                "cubes": [
+                    {
+                        "origin": [round(float(value), 4) for value in item.from_],
+                        "size": [
+                            round(float(item.to[axis] - item.from_[axis]), 4)
+                            for axis in range(3)
+                        ],
+                        "uv": [int(item.uv[0]) if item.uv else 0,
+                               int(item.uv[1]) if item.uv else 0],
+                    }
+                ],
+            }
+        )
+    return {
+        "format_version": "1.12.0",
+        "minecraft:geometry": [
+            {
+                "description": {
+                    "identifier": identifier if identifier.startswith("geometry.") else f"geometry.{identifier}",
+                    "texture_width": int(width),
+                    "texture_height": int(height),
+                },
+                "bones": bones,
+            }
+        ],
+    }
+
+
 def export(
     model: BlockbenchModel,
     root: Path,
@@ -418,16 +479,21 @@ def export(
     """Write model JSON (and optionally copy the texture) into a mod project."""
     root = Path(root)
     name = name or model.name
-    model_path = root / "src/main/resources/assets" / namespace / "models" / kind / f"{name}.json"
-    model_path.parent.mkdir(parents=True, exist_ok=True)
-    # The .bbmodel embeds a data URI for previews; Java models need a resource id.
     hint = model.texture_name.strip()
     texture_ref = hint if hint and not hint.startswith("data:") and ":" in hint else None
-    data = export_java_model(
-        model,
-        namespace=namespace,
-        texture=texture_ref or f"{namespace}:{kind}/{name}",
-    )
+    if kind == "entity":
+        # GeckoLib loads geo/*.geo.json; models/entity/*.json is never read.
+        model_path = root / "src/main/resources/assets" / namespace / "geo" / f"{name}.geo.json"
+        model_path.parent.mkdir(parents=True, exist_ok=True)
+        data = export_geo_model(model, identifier=f"{namespace}.{name}")
+    else:
+        model_path = root / "src/main/resources/assets" / namespace / "models" / kind / f"{name}.json"
+        model_path.parent.mkdir(parents=True, exist_ok=True)
+        data = export_java_model(
+            model,
+            namespace=namespace,
+            texture=texture_ref or f"{namespace}:{kind}/{name}",
+        )
     model_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     written = [model_path]
     if texture_png:

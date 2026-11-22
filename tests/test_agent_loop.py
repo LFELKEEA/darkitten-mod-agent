@@ -510,7 +510,9 @@ class AgentLoopTests(TempDataCase):
         ) as build:
             run = worker._loop()
         build.assert_not_called()
-        self.assertEqual(run.text, "写完了。")
+        # 关闭自动编译时不能假装验证过，必须明确提示还没编译。
+        self.assertIn("写完了。", run.text)
+        self.assertIn("自动编译已关闭", run.text)
 
     def test_auto_build_skipped_for_docs_only(self) -> None:
         project = make_project(self)

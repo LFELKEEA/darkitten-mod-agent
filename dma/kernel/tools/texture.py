@@ -75,6 +75,20 @@ def _clamp(value: float, low: float = 0.0, high: float = 1.0) -> float:
     return max(low, min(high, value))
 
 
+def _hash01(x: int, y: int, seed: int = 0) -> float:
+    """Deterministic 0..1 hash.
+
+    Repeating formulas such as ``(x * 7) % 11`` put the same grain every N
+    pixels, which is exactly what made planks and clay look like wallpaper
+    instead of materials.  A cheap integer hash keeps the pattern stable per
+    seed but has no visible period.
+    """
+    value = (int(x) * 374761393 + int(y) * 668265263
+             + int(seed) * 2246822519) & 0xFFFFFFFF
+    value = (value ^ (value >> 13)) * 1274126177 & 0xFFFFFFFF
+    return ((value ^ (value >> 16)) & 0xFFFFFF) / float(0xFFFFFF)
+
+
 def shade(color: str, factor: float) -> str:
     r, g, b = _rgb(color)
     return _hex((r * factor, g * factor, b * factor))
@@ -152,9 +166,17 @@ def generate(path: Path, spec: TextureSpec | None = None, **overrides) -> Path:
             if key in style:
                 handler = _STYLES[value]
                 break
-    handler = handler or _style_noise
-    if style == "glass":
-        # Vanilla glass is a transparent frame, never an opaque pane.
+    if handler is None:
+        # The old fallback painted generic noise for every typo, so a missing
+        # ore/plant style looked like a plausible but wrong texture.  Fail
+        # loudly instead and let the agent retry with a real style.
+        raise ValueError(
+            f"未知方块样式「{spec.style}」。可用样式："
+            + "、".join(sorted(_STYLES))
+        )
+    if style in {"glass", "flower", "sapling", "mushroom"}:
+        # Plants and panes are cut-outs; an opaque background would render as
+        # a solid square in game.
         spec.transparent = True
     handler(grid, width, height, colors, accent_colors, rng, spec)
     if spec.transparent:
@@ -306,19 +328,19 @@ def _style_mossy(grid, width, height, colors, accents, rng, spec):
 def _style_deepslate(grid, width, height, colors, accents, rng, spec):
     """Darker, vertically banded rock; reads differently from plain stone."""
     field = _fbm(width, height, rng, cell=4.5, octaves=3)
+    fine = _fbm(width, height, rng, cell=1.6, octaves=2)
     for y in range(height):
         for x in range(width):
             grid[y][x] = _ramp(colors, 0.24 + 0.5 * field[y][x])
-    x = 0
-    while x < width:
-        tone = colors[rng.choice([1, 2])]
-        wobble = rng.choice([-1, 0, 1])
+    # Vertical clefts: per-column tone with a noisy edge, not a fixed stripe
+    # every N pixels (the old loop repeated like a barcode).
+    for x in range(width):
+        tone = colors[1 if _hash01(x, 0, spec.seed) > 0.55 else 2]
         for y in range(height):
-            if rng.random() < 0.82:
+            if _hash01(x // 2, y, spec.seed + 7) > 0.48:
                 _put(grid, x, y, tone)
-            if rng.random() < 0.18:
-                _put(grid, x + wobble, y, tone)
-        x += rng.randint(2, 5)
+            elif fine[y][x] > 0.72:
+                _put(grid, x, y, colors[-1])
     for _ in range(max(2, width // 5)):
         x, y = rng.randrange(width - 1), rng.randrange(height - 2)
         _put(grid, x + 1, y, colors[-1])
@@ -344,18 +366,22 @@ def _style_gravel(grid, width, height, colors, accents, rng, spec):
 
 
 def _style_clay(grid, width, height, colors, accents, rng, spec):
-    """Smooth fired-clay surface with faint horizontal throwing bands."""
+    """Smooth fired-clay surface with faint throwing marks."""
     field = _fbm(width, height, rng, cell=2.6, octaves=2)
+    fine = _fbm(width, height, rng, cell=1.2, octaves=2)
     for y in range(height):
         for x in range(width):
-            band = 0.07 if (y // 3) % 2 == 0 else -0.05
-            grid[y][x] = _ramp(colors, _clamp(0.30 + band + 0.5 * field[y][x]
-                                             + rng.uniform(-0.08, 0.08)))
-    for _ in range(max(2, height // 6)):
+            # Clay is not barcoded: the old ``(y // 3) % 2`` banding repeated
+            # every three rows and read as corrugated cardboard.
+            band = 0.10 * (fine[y][x] - 0.5)
+            grid[y][x] = _ramp(colors, _clamp(0.18 + band + 0.72 * field[y][x]))
+    for _ in range(max(1, height // 7)):
         y = rng.randrange(height)
         for x in range(width):
-            if rng.random() < 0.55:
+            if _hash01(x, y, spec.seed + 3) < 0.42:
                 _put(grid, x, y, colors[2])
+    for _ in range(max(3, width // 4)):
+        _put(grid, rng.randrange(width), rng.randrange(height), colors[-1])
 
 
 def _style_dirt(grid, width, height, colors, accents, rng, spec):
@@ -456,7 +482,7 @@ def _style_log_top(grid, width, height, colors, accents, rng, spec):
 
 
 def _style_planks(grid, width, height, colors, accents, rng, spec):
-    board = max(3, height // 4)
+    board = max(4, height // 4)
     for y in range(height):
         board_index = y // board
         tint = (board_index % 3) * 0.08
@@ -466,13 +492,16 @@ def _style_planks(grid, width, height, colors, accents, rng, spec):
                 grid[y][x] = color
             continue
         for x in range(width):
+            # Grain follows the board, not an 11/13-pixel modulo lattice.
             grain = 0.0
-            if (x * 7 + board_index * 3) % 11 == 0:
-                grain = -0.22
-            elif (x * 5 + board_index) % 13 == 0:
-                grain = 0.18
-            wave = 0.06 * math.sin((x + board_index) * 0.9)
-            grid[y][x] = _ramp(colors, _clamp(0.42 + tint + grain + wave + rng.uniform(-0.06, 0.06)))
+            sample = _hash01(x, board_index * 17, spec.seed + 11)
+            if sample > 0.90:
+                grain = -0.18
+            elif sample < 0.09:
+                grain = 0.12
+            wave = 0.04 * (_hash01(x // 2, y // 2, spec.seed + 5) - 0.5)
+            grid[y][x] = _ramp(colors, _clamp(0.42 + tint + grain + wave
+                                             + rng.uniform(-0.05, 0.05)))
     # board seams and nails
     for board_index in range(1, max(1, height // board)):
         y = board_index * board - 1
@@ -553,18 +582,24 @@ def _style_metal(grid, width, height, colors, accents, rng, spec):
 
 
 def _style_crystal(grid, width, height, colors, accents, rng, spec):
-    # Flat triangular facets: two offset band directions plus dark seams.
-    tones = (accents[2], accents[3], accents[1], accents[4])
+    # Faceted mineral: quantise a fractal field into hard tone planes, then
+    # draw ridged seams.  The old ``(x + y) // 4`` diagonals were a perfect
+    # repeating grid once the texture tiled.
+    field = _fbm(width, height, rng, cell=3.2, octaves=3)
+    fine = _fbm(width, height, rng, cell=1.4, octaves=2)
+    tones = (accents[1], accents[2], accents[3], accents[4])
+    edges = (accents[0], accents[-1])
     for y in range(height):
         for x in range(width):
-            band = ((x + y) // 4 + (x - y) // 7) % len(tones)
-            grid[y][x] = tones[band]
+            value = 0.62 * field[y][x] + 0.38 * fine[y][x]
+            grid[y][x] = tones[min(len(tones) - 1, int(value * len(tones)))]
     for y in range(height):
         for x in range(width):
-            if (x * 2 + y) % 6 == 0:
-                grid[y][x] = accents[0]
-    for x, y in ((3, 2), (4, 3), (5, 4), (10, 8), (11, 9), (6, 11), (7, 12)):
-        _put(grid, x, y, accents[-1])
+            ridge = abs(field[y][x] - 0.5) + abs(fine[y][x] - 0.5) * 0.4
+            if ridge < 0.055:
+                grid[y][x] = edges[0]
+            elif ridge > 0.46:
+                grid[y][x] = edges[1]
     for _ in range(max(2, width // 8)):
         x, y = rng.randrange(width), rng.randrange(height)
         _put(grid, x, y, accents[-1])
@@ -602,7 +637,7 @@ def _style_mushroom_cap(grid, width, height, colors, accents, rng, spec):
 
 def _style_mushroom_stem(grid, width, height, colors, accents, rng, spec):
     for x in range(width):
-        tint = 0.08 * math.sin(x * 1.3)
+        tint = 0.08 * (_hash01(x, 0, spec.seed + 13) - 0.5)
         for y in range(height):
             grid[y][x] = _ramp(colors, _clamp(0.48 + tint + rng.uniform(-0.10, 0.10)))
     for _ in range(max(2, width // 5)):
@@ -677,17 +712,26 @@ def _style_snow(grid, width, height, colors, accents, rng, spec):
 
 
 def _style_obsidian(grid, width, height, colors, accents, rng, spec):
+    # Obsidian is dark, but it still needs a readable purple sheen.  The old
+    # version only sampled the bottom third of an already-dark ramp, so the
+    # tile exported as near-black mush.
+    dark = palette(ensure_luma(spec.base, 0.24), 6)
+    sheen = palette(ensure_luma(spec.accent, 0.34), 5)
     field = _fbm(width, height, rng, cell=3.5, octaves=3)
+    fine = _fbm(width, height, rng, cell=1.5, octaves=2)
     for y in range(height):
         for x in range(width):
-            value = 0.10 + 0.35 * field[y][x]
-            grid[y][x] = _ramp(accents, value)
+            value = 0.28 + 0.55 * field[y][x] + 0.12 * fine[y][x]
+            color = _ramp(dark, _clamp(value))
+            if field[y][x] > 0.74 and fine[y][x] > 0.48:
+                color = _ramp(sheen, 0.55 + 0.3 * fine[y][x])
+            grid[y][x] = color
     for _ in range(max(3, width // 6)):
         x, y = rng.randrange(width), rng.randrange(height)
         length = rng.randint(2, max(3, width // 3))
         for step in range(length):
-            _put(grid, x + step, y - step, accents[-1])
-            _put(grid, x + step, y - step + 1, accents[0])
+            _put(grid, x + step, y - step, sheen[-1])
+            _put(grid, x + step, y - step + 1, dark[0])
 
 
 def _style_glow(grid, width, height, colors, accents, rng, spec):
@@ -916,7 +960,13 @@ class _ItemCanvas:
                     self.grid[y][x] = slot
 
     def bevel(self) -> None:
-        """Light from the top-left, shadow bottom-right, for visible depth."""
+        """Light from the top-left, shadow bottom-right, for visible depth.
+
+        Only shade an edge when the shape is actually thick enough: a 1-px
+        blade or string has transparent pixels on both sides, and the old
+        rule turned the whole stroke into highlight/shadow, which combined
+        with :meth:`outline` into the "double ring" look.
+        """
         source = [row[:] for row in self.grid]
         for y in range(self.size):
             for x in range(self.size):
@@ -927,9 +977,11 @@ class _ItemCanvas:
                 left = source[y][x - 1] if x > 0 else 0
                 bottom = source[y + 1][x] if y + 1 < self.size else 0
                 right = source[y][x + 1] if x + 1 < self.size else 0
-                if top == 0 or left == 0:
+                lit = (top == 0 and bottom != 0) or (left == 0 and right != 0)
+                shaded = (bottom == 0 and top != 0) or (right == 0 and left != 0)
+                if lit:
                     self.grid[y][x] = _SLOT_HIGHLIGHT if slot in (_SLOT_BASE, _SLOT_LIGHT) else _SLOT_ACCENT_LIGHT
-                elif bottom == 0 or right == 0:
+                elif shaded:
                     self.grid[y][x] = _SLOT_DARK if slot in (_SLOT_BASE, _SLOT_DARK) else _SLOT_ACCENT_DARK
 
     def outline(self, slot: int = _SLOT_OUTLINE) -> None:
@@ -980,6 +1032,7 @@ def _point_in_poly(px: float, py: float, points: list[tuple[float, float]]) -> b
 
 
 _ITEM_KEYWORDS = (
+    ("block", "block"),
     ("helmet", "helmet"), ("hood", "helmet"),
     ("chestplate", "chestplate"), ("robe", "chestplate"),
     ("leggings", "leggings"), ("pants", "leggings"),
@@ -1023,6 +1076,11 @@ def _item_kind(kind: str) -> str:
         if key in value:
             return mapped
     return value if value in _ITEM_DRAW else "box"
+
+
+def infer_item_kind(name: str) -> str:
+    """Resolve an item name/path to a drawable category (public wrapper)."""
+    return _item_kind(name)
 
 
 _MATERIAL_COLORS: tuple[tuple[str, str], ...] = (
@@ -1336,9 +1394,14 @@ def generate_item(path: Path, kind: str = "ingot", *, base: str | None = None,
     Image, _ = _pil()
     size = max(8, min(64, int(size)))
     rng = random.Random(seed or 1)
-    base = base or material_color(kind)
-    original = base
     category = _item_kind(kind)
+    if base is None:
+        if category == "block":
+            stem = str(kind or "").rsplit("/", 1)[-1]
+            base = block_color(stem, infer_block_style(stem))
+        else:
+            base = material_color(kind)
+    original = base
     tinted = not accent or _is_light_tint(str(accent), base)
     if category in _TOOL_CATEGORIES and tinted:
         metal = ensure_luma(base, 0.42)
@@ -1735,10 +1798,23 @@ def _draw_seed(canvas: _ItemCanvas, rng: random.Random) -> None:
 
 
 def _draw_box(canvas: _ItemCanvas, rng: random.Random) -> None:
-    canvas.rect(4, 4, 11, 11, _SLOT_BASE)
-    canvas.line(4, 4, 11, 4, _SLOT_LIGHT)
-    canvas.line(4, 4, 4, 11, _SLOT_LIGHT)
-    canvas.put(10, 10, _SLOT_DARK)
+    """Isometric cube for block items.
+
+    The old fallback was a flat 8x8 square with a highlight, so every unknown
+    block item in the inventory looked like the same grey button.  Three
+    faces read as a block even at 16 px.
+    """
+    canvas.poly([(8, 1), (15, 5), (8, 9), (1, 5)], _SLOT_LIGHT)
+    canvas.poly([(1, 5), (8, 9), (8, 15), (1, 11)], _SLOT_BASE)
+    canvas.poly([(15, 5), (15, 11), (8, 15), (8, 9)], _SLOT_DARK)
+    canvas.line(1, 5, 8, 9, _SLOT_OUTLINE)
+    canvas.line(15, 5, 8, 9, _SLOT_OUTLINE)
+    canvas.line(8, 9, 8, 15, _SLOT_OUTLINE)
+    for _ in range(5):
+        x = rng.randint(2, 14)
+        y = rng.randint(3, 13)
+        if canvas.get(x, y) not in (0, _SLOT_OUTLINE):
+            canvas.put(x, y, _SLOT_ACCENT_DARK if rng.random() < 0.5 else _SLOT_BASE)
 
 
 def _draw_arrow(canvas: _ItemCanvas, rng: random.Random) -> None:
@@ -1944,6 +2020,7 @@ _ITEM_DRAW = {
     "meat": _draw_meat,
     "hide": _draw_hide,
     "coin": _draw_coin,
+    "block": _draw_box,
     "box": _draw_box,
 }
 
@@ -1968,6 +2045,58 @@ _HUMANOID_BOXES = [
     {"part": "left_pants", "uv": (0, 48), "size": (4, 12, 4)},
 ]
 
+# 64x64 quadruped atlas.  Every box footprint fits inside the canvas:
+#   head 0..32 x 0..16, body 16..56 x 20..38, legs 0..24 x 20..49,
+#   tail 40..60 x 40..50, wings 38..56 x 0..19.
+_QUADRUPED_BOXES = [
+    {"part": "head", "uv": (0, 0), "size": (8, 8, 8)},
+    {"part": "body", "uv": (16, 20), "size": (8, 6, 12)},
+    {"part": "tail", "uv": (40, 40), "size": (2, 2, 8)},
+    {"part": "leg_fl", "uv": (0, 20), "size": (3, 10, 3)},
+    {"part": "leg_fr", "uv": (12, 20), "size": (3, 10, 3)},
+    {"part": "leg_bl", "uv": (0, 36), "size": (3, 10, 3)},
+    {"part": "leg_br", "uv": (12, 36), "size": (3, 10, 3)},
+    {"part": "ear_l", "uv": (32, 0), "size": (2, 2, 1)},
+    {"part": "ear_r", "uv": (32, 4), "size": (2, 2, 1)},
+    {"part": "wing_l", "uv": (38, 0), "size": (8, 8, 1)},
+    {"part": "wing_r", "uv": (38, 10), "size": (8, 8, 1)},
+]
+
+ENTITY_LAYOUTS = {
+    "humanoid": _HUMANOID_BOXES,
+    "biped": _HUMANOID_BOXES,
+    "quadruped": _QUADRUPED_BOXES,
+}
+
+
+def entity_boxes(layout: str = "humanoid", *, variant: str = "") -> list[dict]:
+    """Return a copy of the UV table for ``layout``.
+
+    ``winged`` quadruped variants drop the wing boxes only if they are not
+    requested; the default keeps them so a caller can paint wings without
+    rewriting the atlas layout.
+    """
+    key = (layout or "humanoid").lower()
+    if key not in ENTITY_LAYOUTS:
+        raise ValueError(
+            f"未知实体布局「{layout}」。可用布局：humanoid、biped、quadruped，"
+            "或使用 boxes 自定义部件。"
+        )
+    boxes = [dict(box) for box in ENTITY_LAYOUTS[key]]
+    if key == "quadruped" and variant and "wing" not in variant.lower() \
+            and "winged" not in variant.lower():
+        boxes = [box for box in boxes if not str(box.get("part", "")).startswith("wing")]
+    return boxes
+
+
+def _box_fits(box: dict, width: int, height: int) -> bool:
+    try:
+        u, v = int(box["uv"][0]), int(box["uv"][1])
+        w, h, d = (int(item) for item in box["size"])
+    except (KeyError, IndexError, TypeError, ValueError):
+        return False
+    return 0 <= u and 0 <= v and u + 2 * d + 2 * w <= width and v + d + h <= height
+
 
 def generate_entity(path: Path, *, layout: str = "humanoid", base: str = "#8a8a8a",
                     accent: str = "#5a3fbf", seed: int = 0, size: tuple[int, int] = (64, 64),
@@ -1976,15 +2105,32 @@ def generate_entity(path: Path, *, layout: str = "humanoid", base: str = "#8a8a8
     """Render an entity UV atlas, not a front-view illustration.
 
     ``layout="humanoid"`` uses the vanilla 64x64 player skin layout.
-    ``layout="boxes"``/``boxes`` paints arbitrary model boxes using the
-    vanilla cube UV convention: top/bottom/right/front/left/back.
+    ``layout="quadruped"`` uses the built-in four-legged layout.
+    ``layout="boxes"`` paints the caller's boxes with the vanilla cube UV
+    convention: top/bottom/right/front/left/back.
+
+    The atlas is always painted at the layout's native resolution (64x64 for
+    the built-in layouts) and then nearest-neighbour scaled, so asking for a
+    128x128 skin gives a crisp 2x skin instead of sparse single pixels.
     """
     Image, _ = _pil()
-    width, height = int(size[0]), int(size[1])
+    requested = (max(16, int(size[0])), max(16, int(size[1])))
+    key = (layout or "humanoid").lower()
+    if boxes:
+        chosen = boxes
+        native = requested
+    else:
+        chosen = entity_boxes(key, variant=variant)
+        native = (64, 64) if key in {"humanoid", "biped", "quadruped"} else requested
+    width, height = native
     rng = random.Random(seed or 1)
     grid: list[list[str | None]] = _blank(width, height)
-    chosen = boxes if boxes else (_HUMANOID_BOXES if layout == "humanoid" else [])
-    for box in chosen or []:
+    for box in chosen:
+        # A custom box that runs past the canvas used to be silently clipped,
+        # producing half-painted limbs.  Skip it; callers get a usable atlas
+        # instead of a corrupt one.
+        if not _box_fits(box, width, height):
+            continue
         _paint_box(grid, width, height, box, base, accent, rng, variant)
 
     image = Image.new("RGBA", (width, height), (0, 0, 0, 0) if transparent else _rgba("#1b1b24", 255))
@@ -1993,6 +2139,8 @@ def generate_entity(path: Path, *, layout: str = "humanoid", base: str = "#8a8a8
         for x in range(width):
             if grid[y][x] is not None:
                 pixels[x, y] = _rgba(grid[y][x], 255)
+    if requested != native:
+        image = image.resize(requested, Image.Resampling.NEAREST)
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
     image.save(target, format="PNG", optimize=True)
@@ -2335,6 +2483,16 @@ def validate(path: Path, *, expected_size: tuple[int, int] | None = None, opaque
     if pairs and edge_ratio < 0.06:
         add("warning", f"贴图颜色过渡过于平坦（细节率 {edge_ratio:.2f}），看起来会像纯色块",
             "换用 stone/dirt/planks/ore 等结构化样式，或提高 base/accent 的明度差")
+
+    # A tile can have many colours and still be unreadable if they all sit in
+    # the same narrow brightness band (the old obsidian was the extreme case).
+    luma = [0.299 * pixel[0] + 0.587 * pixel[1] + 0.114 * pixel[2]
+            for pixel in opaque_pixels]
+    if luma:
+        spread = max(luma) - min(luma)
+        if spread < 18:
+            add("warning", f"明暗差只有 {spread:.0f}/255，模型上会糊成一块",
+                "提高 base 与 accent 的亮度差，或改用带高光/阴影的结构化样式")
 
     if opaque:
         translucent = sum(1 for item in pixels if item[3] != 255)

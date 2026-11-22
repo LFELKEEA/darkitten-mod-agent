@@ -939,9 +939,16 @@ class ModLibraryPage(QWidget):
         edit_model_btn = QPushButton("手动编辑模型")
         edit_model_btn.setObjectName("Primary")
         edit_model_btn.setToolTip(
-            "打开模型编辑器：在 3D 视图里选中立方体，修改位置、尺寸和贴图 UV。"
+            "打开模型编辑器：在 3D 视图里选中立方体，修改位置、尺寸、旋转、"
+            "轴心、外扩和贴图 UV。"
         )
         edit_model_btn.clicked.connect(lambda: self._edit_model(entry))
+        blank_model_btn = QPushButton("新建空白模型")
+        blank_model_btn.setObjectName("Ghost")
+        blank_model_btn.setToolTip(
+            "从零搭模型：先建一个空文件，再用旋转、轴心、外扩、镜像和阵列自己拼。"
+        )
+        blank_model_btn.clicked.connect(lambda: self._edit_model(entry, blank=True))
         model_btn = QPushButton("导入模型")
         model_btn.setObjectName("Ghost")
         model_btn.clicked.connect(lambda: self._import_model(entry))
@@ -973,6 +980,7 @@ class ModLibraryPage(QWidget):
             texture_btn.setEnabled(False)
             paint_btn.setEnabled(False)
             edit_model_btn.setEnabled(False)
+            blank_model_btn.setEnabled(False)
             regen_btn.setEnabled(False)
             open_model_btn.setEnabled(False)
             online_btn.setEnabled(False)
@@ -998,7 +1006,8 @@ class ModLibraryPage(QWidget):
         actions.addWidget(logic_btn, 1, 3)
         actions.addWidget(online_btn, 2, 0)
         actions.addWidget(delete_btn, 2, 1)
-        actions.addWidget(open_model_btn, 2, 2, 1, 2)
+        actions.addWidget(blank_model_btn, 2, 2)
+        actions.addWidget(open_model_btn, 2, 3)
         self.detail_layout.addLayout(actions)
         if hint:
             self.detail_layout.addWidget(tiny(hint))
@@ -1294,24 +1303,26 @@ class ModLibraryPage(QWidget):
         self._reload(select_id=str(entry["id"]))
         self.status_label.setText(f"贴图已更新：{entry.get('title')}")
 
-    def _edit_model(self, entry: dict) -> None:
+    def _edit_model(self, entry: dict, *, blank: bool = False) -> None:
         if self.root is None:
             return
         relative = str(entry.get("model") or "").strip()
         path = self._abspath(relative)
         if path is None or not path.is_file():
-            answer = QMessageBox.question(
-                self,
-                "新建模型",
-                "这个条目还没有模型文件。要新建一个可以直接手动编辑的起始模型吗？",
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.Yes,
-            )
-            if answer != QMessageBox.Yes:
-                return
+            if not blank:
+                answer = QMessageBox.question(
+                    self,
+                    "新建模型",
+                    "这个条目还没有模型文件。要新建一个可以直接手动编辑的起始模型吗？",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.Yes,
+                )
+                if answer != QMessageBox.Yes:
+                    return
             kind = str(entry.get("kind") or "item")
             modid = str(self._meta.get("modid") or "modid")
             key = str(entry.get("key") or "entry")
+            # 空白模式也要有一个合法的容器文件，先按起始模型建出来再清空列表。
             relative = starter_relative(kind, modid, key)
             try:
                 create_starter_model(
@@ -1333,7 +1344,9 @@ class ModLibraryPage(QWidget):
         if texture.isNull():
             texture = self._texture_image(entry) or self._fallback_image(entry, 64)
         try:
-            dialog = ModelEditorDialog(self.root, relative, texture, parent=self)
+            dialog = ModelEditorDialog(
+                self.root, relative, texture, parent=self, blank=blank
+            )
         except Exception as exc:  # noqa: BLE001 - 不支持的模型要说明原因
             QMessageBox.warning(
                 self,

@@ -756,6 +756,11 @@ class AgentWorker(QObject):
         # scaffold_project 可能在对话中途才创建工程；创建后必须把任务图
         # 重新绑到真实目录，否则 workflow_* 只改内存，不会落盘也不会拦验收。
         self._project_dirty = False
+        # 本轮是否改过需要编译的代码；成功编译前不允许直接以“已完成”收尾。
+        self._code_dirty = False
+        self._code_edits = 0
+        self._build_code_mark = 0
+        self._final_build_attempted = False
         # 桌面端创建 worker 后会置为 True，用于弹出方案选择窗口；
         # 无界面的调用（测试、脚本）默认自动采用第一个方案。
         self.ui_available = False
@@ -1463,6 +1468,7 @@ class AgentWorker(QObject):
         return run
 
     def _finalize_text(self, final_text: str) -> str:
+        final_text = self._completion_gate(final_text)
         if self.kernel is None or self.kernel.last_build_ok is None:
             return final_text
         try:
@@ -1470,6 +1476,60 @@ class AgentWorker(QObject):
         except Exception as exc:  # noqa: BLE001 - 验收输出失败不能吞掉主结果
             return final_text + f"\n\n（验收自检失败：{exc}）"
         return (final_text + "\n\n" + gate).strip() if gate else final_text
+
+    def _completion_gate(self, final_text: str) -> str:
+        """代码改动必须有成功编译支撑，不能只凭模型自称完成就收尾。"""
+        if not self._code_dirty:
+            return final_text
+        if self.project is None:
+            return final_text + (
+                "\n\n注意：本轮修改了代码，但当前没有打开的工程，无法编译验证。"
+            )
+        root = self.project.root
+        if not (
+            (root / "build.gradle").is_file()
+            or (root / "settings.gradle").is_file()
+        ):
+            return final_text + (
+                "\n\n注意：本轮修改了代码，但工程里没有 Gradle 配置，未做编译验证。"
+            )
+        if not self.config.auto_build:
+            return final_text + (
+                "\n\n注意：本轮修改了代码，但自动编译已关闭，未做编译验证。"
+                "确认完成前请先运行一次 build。"
+            )
+        last_ok = self.kernel.last_build_ok if self.kernel is not None else None
+        if last_ok is False and self._code_edits <= self._build_code_mark:
+            # 上一次 build 之后没有新改动，再跑一遍只会得到同样的错误。
+            output = (
+                str(getattr(self.kernel, "last_build_output", "") or "")
+                if self.kernel is not None
+                else ""
+            )
+            tail = output[-4000:]
+            if len(output) > len(tail):
+                tail = "（日志较长，只保留末尾）\n" + tail
+            return final_text + (
+                "\n\n## 未完成：最近一次编译没有通过\n"
+                "本轮改了代码，但之后没有成功编译记录，不能确认已经修好。\n\n"
+                + tail
+            ).strip()
+        if self._final_build_attempted:
+            return final_text
+        self._final_build_attempted = True
+        ok, report = self._auto_build()
+        if ok:
+            self._code_dirty = False
+            return (final_text + "\n\n## 完成前编译校验\n" + report[-3000:]).strip()
+        tail = report[-6000:]
+        if len(report) > len(tail):
+            tail = "（只保留末尾）\n" + tail
+        return final_text + (
+            "\n\n## 未完成：完成前编译校验失败\n"
+            "本轮改了代码，但 build 没有通过，这个任务还不能算完成。"
+            "请按下面的报错继续修，修好后重新编译。\n\n"
+            + tail
+        ).strip()
 
     def _stage_file(self, item: PendingFile, run: AgentRun) -> bool:
         if self.project is None:
@@ -1493,6 +1553,9 @@ class AgentWorker(QObject):
             else:
                 self.applied.append(relative)
                 run.applied = list(self.applied)
+                if _needs_build([relative]):
+                    self._code_dirty = True
+                    self._code_edits += 1
                 self._progress_at = time.monotonic()
                 self._readonly_streak = 0
                 self.status.emit(f"已自动写入 {relative}")
@@ -1523,6 +1586,7 @@ class AgentWorker(QObject):
     def _auto_build(self) -> tuple[bool, str]:
         self.status.emit("文件已写入，正在自动编译…")
         self._progress_at = time.monotonic()
+        self._build_code_mark = self._code_edits
         if self.kernel is not None:
             self.kernel.before_build("auto-build")
         try:
@@ -1540,6 +1604,7 @@ class AgentWorker(QObject):
                     + str(verdict.get("advice") or "已停止自动修复，建议人工介入。")
                 )
         if result.ok:
+            self._code_dirty = False
             self._emit_artifact(result)
         return result.ok, report
 
@@ -1549,6 +1614,7 @@ class AgentWorker(QObject):
             return False, ""
         self.status.emit("轮次结束前刷新编译结果…")
         self._progress_at = time.monotonic()
+        self._build_code_mark = self._code_edits
         try:
             result = _run_gradle(
                 self.project.root, "compileJava", 600, self._cancel, self._build_log
@@ -1557,6 +1623,8 @@ class AgentWorker(QObject):
             return False, f"收尾编译没有开始：{exc}"
         report = _build_report(result, root=self.project.root)
         self._save_build_report(report)
+        if result.ok:
+            self._code_dirty = False
         return result.ok, report
 
     def _emit_artifact(self, result: "BuildOutcome") -> None:
@@ -1774,7 +1842,8 @@ class AgentWorker(QObject):
                 force=bool(args.get("overwrite")),
                 use_mdk=bool(args.get("use_mdk", True)),
                 audit_after=bool(args.get("audit", True)),
-                build_after=bool(args.get("build")),
+                # 生成后默认直接编译：能编译才算真正可用的工程，避免“看起来生成成功”。
+                build_after=bool(args.get("build", True)),
                 verify_after=bool(args.get("verify")),
                 package_after=bool(args.get("package")),
                 progress=self._build_log,
@@ -1783,6 +1852,21 @@ class AgentWorker(QObject):
             return f"规格驱动生成失败：{exc}"
         target = Path(result["project"])
         self._progress_at = time.monotonic()
+        self._code_dirty = True
+        self._code_edits += 1
+        self._build_code_mark = self._code_edits
+        build_report = result.get("build") or {}
+        if build_report:
+            ok = bool(build_report.get("ok"))
+            if self.kernel is not None:
+                self.kernel.before_build("studio-generate")
+                self.kernel.record_build(
+                    ok, studio_bridge.build_mod.summarize(build_report)
+                )
+            if ok:
+                self._code_dirty = False
+            else:
+                result["_build_errors"] = build_report.get("errors") or []
         try:
             new_project = project_mod.load_project(target)
             new_project.save()
@@ -1792,6 +1876,13 @@ class AgentWorker(QObject):
             self.project = new_project
             self.project_created.emit(str(target))
         summary = studio_bridge.summarize(result)
+        errors = result.get("_build_errors") or []
+        if errors:
+            summary += "\n" + "\n".join(
+                f"- {item.get('file', '')}:{item.get('line', '')} "
+                f"{item.get('message', '')}"
+                for item in errors[:20]
+            )
         return (
             f"{summary}\n\n"
             f"工程目录：{target}\n"
@@ -2465,6 +2556,8 @@ class AgentWorker(QObject):
                 limit = min(max(limit, 60.0), 1800.0)
                 if self.kernel is not None and task == "build":
                     self.kernel.before_build("tool-build")
+                if task == "build":
+                    self._build_code_mark = self._code_edits
                 try:
                     result = _run_gradle(
                         self.project.root, task, limit, self._cancel, self._build_log
@@ -2479,6 +2572,8 @@ class AgentWorker(QObject):
                     if verdict.get("action") == "stop":
                         report += "\n\n" + str(verdict.get("advice") or "")
                 if task == "build":
+                    if result.ok:
+                        self._code_dirty = False
                     self._emit_artifact(result)
                 return report
             if name == "fetch_url":
@@ -2502,6 +2597,7 @@ class AgentWorker(QObject):
                     limit = int(float(args.get("timeout") or 1800))
                 except (TypeError, ValueError):
                     limit = 1800
+                self._build_code_mark = self._code_edits
                 report = studio_bridge.build_project(
                     self.project.root, timeout=min(max(limit, 120), 3600),
                     fix=bool(args.get("fix", True)), progress=self._build_log,
@@ -2518,6 +2614,8 @@ class AgentWorker(QObject):
                 if self.kernel is not None:
                     self.kernel.before_build("studio-build")
                     self.kernel.record_build(bool(report.get("ok")), summary)
+                if report.get("ok"):
+                    self._code_dirty = False
                 return summary
             if name == "studio_verify":
                 try:
@@ -3396,8 +3494,18 @@ class AgentWorker(QObject):
                         ),
                     )
                 else:
+                    # For item textures the file name is the stronger hint
+                    # ("twilight_sword" should be a sword even if the caller
+                    # passed style="magic").  A block-style word on an item
+                    # path means a block item, which needs the isometric icon.
+                    item_kind = stem_name
+                    if tool_texture.infer_item_kind(stem_name) == "box":
+                        if tool_texture.infer_item_kind(style) != "box":
+                            item_kind = style
+                        elif style in tool_texture.BLOCK_STYLES:
+                            item_kind = f"{stem_name}_block"
                     tool_texture.generate_item(
-                        target, style, base=base, accent=accent,
+                        target, item_kind, base=base, accent=accent,
                         size=size, seed=seed,
                     )
                 check = tool_texture.validate(target)
@@ -3788,6 +3896,7 @@ class AgentWorker(QObject):
         if name == "mcdev_build":
             if self.kernel is not None:
                 self.kernel.before_build("mcdev-build")
+            self._build_code_mark = self._code_edits
             code, output = mcdev.gradle.build(
                 root, log=self._probe_log, timeout=1800, cancel=self._cancel
             )
@@ -3795,6 +3904,8 @@ class AgentWorker(QObject):
             head = "编译成功（退出码 0）。" if code == 0 else f"编译失败（退出码 {code}）。"
             if self.kernel is not None:
                 self.kernel.record_build(code == 0, output)
+            if code == 0:
+                self._code_dirty = False
             self._progress_at = time.monotonic()
             return f"{head}\n\n{tail}"[:MAX_TOOL_RESULT]
         if name == "mcdev_gametest":

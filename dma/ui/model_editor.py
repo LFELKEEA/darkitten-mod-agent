@@ -16,6 +16,7 @@ from typing import Any
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QImage, QPainter, QPen
 from PySide6.QtWidgets import (
+    QComboBox,
     QDialog,
     QDoubleSpinBox,
     QFormLayout,
@@ -145,11 +146,18 @@ def load_document(path: Path) -> ModelDocument:
                     origin = _floats(cube.get("origin"), 3, (0, 0, 0))
                     size = _floats(cube.get("size"), 3, (1, 1, 1))
                     uv = _ints(cube.get("uv"), 2, (0, 0))
+                    rotation = _floats(cube.get("rotation"), 3, (0, 0, 0))
+                    pivot = cube.get("pivot")
                     box = Box(
                         str(bone.get("name") or "cube"),
                         (origin[0], origin[1], origin[2]),
                         (size[0], size[1], size[2]),
                         (uv[0], uv[1]),
+                        rotation=(rotation[0], rotation[1], rotation[2]),
+                        pivot=tuple(float(value) for value in pivot[:3])
+                        if isinstance(pivot, list) and len(pivot) >= 3
+                        else None,
+                        inflate=float(cube.get("inflate") or 0.0),
                     )
                     cubes.append(
                         EditableCube(box, cube, bone, (uv[0], uv[1]))
@@ -169,11 +177,35 @@ def load_document(path: Path) -> ModelDocument:
         end = _floats(element.get("to"), 3, (16, 16, 16))
         size = [end[i] - origin[i] for i in range(3)]
         uv = _element_uv(element)
+        rotation = (0.0, 0.0, 0.0)
+        pivot: tuple[float, float, float] | None = None
+        if fmt == "bbmodel":
+            values = element.get("rotation")
+            if isinstance(values, list) and len(values) >= 3:
+                rotation = (float(values[0]), float(values[1]), float(values[2]))
+            values = element.get("origin")
+            if isinstance(values, list) and len(values) >= 3:
+                pivot = (float(values[0]), float(values[1]), float(values[2]))
+        else:
+            values = element.get("rotation")
+            if isinstance(values, dict):
+                axis = str(values.get("axis") or "y").lower()
+                angle = float(values.get("angle") or 0.0)
+                euler = [0.0, 0.0, 0.0]
+                if axis in ("x", "y", "z"):
+                    euler["xyz".index(axis)] = angle
+                rotation = (euler[0], euler[1], euler[2])
+                values = values.get("origin")
+                if isinstance(values, list) and len(values) >= 3:
+                    pivot = (float(values[0]), float(values[1]), float(values[2]))
         box = Box(
             str(element.get("name") or f"cube{index + 1}"),
             (origin[0], origin[1], origin[2]),
             (size[0], size[1], size[2]),
             uv,
+            rotation=rotation,
+            pivot=pivot,
+            inflate=float(element.get("inflate") or 0.0),
         )
         cubes.append(EditableCube(box, element, None, uv))
     return ModelDocument(source, data, fmt, cubes)
@@ -182,6 +214,37 @@ def load_document(path: Path) -> ModelDocument:
 # --------------------------------------------------------------------------- #
 # 保存
 # --------------------------------------------------------------------------- #
+def _write_rotation(node: dict, box: Box, pivot_key: str) -> None:
+    """写入旋转与轴心；没有旋转时也保留显式轴心，方便以后再用。"""
+    rotation = [float(value) for value in box.rotation]
+    if any(abs(value) > 1e-6 for value in rotation):
+        node["rotation"] = rotation
+    else:
+        node.pop("rotation", None)
+    if box.pivot is not None:
+        node[pivot_key] = [float(value) for value in box.pivot]
+    elif any(abs(value) > 1e-6 for value in rotation):
+        node[pivot_key] = [float(value) for value in box.center()]
+    if box.inflate:
+        node["inflate"] = float(box.inflate)
+    else:
+        node.pop("inflate", None)
+
+
+def _java_rotation(box: Box) -> dict | None:
+    """Java 模型每个 element 只能单轴旋转，取绝对值最大的轴写回。"""
+    euler = [float(value) for value in box.rotation]
+    index = max(range(3), key=lambda item: abs(euler[item]))
+    if abs(euler[index]) <= 1e-6:
+        return None
+    pivot = box.pivot if box.pivot is not None else box.center()
+    return {
+        "origin": [float(value) for value in pivot],
+        "axis": "xyz"[index],
+        "angle": euler[index],
+    }
+
+
 def _apply_bb_node(node: dict, cube: EditableCube) -> None:
     box = cube.box
     node.setdefault("type", "cube")
@@ -193,6 +256,7 @@ def _apply_bb_node(node: dict, cube: EditableCube) -> None:
     ]
     if box.name:
         node["name"] = box.name
+    _write_rotation(node, box, "origin")
     if isinstance(node.get("uv"), list):
         node["uv"] = [int(box.u), int(box.v)]
     if node.get("box_uv") is not False:
@@ -226,6 +290,11 @@ def _apply_java_node(node: dict, cube: EditableCube) -> None:
         float(box.origin[1] + box.h),
         float(box.origin[2] + box.d),
     ]
+    rotation = _java_rotation(box)
+    if rotation is None:
+        node.pop("rotation", None)
+    else:
+        node["rotation"] = rotation
     if isinstance(node.get("uv"), list):
         node["uv"] = [int(box.u), int(box.v)]
     if isinstance(node.get("uv_offset"), list):
@@ -310,6 +379,7 @@ def _save_geo(doc: ModelDocument, cubes: list[EditableCube]) -> None:
         ]
         node["size"] = [float(box.w), float(box.h), float(box.d)]
         node["uv"] = [int(box.u), int(box.v)]
+        _write_rotation(node, box, "pivot")
         bone.setdefault("cubes", []).append(node)
 
 
@@ -447,13 +517,15 @@ class ModelEditorDialog(QDialog):
         relative: str,
         texture: QImage | None = None,
         parent: QWidget | None = None,
+        blank: bool = False,
     ) -> None:
         super().__init__(parent)
         self._root = Path(root)
         self._relative = str(relative)
         self._path = (self._root / self._relative).resolve()
         self._doc = load_document(self._path)
-        self._cubes = self._doc.cubes
+        # 空白模式只清空编辑列表，保存前不会改动原文件。
+        self._cubes = [] if blank else self._doc.cubes
         self._current = -1
         self._syncing = False
         self.saved = False
@@ -569,6 +641,40 @@ class ModelEditorDialog(QDialog):
         order.addStretch(1)
         panel_layout.addLayout(order)
 
+        shaping = QHBoxLayout()
+        self.mirror_btn = QPushButton("镜像 X")
+        self.mirror_btn.setObjectName("Ghost")
+        self.mirror_btn.setToolTip("沿模型中线（X = 0）复制一个左右对称的立方体")
+        self.mirror_btn.clicked.connect(self._mirror_x)
+        self.blank_btn = QPushButton("新建空白")
+        self.blank_btn.setObjectName("Ghost")
+        self.blank_btn.setToolTip("清空当前列表，从零开始搭一个模型；保存前不会改动文件")
+        self.blank_btn.clicked.connect(self._new_blank)
+        shaping.addWidget(self.mirror_btn)
+        shaping.addWidget(self.blank_btn)
+        shaping.addStretch(1)
+        panel_layout.addLayout(shaping)
+
+        array_row = QHBoxLayout()
+        self.array_count = QSpinBox()
+        self.array_count.setRange(2, 64)
+        self.array_count.setValue(3)
+        self.array_count.setFixedWidth(58)
+        self.array_count.setToolTip("阵列复制数量（含原来的立方体）")
+        self.array_axis = QComboBox()
+        self.array_axis.addItems(["X", "Y", "Z"])
+        self.array_axis.setFixedWidth(52)
+        self.array_btn = QPushButton("阵列复制")
+        self.array_btn.setObjectName("Ghost")
+        self.array_btn.setToolTip("沿所选轴按相邻边长排开复制，做出重复结构")
+        self.array_btn.clicked.connect(self._array_copy)
+        array_row.addWidget(QLabel("阵列"))
+        array_row.addWidget(self.array_count)
+        array_row.addWidget(self.array_axis)
+        array_row.addWidget(self.array_btn)
+        array_row.addStretch(1)
+        panel_layout.addLayout(array_row)
+
         self.fields = QFrame()
         self.fields.setObjectName("CardSoft")
         self.fields.setAttribute(Qt.WA_StyledBackground, True)
@@ -598,8 +704,25 @@ class ModelEditorDialog(QDialog):
         self.v_spin.valueChanged.connect(self._apply_fields)
         form.addRow("贴图 U / V", self._spin_row(self.u_spin, self.v_spin))
 
+        self.rx_spin = self._float_spin(-180, 180, step=5)
+        self.ry_spin = self._float_spin(-180, 180, step=5)
+        self.rz_spin = self._float_spin(-180, 180, step=5)
+        form.addRow("旋转 X / Y / Z", self._spin_row(self.rx_spin, self.ry_spin, self.rz_spin))
+
+        self.px_spin = self._float_spin(-512, 512)
+        self.py_spin = self._float_spin(-512, 512)
+        self.pz_spin = self._float_spin(-512, 512)
+        form.addRow("轴心 X / Y / Z", self._spin_row(self.px_spin, self.py_spin, self.pz_spin))
+
+        self.inflate_spin = self._float_spin(-8, 64)
+        self.inflate_spin.setToolTip("向外扩张的像素数；负数会收缩")
+        form.addRow("外扩", self.inflate_spin)
+
         for spin in (self.x_spin, self.y_spin, self.z_spin,
-                     self.w_spin, self.h_spin, self.d_spin):
+                     self.w_spin, self.h_spin, self.d_spin,
+                     self.rx_spin, self.ry_spin, self.rz_spin,
+                     self.px_spin, self.py_spin, self.pz_spin,
+                     self.inflate_spin):
             spin.valueChanged.connect(self._apply_fields)
         panel_layout.addWidget(self.fields)
 
@@ -614,9 +737,14 @@ class ModelEditorDialog(QDialog):
             "列表里的勾选框控制部件显隐；“只看选中”可以单独检查一个立方体。",
             "坐标单位是像素：16 = 1 格；位置指立方体最小角。",
             "修改 U/V 会同步移动贴图上的面；逐面 UV 模型会整体平移。",
+            "旋转单位是角度，绕「轴心」转动；轴心默认是立方体中心，可以手动改。",
+            "外扩会向四周撑开立方体，适合做外套、帽子或轮廓层。",
+            "「镜像 X」沿中线复制对称部件，「阵列复制」按边长连续排开，「新建空白」从零搭模型。",
         ]
         if self._doc.fmt == "geo":
             hints.append("Bedrock 立方体没有独立名称，名称跟随所属 bone。")
+        if self._doc.fmt == "java":
+            hints.append("Java 模型每个元素只支持单轴旋转，多轴旋转会取角度最大的轴写入；外扩不会导出。")
         if self._doc.fmt == "java" and not self._doc.cubes:
             hints.append("这个模型只有 parent，保存后会写入本地 elements，覆盖父模型的外观。")
         for text in hints:
@@ -641,11 +769,11 @@ class ModelEditorDialog(QDialog):
         layout.addLayout(footer)
 
     @staticmethod
-    def _float_spin(low: float, high: float) -> QDoubleSpinBox:
+    def _float_spin(low: float, high: float, step: float = 0.5) -> QDoubleSpinBox:
         spin = QDoubleSpinBox()
         spin.setRange(low, high)
         spin.setDecimals(2)
-        spin.setSingleStep(0.5)
+        spin.setSingleStep(step)
         spin.setFixedWidth(74)
         return spin
 
@@ -759,6 +887,14 @@ class ModelEditorDialog(QDialog):
         self.d_spin.setValue(box.d)
         self.u_spin.setValue(box.u)
         self.v_spin.setValue(box.v)
+        self.rx_spin.setValue(box.rotation[0])
+        self.ry_spin.setValue(box.rotation[1])
+        self.rz_spin.setValue(box.rotation[2])
+        pivot = box.rotation_pivot()
+        self.px_spin.setValue(pivot[0])
+        self.py_spin.setValue(pivot[1])
+        self.pz_spin.setValue(pivot[2])
+        self.inflate_spin.setValue(box.inflate)
         self._syncing = False
         if self.list.currentRow() != index:
             self.list.setCurrentRow(index)
@@ -783,6 +919,14 @@ class ModelEditorDialog(QDialog):
             max(0.01, self.d_spin.value()),
         )
         box.uv = (self.u_spin.value(), self.v_spin.value())
+        rotation = (self.rx_spin.value(), self.ry_spin.value(), self.rz_spin.value())
+        box.rotation = rotation
+        pivot = (self.px_spin.value(), self.py_spin.value(), self.pz_spin.value())
+        # 只有真的调过轴心、或者立方体已经有旋转时才落盘，避免普通改尺寸
+        # 把每个模型的 origin / pivot 都写出来。
+        if any(abs(value) > 1e-6 for value in rotation) or pivot != box.rotation_pivot():
+            box.pivot = pivot
+        box.inflate = self.inflate_spin.value()
         item = self.list.item(self._current)
         if item is not None:
             item.setText(self._item_text(self._current))
@@ -812,12 +956,17 @@ class ModelEditorDialog(QDialog):
             return
         source = self._cubes[self._current]
         box = source.box
+        px, py, pz = box.rotation_pivot()
         cube = EditableCube(
             Box(
                 f"{box.name}_copy",
                 (box.x + 2.0, box.y, box.z),
                 box.size,
                 box.uv,
+                dict(box.faces) if box.faces else None,
+                rotation=box.rotation,
+                pivot=(px + 2.0, py, pz),
+                inflate=box.inflate,
             ),
             None,
             source.bone,
@@ -846,12 +995,85 @@ class ModelEditorDialog(QDialog):
         )
         self._refresh_list(target)
 
+    def _mirror_x(self) -> None:
+        """沿 X = 0 镜像复制，做出左右对称的肢体或装饰。"""
+        if self._current < 0:
+            return
+        source = self._cubes[self._current]
+        box = source.box
+        px, py, pz = box.rotation_pivot()
+        mirrored = EditableCube(
+            Box(
+                f"{box.name}_mirror",
+                (-box.x - box.w, box.y, box.z),
+                box.size,
+                box.uv,
+                dict(box.faces) if box.faces else None,
+                rotation=(box.rotation[0], -box.rotation[1], -box.rotation[2]),
+                pivot=(-px, py, pz),
+                inflate=box.inflate,
+            ),
+            None,
+            source.bone,
+            box.uv,
+            source.visible,
+        )
+        self._cubes.insert(self._current + 1, mirrored)
+        self._refresh_list(self._current + 1)
+
+    def _array_copy(self) -> None:
+        """沿一个轴按边长连续复制，适合做栅栏、台阶、鳞片等重复结构。"""
+        if self._current < 0:
+            return
+        count = int(self.array_count.value())
+        axis = self.array_axis.currentIndex()
+        source = self._cubes[self._current]
+        box = source.box
+        step = [box.w, box.h, box.d][axis]
+        px, py, pz = box.rotation_pivot()
+        for index in range(1, count):
+            offset = step * index
+            origin = [box.x, box.y, box.z]
+            pivot = [px, py, pz]
+            origin[axis] += offset
+            pivot[axis] += offset
+            copy = EditableCube(
+                Box(
+                    f"{box.name}_{index + 1}",
+                    (origin[0], origin[1], origin[2]),
+                    box.size,
+                    box.uv,
+                    dict(box.faces) if box.faces else None,
+                    rotation=box.rotation,
+                    pivot=(pivot[0], pivot[1], pivot[2]),
+                    inflate=box.inflate,
+                ),
+                None,
+                source.bone,
+                box.uv,
+                source.visible,
+            )
+            self._cubes.insert(self._current + index, copy)
+        self._refresh_list(self._current + count - 1)
+
+    def _new_blank(self) -> None:
+        if self._cubes and QMessageBox.question(
+            self,
+            "新建空白模型",
+            "清空当前列表里的所有立方体，从零开始？\n保存前不会改动原文件。",
+        ) != QMessageBox.Yes:
+            return
+        self._cubes.clear()
+        self._refresh_list(-1)
+
     def _update_actions(self) -> None:
         has_selection = 0 <= self._current < len(self._cubes)
         self.copy_btn.setEnabled(has_selection)
         self.delete_btn.setEnabled(has_selection)
         self.solo_btn.setEnabled(has_selection)
         self.show_all_btn.setEnabled(bool(self._cubes))
+        self.mirror_btn.setEnabled(has_selection)
+        self.array_btn.setEnabled(has_selection)
         self.up_btn.setEnabled(has_selection and self._current > 0)
         self.down_btn.setEnabled(
             has_selection and self._current < len(self._cubes) - 1
@@ -859,6 +1081,13 @@ class ModelEditorDialog(QDialog):
 
     # -- 保存 ------------------------------------------------------------
     def _save(self) -> None:
+        if not self._cubes:
+            QMessageBox.warning(
+                self,
+                "没有立方体",
+                "模型里还没有立方体，先点击「添加」或「复制」搭出一个再保存。",
+            )
+            return
         for index, cube in enumerate(self._cubes):
             if cube.box.w <= 0 or cube.box.h <= 0 or cube.box.d <= 0:
                 QMessageBox.warning(

@@ -97,6 +97,9 @@ class Box:
     size: tuple[float, float, float]
     uv: tuple[int, int]
     faces: dict[str, QRect] | None = None
+    rotation: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    pivot: tuple[float, float, float] | None = None
+    inflate: float = 0.0
 
     @property
     def x(self) -> float:
@@ -129,6 +132,53 @@ class Box:
     @property
     def v(self) -> int:
         return self.uv[1]
+
+    def center(self) -> tuple[float, float, float]:
+        return (
+            self.origin[0] + self.size[0] / 2.0,
+            self.origin[1] + self.size[1] / 2.0,
+            self.origin[2] + self.size[2] / 2.0,
+        )
+
+    def rotation_pivot(self) -> tuple[float, float, float]:
+        return self.pivot if self.pivot is not None else self.center()
+
+
+def rotate_point(
+    point: tuple[float, float, float],
+    pivot: tuple[float, float, float],
+    rotation: tuple[float, float, float],
+) -> tuple[float, float, float]:
+    """Rotate a world point around ``pivot`` with Blockbench XYZ order."""
+    if not any(abs(float(value)) > 1e-6 for value in rotation):
+        return point
+    cx, cy, cz = (float(value) for value in pivot)
+    rx, ry, rz = (math.radians(float(value)) for value in rotation)
+    ax, sa = math.cos(rx), math.sin(rx)
+    ay, sy = math.cos(ry), math.sin(ry)
+    az, sz = math.cos(rz), math.sin(rz)
+    x, y, z = point[0] - cx, point[1] - cy, point[2] - cz
+    y, z = y * ax - z * sa, y * sa + z * ax
+    x, z = x * ay + z * sy, -x * sy + z * ay
+    x, y = x * az - y * sz, x * sz + y * az
+    return x + cx, y + cy, z + cz
+
+
+def box_corner_points(box: Box) -> list[tuple[float, float, float]]:
+    """Eight world-space corners after inflate + rotation."""
+    inflate = float(box.inflate or 0.0)
+    x0, y0, z0 = box.x - inflate, box.y - inflate, box.z - inflate
+    x1 = box.x + box.w + inflate
+    y1 = box.y + box.h + inflate
+    z1 = box.z + box.d + inflate
+    pivot = box.rotation_pivot()
+    rotation = box.rotation or (0.0, 0.0, 0.0)
+    return [
+        rotate_point((x, y, z), pivot, rotation)
+        for x in (x0, x1)
+        for y in (y0, y1)
+        for z in (z0, z1)
+    ]
 
 
 HUMANOID_BOXES = [
@@ -897,12 +947,14 @@ class ModelView(QWidget):
         if visible:
             boxes = visible
         if boxes:
-            x_low = min(box.x for box in boxes)
-            x_high = max(box.x + box.w for box in boxes)
-            y_low = min(box.y for box in boxes)
-            y_high = max(box.y + box.h for box in boxes)
-            z_low = min(box.z for box in boxes)
-            z_high = max(box.z + box.d for box in boxes)
+            # 旋转过的立方体不能再拿 origin/size 当包围盒，必须按八个角点取。
+            points = [point for box in boxes for point in box_corner_points(box)]
+            xs = [point[0] for point in points]
+            ys = [point[1] for point in points]
+            zs = [point[2] for point in points]
+            x_low, x_high = min(xs), max(xs)
+            y_low, y_high = min(ys), max(ys)
+            z_low, z_high = min(zs), max(zs)
             center = (
                 (x_low + x_high) / 2,
                 (y_low + y_high) / 2,
@@ -946,15 +998,16 @@ class ModelView(QWidget):
         self, box: Box
     ) -> dict[str, tuple[tuple[float, float, float], ...]]:
         """六个面的世界坐标顶点，按贴图的「左上、右上、右下、左下」排。"""
-        x0, y0, z0 = box.x, box.y, box.z
-        x1, y1, z1 = x0 + box.w, y0 + box.h, z0 + box.d
+        # 角点顺序：x0/x1 外层，y0/y1 中层，z0/z1 内层。
+        points = box_corner_points(box)
+        # 旋转只会改变坐标，不会改变拓扑；下标始终对应原来的八个角。
         return {
-            "top": ((x0, y1, z0), (x1, y1, z0), (x1, y1, z1), (x0, y1, z1)),
-            "bottom": ((x0, y0, z1), (x1, y0, z1), (x1, y0, z0), (x0, y0, z0)),
-            "front": ((x0, y1, z1), (x1, y1, z1), (x1, y0, z1), (x0, y0, z1)),
-            "back": ((x1, y1, z0), (x0, y1, z0), (x0, y0, z0), (x1, y0, z0)),
-            "right": ((x1, y1, z1), (x1, y1, z0), (x1, y0, z0), (x1, y0, z1)),
-            "left": ((x0, y1, z0), (x0, y1, z1), (x0, y0, z1), (x0, y0, z0)),
+            "top": (points[2], points[6], points[7], points[3]),
+            "bottom": (points[1], points[5], points[4], points[0]),
+            "front": (points[3], points[7], points[5], points[1]),
+            "back": (points[6], points[2], points[0], points[4]),
+            "right": (points[7], points[6], points[4], points[5]),
+            "left": (points[2], points[3], points[1], points[0]),
         }
 
     def _face_transform(self, quad: list[QPointF], rect: QRect) -> QTransform:
@@ -965,12 +1018,27 @@ class ModelView(QWidget):
         vy = (quad[3].y() - p0.y()) / max(1, rect.height())
         return QTransform(ux, uy, vx, vy, p0.x(), p0.y())
 
-    def _face_visible(self, name: str) -> bool:
-        normal = _FACE_NORMALS[name]
+    def _face_visible(self, quad, center) -> bool:
+        """旋转后的面法线朝外且朝向观察者时才绘制。"""
+        p0, p1, p3 = quad[0], quad[1], quad[3]
+        ux, uy, uz = p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]
+        vx, vy, vz = p3[0] - p0[0], p3[1] - p0[1], p3[2] - p0[2]
+        nx = uy * vz - uz * vy
+        ny = uz * vx - ux * vz
+        nz = ux * vy - uy * vx
+        length = math.sqrt(nx * nx + ny * ny + nz * nz)
+        if length <= 1e-9:
+            return False
+        # 叉积方向跟顶点绕向有关，用「面心 - 盒心」把它统一到朝外。
+        fx = sum(point[0] for point in quad) / 4.0 - center[0]
+        fy = sum(point[1] for point in quad) / 4.0 - center[1]
+        fz = sum(point[2] for point in quad) / 4.0 - center[2]
+        if nx * fx + ny * fy + nz * fz < 0.0:
+            nx, ny, nz = -nx, -ny, -nz
+        nx, ny, nz = nx / length, ny / length, nz / length
         yaw, pitch = self._camera()
         ca, sa = math.cos(yaw), math.sin(yaw)
         ce, se = math.cos(pitch), math.sin(pitch)
-        nx, ny, nz = normal
         x1 = nx * ca + nz * sa
         z1 = -nx * sa + nz * ca
         z2 = ny * se + z1 * ce
@@ -990,13 +1058,21 @@ class ModelView(QWidget):
                 continue
             rects = self._face_rects(box)
             quads = self._box_quads(box)
+            center = box.center()
+            if box.rotation != (0.0, 0.0, 0.0):
+                corners_all = box_corner_points(box)
+                center = (
+                    sum(point[0] for point in corners_all) / 8.0,
+                    sum(point[1] for point in corners_all) / 8.0,
+                    sum(point[2] for point in corners_all) / 8.0,
+                )
             for face_order, name in enumerate(_FACE_ORDER):
-                if not self._face_visible(name):
+                corners = quads[name]
+                if not self._face_visible(corners, center):
                     continue
                 rect = full_face if self._kind == "block" else rects.get(name)
                 if rect is None or rect.width() <= 0 or rect.height() <= 0:
                     continue
-                corners = quads[name]
                 depth = sum(
                     self._camera_point(*corner)[2] for corner in corners
                 ) / 4.0
@@ -2202,37 +2278,6 @@ def model_kind(path: Path) -> str:
     return "entity"
 
 
-def _rotated_bounds(
-    frm: list[float],
-    to: list[float],
-    origin: list[float],
-    rotation: list[float],
-) -> tuple[list[float], list[float]]:
-    """把绕 origin 旋转的 Blockbench 立方体收拢成轴对齐包围盒。"""
-    if not any(abs(float(value)) > 1e-6 for value in rotation):
-        return frm, to
-    cx, cy, cz = (float(value) for value in origin)
-    rx, ry, rz = (math.radians(float(value)) for value in rotation)
-    cx_, sx_ = math.cos(rx), math.sin(rx)
-    cy_, sy_ = math.cos(ry), math.sin(ry)
-    cz_, sz_ = math.cos(rz), math.sin(rz)
-
-    def rotate(point: tuple[float, float, float]) -> tuple[float, float, float]:
-        x, y, z = point[0] - cx, point[1] - cy, point[2] - cz
-        y, z = y * cx_ - z * sx_, y * sx_ + z * cx_
-        x, z = x * cy_ + z * sy_, -x * sy_ + z * cy_
-        x, y = x * cz_ - y * sz_, x * sz_ + y * cz_
-        return x + cx, y + cy, z + cz
-
-    corners = [
-        rotate((x, y, z))
-        for x in (frm[0], to[0])
-        for y in (frm[1], to[1])
-        for z in (frm[2], to[2])
-    ]
-    low = [min(corner[i] for corner in corners) for i in range(3)]
-    high = [max(corner[i] for corner in corners) for i in range(3)]
-    return low, high
 
 
 def parse_model(path: Path) -> list[Box]:
@@ -2247,12 +2292,23 @@ def parse_model(path: Path) -> list[Box]:
                     origin = cube.get("origin") or [0, 0, 0]
                     size = cube.get("size") or [1, 1, 1]
                     uv = cube.get("uv") or [0, 0]
+                    rotation = cube.get("rotation") or [0, 0, 0]
+                    pivot = cube.get("pivot")
                     boxes.append(
                         Box(
                             str(bone.get("name") or "cube"),
                             (float(origin[0]), float(origin[1]), float(origin[2])),
                             (float(size[0]), float(size[1]), float(size[2])),
                             (int(uv[0]), int(uv[1])),
+                            rotation=(
+                                float(rotation[0]),
+                                float(rotation[1]),
+                                float(rotation[2]),
+                            ),
+                            pivot=tuple(float(value) for value in pivot[:3])
+                            if isinstance(pivot, list) and len(pivot) >= 3
+                            else None,
+                            inflate=float(cube.get("inflate") or 0.0),
                         )
                     )
         return boxes
@@ -2266,25 +2322,31 @@ def parse_model(path: Path) -> list[Box]:
             element_type = str(element.get("type") or "cube").lower()
             if element_type != "cube":
                 continue
-            frm = list(element.get("from") or [0, 0, 0])
-            to = list(element.get("to") or [16, 16, 16])
+            frm = [float(value) for value in element.get("from") or [0, 0, 0]]
+            to = [float(value) for value in element.get("to") or [16, 16, 16]]
             inflate = float(element.get("inflate") or 0.0)
-            if inflate:
-                frm = [float(value) - inflate for value in frm]
-                to = [float(value) + inflate for value in to]
+            pivot: tuple[float, float, float] | None = None
+            rotation = (0.0, 0.0, 0.0)
             if bbmodel:
                 origin = element.get("origin")
-                rotation = element.get("rotation")
-                frm, to = _rotated_bounds(
-                    [float(value) for value in frm],
-                    [float(value) for value in to],
-                    [float(value) for value in origin]
-                    if isinstance(origin, list) and len(origin) >= 3
-                    else [0.0, 0.0, 0.0],
-                    [float(value) for value in rotation]
-                    if isinstance(rotation, list) and len(rotation) >= 3
-                    else [0.0, 0.0, 0.0],
-                )
+                if isinstance(origin, list) and len(origin) >= 3:
+                    pivot = tuple(float(value) for value in origin[:3])
+                values = element.get("rotation")
+                if isinstance(values, list) and len(values) >= 3:
+                    rotation = tuple(float(value) for value in values[:3])
+            else:
+                # Java 模型只支持单轴 ±45°：{"origin": [...], "axis": "x", "angle": 45}
+                values = element.get("rotation")
+                if isinstance(values, dict):
+                    axis = str(values.get("axis") or "y").lower()
+                    angle = float(values.get("angle") or 0.0)
+                    euler = [0.0, 0.0, 0.0]
+                    if axis in ("x", "y", "z"):
+                        euler["xyz".index(axis)] = angle
+                    rotation = (euler[0], euler[1], euler[2])
+                    origin = values.get("origin")
+                    if isinstance(origin, list) and len(origin) >= 3:
+                        pivot = tuple(float(value) for value in origin[:3])
             size = [float(to[i]) - float(frm[i]) for i in range(3)]
             faces = element.get("faces") or {}
             uv = element.get("uv_offset") or [0, 0]
@@ -2327,6 +2389,9 @@ def parse_model(path: Path) -> list[Box]:
                     (max(1.0, size[0]), max(1.0, size[1]), max(1.0, size[2])),
                     (uv[0], uv[1]),
                     face_rects or None,
+                    rotation=rotation,
+                    pivot=pivot,
+                    inflate=inflate,
                 )
             )
         return boxes

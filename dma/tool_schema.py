@@ -156,13 +156,14 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
          "transparent": {"type": "boolean", "description": "背景透明（树叶/花/玻璃等）"}},
         ["path"]),
     _fn("entity_texture",
-        "按实体模型的真实 UV 生成皮肤图，而不是正面立绘。layout=humanoid 使用原版 "
-        "64x64 玩家皮肤布局（头/帽/身体/手臂/腿/外套/袖/裤），会自动画眼睛、领口、"
-        "腰带、袖口、靴子；自定义模型用 layout=boxes 并传 boxes（每项 uv:[u,v]、"
+        "按实体模型的真实 UV 生成皮肤图，而不是正面立绘。layout=humanoid（同 biped）"
+        "使用原版 64x64 玩家皮肤布局（头/帽/身体/手臂/腿/外套/袖/裤），会自动画眼睛、"
+        "领口、腰带、袖口、靴子；四足生物用 layout=quadruped（头/身体/尾巴/四条腿/耳/翅膀，"
+        "同样是 64x64 图集）；自定义模型用 layout=boxes 并传 boxes（每项 uv:[u,v]、"
         "size:[w,h,d]、part 名称），按原版立方体六面 UV 展开绘制。生成的图会直接"
-        "对应 CubeListBuilder.texOffs 的采样区域。",
+        "对应 CubeListBuilder.texOffs 的采样区域；大于 64 的尺寸会先按 64 绘制再整数放大。",
         {"path": _PATH,
-         "layout": {"type": "string", "enum": ["humanoid", "boxes"]},
+         "layout": {"type": "string", "enum": ["humanoid", "biped", "quadruped", "boxes"]},
          "base": {"type": "string"}, "accent": {"type": "string"},
          "seed": {"type": "integer"},
          "variant": {"type": "string",

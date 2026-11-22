@@ -68,6 +68,42 @@ class BuildToolTests(TempDataCase):
         self.assertEqual(run.call_args.kwargs["timeout"], 900)
         self.assertIs(run.call_args.kwargs["cancel"], self.worker._cancel)
 
+    def test_completion_gate_builds_after_code_edit(self) -> None:
+        self.assertTrue((self.project.root / "build.gradle").is_file())
+        self.worker._code_dirty = True
+        self.worker._code_edits = 1
+        self.worker._build_code_mark = 0
+        with mock.patch.object(
+            self.worker,
+            "_auto_build",
+            return_value=(True, "编译成功（退出码 0）。\n产物：test.jar"),
+        ) as build:
+            text = self.worker._finalize_text("模组已经完成。")
+        build.assert_called_once()
+        self.assertIn("完成前编译校验", text)
+        self.assertIn("编译成功", text)
+        self.assertFalse(self.worker._code_dirty)
+
+    def test_completion_gate_reports_failed_build(self) -> None:
+        self.worker._code_dirty = True
+        self.worker._code_edits = 1
+        self.worker._build_code_mark = 0
+        with mock.patch.object(
+            self.worker,
+            "_auto_build",
+            return_value=(False, "编译失败（退出码 1）。\nfoo.java:3 找不到符号"),
+        ):
+            text = self.worker._finalize_text("模组已经完成。")
+        self.assertIn("未完成：完成前编译校验失败", text)
+        self.assertIn("找不到符号", text)
+        self.assertTrue(self.worker._code_dirty)
+
+    def test_completion_gate_skips_clean_run(self) -> None:
+        with mock.patch.object(self.worker, "_auto_build") as build:
+            text = self.worker._finalize_text("只是一次问答。")
+        build.assert_not_called()
+        self.assertEqual(text, "只是一次问答。")
+
     def test_build_tool_clamps_timeout(self) -> None:
         with mock.patch(
             "dma.mcdev.gradle.run_gradle", return_value=(0, "BUILD SUCCESSFUL")

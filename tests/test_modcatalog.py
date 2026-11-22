@@ -467,8 +467,12 @@ class ModCatalogTests(TempDataCase):
         )
         boxes = parse_model(bb)
         self.assertEqual(len(boxes), 1)
-        self.assertAlmostEqual(boxes[0].w, 4.0)
-        self.assertAlmostEqual(boxes[0].d, 16.0)
+        # 现在保留原始尺寸和旋转，交给 3D 视图按旋转角点渲染，
+        # 不再把旋转压平成轴对齐包围盒。
+        self.assertAlmostEqual(boxes[0].w, 16.0)
+        self.assertAlmostEqual(boxes[0].d, 4.0)
+        self.assertEqual(boxes[0].rotation, (0.0, 90.0, 0.0))
+        self.assertEqual(boxes[0].pivot, (8.0, 0.0, 2.0))
         self.assertEqual(boxes[0].uv, (4, 8))
         self.assertEqual(model_kind(bb), "custom")
         images = model_texture_images(bb)
@@ -669,8 +673,11 @@ class ModLibraryPageTests(TempDataCase):
         created: dict[str, str] = {}
 
         class FakeDialog:
-            def __init__(self, root, relative, texture=None, parent=None) -> None:
+            def __init__(
+                self, root, relative, texture=None, parent=None, blank=False
+            ) -> None:
                 created["relative"] = relative
+                created["blank"] = blank
 
             def exec(self) -> int:
                 return 0

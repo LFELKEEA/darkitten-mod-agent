@@ -808,8 +808,10 @@ class AssetToolTests(TempDataCase):
         self.assertEqual(java["texture_size"], [64, 64])
         self.assertEqual(java["textures"]["0"], "demo:block/chair")
         self.assertNotIn("uv", java["elements"][0])
+        # Java UVs are 0..16 and scale by texture_size/16; the 64px atlas
+        # rectangle (16,16)-(32,20) becomes (4,4)-(8,5).
         self.assertEqual(
-            java["elements"][0]["faces"]["north"]["uv"], [16, 16, 32, 20]
+            java["elements"][0]["faces"]["north"]["uv"], [4.0, 4.0, 8.0, 5.0]
         )
 
     def test_blockbench_preview_samples_texture(self) -> None:

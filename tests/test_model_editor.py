@@ -79,6 +79,9 @@ class ModelDocumentTests(TempDataCase):
         doc = load_document(path)
         self.assertEqual(doc.fmt, "bbmodel")
         self.assertEqual(len(doc.cubes), 1)
+        # 旋转和轴心必须原样保留，不能再压平成轴对齐包围盒。
+        self.assertEqual(doc.cubes[0].box.rotation, (0.0, 45.0, 0.0))
+        self.assertEqual(doc.cubes[0].box.pivot, (4.0, 4.0, 4.0))
 
         box = doc.cubes[0].box
         box.origin = (2.0, 1.0, 0.0)
@@ -92,8 +95,30 @@ class ModelDocumentTests(TempDataCase):
         node = next(item for item in saved["elements"] if item.get("name") == "body0")
         self.assertEqual(node["from"], [2.0, 1.0, 0.0])
         self.assertEqual(node["to"], [8.0, 6.0, 4.0])
-        self.assertEqual(node["rotation"], [0, 45, 0])
+        self.assertEqual(node["rotation"], [0.0, 45.0, 0.0])
+        self.assertEqual(node["origin"], [4.0, 4.0, 4.0])
         self.assertEqual(node["faces"]["north"]["uv"], [4, 2, 12, 10])
+
+    def test_parse_model_keeps_rotation_and_inflate(self) -> None:
+        from dma.ui.paint_page import parse_model
+
+        root = self.tmp / "proj"
+        path = root / "src/main/resources/assets/demo/geo/prop.bbmodel"
+        write_bbmodel(path)
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data["elements"][0]["rotation"] = [0, 30, 0]
+        data["elements"][0]["origin"] = [4, 4, 4]
+        data["elements"][0]["inflate"] = 1.5
+        path.write_text(json.dumps(data), encoding="utf-8")
+
+        parsed = parse_model(path)
+        self.assertEqual(len(parsed), 1)
+        self.assertEqual(parsed[0].rotation, (0.0, 30.0, 0.0))
+        self.assertEqual(parsed[0].pivot, (4.0, 4.0, 4.0))
+        self.assertEqual(parsed[0].inflate, 1.5)
+        # inflate 不再直接改 from/to，而是在渲染时扩张八个角点。
+        self.assertEqual(parsed[0].origin, (0.0, 0.0, 0.0))
+        self.assertEqual(parsed[0].size, (8.0, 8.0, 8.0))
 
     def test_geo_adds_cube_to_same_bone(self) -> None:
         root = self.tmp / "proj"
@@ -211,6 +236,44 @@ class ModelEditorDialogTests(TempDataCase):
         self.assertEqual(len(saved["elements"]), 2)
         self.assertEqual(saved["elements"][0]["from"], [3.5, 0.0, 0.0])
         self.assertEqual(saved["elements"][0]["to"], [13.5, 8.0, 8.0])
+
+    def test_dialog_mirror_rotation_and_array(self) -> None:
+        from dma.ui.model_editor import ModelEditorDialog
+
+        root = self.tmp / "proj"
+        relative = "src/main/resources/assets/demo/geo/prop.bbmodel"
+        write_bbmodel(root / relative)
+        dialog = ModelEditorDialog(root, relative)
+        try:
+            self.assertEqual(dialog.list.currentRow(), 0)
+            dialog.rx_spin.setValue(15.0)
+            dialog.rz_spin.setValue(-20.0)
+
+            dialog._mirror_x()
+            self.assertEqual(len(dialog._cubes), 2)
+            mirrored = dialog._cubes[1].box
+            self.assertEqual(mirrored.origin, (-8.0, 0.0, 0.0))
+            self.assertEqual(mirrored.rotation, (15.0, 0.0, 20.0))
+            self.assertEqual(mirrored.pivot, (-4.0, 4.0, 4.0))
+
+            dialog.array_count.setValue(3)
+            dialog.array_axis.setCurrentIndex(1)
+            dialog._array_copy()
+            self.assertEqual(len(dialog._cubes), 4)
+            self.assertEqual(dialog._cubes[2].box.origin[1], 8.0)
+            self.assertEqual(dialog._cubes[3].box.origin[1], 16.0)
+            self.assertEqual(dialog._cubes[3].box.rotation, (15.0, 0.0, 20.0))
+
+            dialog._save()
+            self.assertTrue(dialog.saved)
+        finally:
+            dialog.deleteLater()
+            self.app.processEvents()
+
+        saved = json.loads((root / relative).read_text(encoding="utf-8"))
+        self.assertEqual(len(saved["elements"]), 4)
+        self.assertEqual(saved["elements"][1]["rotation"], [15.0, 0.0, 20.0])
+        self.assertEqual(saved["elements"][2]["from"], [-8.0, 8.0, 0.0])
 
     def test_dialog_isolates_parts_and_orbit_camera(self) -> None:
         from PySide6.QtCore import Qt

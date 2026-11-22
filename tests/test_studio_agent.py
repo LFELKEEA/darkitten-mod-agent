@@ -19,6 +19,11 @@ class StudioAgentToolTest(unittest.TestCase):
         worker._cancel = None
         worker._build_log = lambda text: None
         worker.project_created = SimpleNamespace(emit=lambda path: None)
+        worker.kernel = None
+        worker._code_dirty = False
+        worker._code_edits = 0
+        worker._build_code_mark = 0
+        worker._final_build_attempted = False
         return worker
 
     def test_studio_plan_dispatch(self) -> None:

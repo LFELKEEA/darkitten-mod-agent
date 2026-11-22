@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from . import arttools
+from .kernel.tools import texture as texgen
 
 KINDS = ("entity", "item", "block")
 _LETTERS = "ABCDEFGH"
@@ -200,52 +201,105 @@ def _item_rows(shape: str, seed: int) -> list[list[str]]:
     return rows
 
 
+def _noise16(seed: int, cell: int = 4) -> list[list[float]]:
+    """Small deterministic value-noise field for the design-studio previews.
+
+    The old block rows used ``y % 4`` and ``(x + y) % 7`` lattice formulas,
+    which tiled visibly.  This keeps the same hand-written PNG pipeline but
+    removes the obvious periods.
+    """
+    rng = random.Random(seed)
+    cell = max(1, int(cell))
+    gw = 16 // cell + 2
+    lattice = [[rng.random() for _ in range(gw)] for _ in range(gw)]
+
+    def sample(x: int, y: int) -> float:
+        gx, gy = x / cell, y / cell
+        x0, y0 = int(gx), int(gy)
+        fx, fy = gx - x0, gy - y0
+        fx = fx * fx * (3 - 2 * fx)
+        fy = fy * fy * (3 - 2 * fy)
+        x1, y1 = min(gw - 1, x0 + 1), min(gw - 1, y0 + 1)
+        a = lattice[y0][x0]
+        b = lattice[y0][x1]
+        c = lattice[y1][x0]
+        d = lattice[y1][x1]
+        return (a * (1 - fx) + b * fx) * (1 - fy) + (c * (1 - fx) + d * fx) * fy
+
+    return [[sample(x, y) for x in range(16)] for y in range(16)]
+
+
 def _block_rows(style: str, seed: int) -> list[list[str]]:
     rng = random.Random(seed)
     rows = _blank(16, 16, "a")
+    field = _noise16(seed + 1, 4)
+    fine = _noise16(seed + 2, 2)
     if style == "wood":
+        board = 4
         for y in range(16):
+            if y % board == 0:
+                _rect(rows, 0, y, 15, y, "d")
+                continue
             for x in range(16):
-                if y % 4 == 0:
-                    rows[y][x] = "d"
-                elif rng.random() < 0.12:
+                grain = 0.7 * field[y][x] + 0.3 * fine[y][x]
+                if grain > 0.76:
                     rows[y][x] = "b"
-        _rect(rows, 7, 0, 8, 15, "c")
+                elif grain < 0.22:
+                    rows[y][x] = "d"
+        seam = 5 + seed % 6
+        _rect(rows, seam, 0, seam, 15, "d")
+        _rect(rows, seam + 1, 1, seam + 1, 6, "c")
     elif style == "metal":
         for y in range(16):
             for x in range(16):
                 if x in (0, 15) or y in (0, 15):
                     rows[y][x] = "d"
-                elif rng.random() < 0.1:
-                    rows[y][x] = "b"
-        _rect(rows, 2, 2, 4, 3, "b")
-        _rect(rows, 11, 11, 13, 13, "c")
+                else:
+                    value = 0.75 * field[y][x] + 0.25 * fine[y][x]
+                    rows[y][x] = "b" if value > 0.78 else ("c" if value < 0.22 else "a")
+        for cx, cy in ((2, 2), (13, 2), (2, 13), (13, 13), (7, 7)):
+            rows[cy][cx] = "b"
+            if cx + 1 < 16:
+                rows[cy][cx + 1] = "d"
+            if cy + 1 < 16:
+                rows[cy + 1][cx] = "d"
     elif style == "crystal":
         for y in range(16):
             for x in range(16):
-                if (x + y) % 7 in (0, 1):
+                value = 0.65 * field[y][x] + 0.35 * fine[y][x]
+                if abs(field[y][x] - 0.5) + abs(fine[y][x] - 0.5) * 0.4 < 0.05:
                     rows[y][x] = "c"
-                elif (x + y) % 11 == 0:
+                elif value > 0.72:
                     rows[y][x] = "b"
-        _rect(rows, 0, 0, 15, 0, "d")
+                elif value < 0.36:
+                    rows[y][x] = "d"
     elif style == "plant":
-        for _ in range(26):
-            x, y = rng.randrange(16), rng.randrange(16)
-            rows[y][x] = rng.choice(["b", "c", "d"])
-        _rect(rows, 4, 9, 5, 14, "d")
-        _rect(rows, 10, 6, 11, 14, "d")
+        for y in range(16):
+            for x in range(16):
+                value = 0.6 * field[y][x] + 0.4 * fine[y][x]
+                if value > 0.62:
+                    rows[y][x] = "b" if value > 0.78 else "c"
+                elif value < 0.28:
+                    rows[y][x] = "d"
+        for x in (4, 10):
+            _rect(rows, x, 8, x + 1, 14, "d")
     else:
         for y in range(16):
             for x in range(16):
-                roll = rng.random()
-                if roll < 0.12:
-                    rows[y][x] = "d"
-                elif roll < 0.22:
+                value = 0.7 * field[y][x] + 0.3 * fine[y][x]
+                if value > 0.74:
                     rows[y][x] = "b"
-                elif roll < 0.27:
+                elif value < 0.26:
+                    rows[y][x] = "d"
+                elif value < 0.34:
                     rows[y][x] = "c"
-        _rect(rows, 0, 0, 15, 0, "d")
-        _rect(rows, 0, 15, 15, 15, "d")
+        # a couple of hairline cracks, no repeating grid
+        for _ in range(3):
+            x = rng.randrange(2, 14)
+            y = rng.randrange(2, 14)
+            for step in range(rng.randint(3, 6)):
+                if 0 <= x + step < 16 and 0 <= y + step // 2 < 16:
+                    rows[y + step // 2][x + step] = "d"
     return rows
 
 
@@ -292,6 +346,7 @@ def _entity_rows(shape: str, seed: int) -> list[list[str]]:
 
 
 def _entity_atlas_rows(shape: str, seed: int) -> list[list[str]]:
+    """Deprecated preview-only fallback; kept for old saved sessions."""
     rng = random.Random(seed + 17)
     rows = _blank(64, 64, "a")
     for y in range(64):
@@ -300,13 +355,21 @@ def _entity_atlas_rows(shape: str, seed: int) -> list[list[str]]:
                 rows[y][x] = "b"
             elif rng.random() < 0.06:
                 rows[y][x] = "d"
-    _rect(rows, 0, 0, 63, 1, "c")
-    _rect(rows, 0, 0, 1, 63, "c")
-    _rect(rows, 0, 63, 63, 63, "d")
-    _rect(rows, 63, 0, 63, 63, "d")
-    if shape == "winged":
-        _rect(rows, 32, 32, 63, 63, "c")
     return rows
+
+
+def _write_entity_atlas(path: Path, shape: str, seed: int, palette: dict[str, str]) -> None:
+    layout = "humanoid" if shape == "biped" else "quadruped"
+    texgen.generate_entity(
+        path,
+        layout=layout,
+        base=palette.get("a") or "#8a8a8a",
+        accent=palette.get("c") or "#5a3fbf",
+        seed=seed,
+        size=(64, 64),
+        variant=shape,
+        transparent=True,
+    )
 
 
 def _png(path: Path, rows: list[list[str]], palette: dict[str, str], scale: int = 1) -> None:
@@ -342,99 +405,71 @@ def _blockstate(name: str, namespace: str) -> dict[str, Any]:
     return {"variants": {"": {"model": f"{namespace}:block/{name}"}}}
 
 
-def _cube(origin: list[float], size: list[float], uv: list[int]) -> dict[str, Any]:
-    return {"origin": origin, "size": size, "uv": uv}
+def _uv_for(layout: str, part: str, variant: str = "") -> list[int]:
+    for box in texgen.entity_boxes(layout, variant=variant):
+        if str(box.get("part")) == part:
+            return [int(box["uv"][0]), int(box["uv"][1])]
+    return [0, 0]
 
 
 def _entity_model(name: str, shape: str) -> dict[str, Any]:
+    """Build a GeckoLib geometry that shares its UV table with the atlas.
+
+    The previous model used hand-written UVs that ran past 64 (body, tail,
+    wings) and did not match the texture at all, so the game sampled empty
+    pixels.  Sizes and UV origins now come from the same table used by
+    :func:`texture.generate_entity`.
+    """
     if shape == "biped":
-        bones = [
-            {
-                "name": "body",
-                "pivot": [0, 12, 0],
-                "cubes": [_cube([-4, 8, -2], [8, 12, 4], [16, 16])],
-            },
-            {
-                "name": "head",
-                "pivot": [0, 20, 0],
-                "cubes": [_cube([-4, 20, -4], [8, 8, 8], [0, 0])],
-            },
-            {
-                "name": "right_arm",
-                "pivot": [-4, 18, 0],
-                "cubes": [_cube([-8, 6, -2], [4, 12, 4], [0, 16])],
-            },
-            {
-                "name": "left_arm",
-                "pivot": [4, 18, 0],
-                "cubes": [_cube([4, 6, -2], [4, 12, 4], [32, 16])],
-            },
-            {
-                "name": "right_leg",
-                "pivot": [-2, 8, 0],
-                "cubes": [_cube([-4, 0, -2], [4, 8, 4], [0, 32])],
-            },
-            {
-                "name": "left_leg",
-                "pivot": [2, 8, 0],
-                "cubes": [_cube([0, 0, -2], [4, 8, 4], [16, 32])],
-            },
+        layout = "humanoid"
+        variant = ""
+        spec = [
+            ("body", (-4, 12, -2), (8, 12, 4), (0, 12, 0)),
+            ("head", (-4, 24, -4), (8, 8, 8), (0, 24, 0)),
+            ("right_arm", (-8, 12, -2), (4, 12, 4), (-4, 12, 0)),
+            ("left_arm", (4, 12, -2), (4, 12, 4), (4, 12, 0)),
+            ("right_leg", (-4, 0, -2), (4, 12, 4), (-2, 12, 0)),
+            ("left_leg", (0, 0, -2), (4, 12, 4), (2, 12, 0)),
         ]
-        bounds = [1.0, 2.2, 0.6]
+        bounds = [1.0, 2.0, 0.6]
     else:
-        bones = [
-            {
-                "name": "body",
-                "pivot": [0, 12, 0],
-                "cubes": [_cube([-5, 9, -8], [10, 8, 16], [16, 8])],
-            },
-            {
-                "name": "head",
-                "pivot": [0, 15, -8],
-                "cubes": [_cube([-4, 12, -16], [8, 8, 8], [0, 0])],
-            },
-            {
-                "name": "tail",
-                "pivot": [0, 15, 8],
-                "cubes": [_cube([-1, 12, 8], [2, 2, 10], [48, 0])],
-            },
-            {
-                "name": "leg_fl",
-                "pivot": [-4, 10, -6],
-                "cubes": [_cube([-5, 0, -7], [3, 10, 3], [0, 16])],
-            },
-            {
-                "name": "leg_fr",
-                "pivot": [4, 10, -6],
-                "cubes": [_cube([2, 0, -7], [3, 10, 3], [12, 16])],
-            },
-            {
-                "name": "leg_bl",
-                "pivot": [-4, 10, 6],
-                "cubes": [_cube([-5, 0, 4], [3, 10, 3], [24, 16])],
-            },
-            {
-                "name": "leg_br",
-                "pivot": [4, 10, 6],
-                "cubes": [_cube([2, 0, 4], [3, 10, 3], [36, 16])],
-            },
+        layout = "quadruped"
+        variant = "winged" if shape == "winged" else ""
+        spec = [
+            ("body", (-4, 9, -6), (8, 6, 12), (0, 12, 0)),
+            ("head", (-4, 10, -14), (8, 8, 8), (0, 14, -6)),
+            ("tail", (-1, 10, 6), (2, 2, 8), (0, 12, 6)),
+            ("leg_fl", (-4, 0, -8), (3, 10, 3), (-2.5, 10, -6.5)),
+            ("leg_fr", (1, 0, -8), (3, 10, 3), (2.5, 10, -6.5)),
+            ("leg_bl", (-4, 0, 5), (3, 10, 3), (-2.5, 10, 6.5)),
+            ("leg_br", (1, 0, 5), (3, 10, 3), (2.5, 10, 6.5)),
+            ("ear_l", (-3, 17, -13), (2, 2, 1), (-2, 18, -13)),
+            ("ear_r", (1, 17, -13), (2, 2, 1), (2, 18, -13)),
         ]
         if shape == "winged":
-            bones.extend(
+            spec.extend(
                 [
-                    {
-                        "name": "wing_l",
-                        "pivot": [-5, 16, 0],
-                        "cubes": [_cube([-13, 12, -2], [8, 8, 1], [32, 32])],
-                    },
-                    {
-                        "name": "wing_r",
-                        "pivot": [5, 16, 0],
-                        "cubes": [_cube([5, 12, -2], [8, 8, 1], [48, 32])],
-                    },
+                    ("wing_l", (-13, 10, -2), (8, 8, 1), (-5, 14, -2)),
+                    ("wing_r", (5, 10, -2), (8, 8, 1), (5, 14, -2)),
                 ]
             )
-        bounds = [1.2, 1.6, 1.2]
+        bounds = [2.2, 2.0, 1.6]
+
+    bones: list[dict[str, Any]] = []
+    for part, origin, size, pivot in spec:
+        bones.append(
+            {
+                "name": part,
+                "pivot": list(pivot),
+                "cubes": [
+                    {
+                        "origin": list(origin),
+                        "size": list(size),
+                        "uv": _uv_for(layout, part, variant),
+                    }
+                ],
+            }
+        )
     return {
         "format_version": "1.12.0",
         "minecraft:geometry": [
@@ -558,9 +593,8 @@ class DesignSession:
         palette = _palette(seed, f"{self.description} {extra}", shift)
         if self.kind == "entity":
             concept = _entity_rows(self.shape, seed)
-            atlas = _entity_atlas_rows(self.shape, seed)
             _png(folder / "preview.png", concept, palette, scale=8)
-            _png(folder / "texture.png", atlas, palette, scale=1)
+            _write_entity_atlas(folder / "texture.png", self.shape, seed, palette)
             model = _entity_model(self.name, self.shape)
             (folder / "model.geo.json").write_text(
                 json.dumps(model, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -625,9 +659,8 @@ class DesignSession:
         palette = _palette(seed, f"{self.description} {extra}", 0.0)
         if self.kind == "entity":
             concept = _entity_rows(self.shape, seed)
-            atlas = _entity_atlas_rows(self.shape, seed)
             _png(folder / "preview.png", concept, palette, scale=8)
-            _png(folder / "texture.png", atlas, palette, scale=1)
+            _write_entity_atlas(folder / "texture.png", self.shape, seed, palette)
         elif self.kind == "block":
             style = _block_style(f"{self.description} {extra}")
             texture = _block_rows(style, seed)
